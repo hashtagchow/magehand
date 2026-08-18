@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MageHand</string>
+
+    <!-- Navigation / screen titles -->
+    <string name="title_login">Sign in</string>
+    <string name="title_character_list">Characters</string>
+    <string name="title_character_home">Character</string>
+    <string name="title_new_character">New character</string>
+    <string name="title_settings">Settings</string>
+
+    <!-- Character home tabs -->
+    <string name="tab_tracker">Tracker</string>
+    <string name="tab_sheet">Sheet</string>
+
+    <!-- Screen 3: tracker tab -->
+    <string name="tracker_section_slots">Spell slots</string>
+    <string name="tracker_section_resources">Resources</string>
+    <string name="tracker_section_consumables">Consumables</string>
+    <string name="tracker_section_conditions">Conditions</string>
+    <string name="tracker_hit_points">Hit points</string>
+    <string name="tracker_temp_hp">+%1$d temp HP</string>
+    <string name="tracker_damage">Take damage</string>
+    <string name="tracker_heal">Heal</string>
+    <string name="tracker_use_one">Use one %1$s</string>
+    <string name="tracker_add_one">Add one %1$s</string>
+    <string name="tracker_concentrating">Concentrating: %1$s</string>
+    <string name="tracker_drop_concentration">Drop concentration</string>
+    <string name="tracker_short_rest">Short</string>
+    <string name="tracker_long_rest">Long</string>
+    <string name="tracker_snapshot">Showing the last saved copy of this sheet.</string>
+    <string name="tracker_snapshot_synced">Showing the last saved copy — synced %1$s.</string>
+    <string name="tracker_empty">Nothing to track yet</string>
+    <string name="tracker_empty_hint">This sheet has no spell slots, resources or conditions MageHand can follow. Open the Sheet tab to see everything.</string>
+    <string name="tracker_writes_need_live">Not connected — the tracker is showing the last saved copy of this sheet, so spending, healing and resting are unavailable until it reconnects.</string>
+    <string name="tracker_spend_one">Spend one %1$s</string>
+    <string name="tracker_restore_one">Restore one %1$s</string>
+    <string name="tracker_hp_pad_title">Hit points: %1$d / %2$d</string>
+    <string name="tracker_pad_set">Set</string>
+    <string name="tracker_rest_will_reset">This will reset:</string>
+    <string name="tracker_rest_nothing">Nothing on this tracker resets on this rest.</string>
+    <string name="tracker_rest_hp_note">The server also applies whatever else this sheet resets on a long rest — hit points, hit dice and any rest triggers on it.</string>
+    <string name="tracker_rest_not_undoable">A rest cannot be undone.</string>
+    <string name="tracker_rest_confirm">Take the rest</string>
+    <string name="tracker_history_title">This session</string>
+    <string name="tracker_history_subtitle">Everything MageHand has sent to DiceCloud since you opened this character. Only the most recent change can be undone.</string>
+    <string name="tracker_history_empty">Nothing sent yet.</string>
+
+    <!-- Screen 5: tracker customize sheet -->
+    <string name="customize_title">Customize tracker</string>
+    <string name="customize_subtitle">Reorder, hide and pin rows for this character. Saved on this device only — nothing is sent to DiceCloud.</string>
+    <string name="customize_reset">Reset</string>
+    <string name="customize_hidden">Hidden</string>
+    <string name="customize_items">Pin an item</string>
+    <string name="customize_items_search">Search items</string>
+    <string name="customize_items_none">No items match.</string>
+    <string name="customize_items_more">…and %1$d more. Narrow the search to see them.</string>
+    <string name="customize_item_quantity">Quantity %1$d</string>
+    <string name="customize_move_up">Move %1$s up</string>
+    <string name="customize_move_down">Move %1$s down</string>
+    <string name="customize_hide">Hide %1$s</string>
+    <string name="customize_show">Show</string>
+    <string name="customize_accent">Accent colour</string>
+    <string name="customize_accent_default">Default</string>
+
+    <!-- Screen 1: sign in — server line + custom server (official default) -->
+    <string name="server_official">dicecloud.com</string>
+    <string name="credentials_server_line">Signing in to %1$s</string>
+    <string name="server_custom_label">Server address</string>
+    <string name="server_custom_placeholder">https://your-dicecloud.example.com</string>
+    <string name="server_https_note">MageHand connects over https only.</string>
+    <string name="action_use_custom_server">Use a self-hosted server</string>
+    <string name="action_use_official_server">Use the official server</string>
+
+    <!-- Screen 1b: credentials -->
+    <string name="credentials_headline">Sign in to DiceCloud</string>
+    <string name="credentials_username_label">Username or email</string>
+    <string name="credentials_password_label">Password</string>
+    <string name="credentials_token_note">Your password is sent once to sign you in and is never stored. The sign-in token it returns is kept encrypted on this device.</string>
+
+    <!-- Screen 2: character list -->
+    <string name="character_list_empty">No characters yet</string>
+    <string name="character_list_empty_hint">Tap + to create one in DiceCloud.</string>
+    <string name="character_badge_shared">Shared</string>
+
+    <!-- Connection state -->
+    <string name="connection_live">Live</string>
+    <string name="connection_connecting">Connecting…</string>
+    <string name="connection_reconnecting">Reconnecting…</string>
+    <string name="connection_offline">Offline — showing cached data</string>
+    <string name="connection_offline_synced">Offline — synced %1$s</string>
+    <string name="connection_auth_failed">Signed out by the server — sign in again</string>
+
+    <!-- Screen 6: settings -->
+    <string name="settings_accounts">Accounts</string>
+    <string name="settings_no_accounts">No accounts on this device.</string>
+    <string name="settings_signout_note">Signing out removes the token from this device only. DiceCloud has no \"log out everywhere\" API — do that on the website if you need it.</string>
+    <string name="signout_dialog_title">Sign out?</string>
+    <string name="signout_dialog_body">The sign-in token is deleted from this device. Your characters stay on the server.</string>
+
+    <!-- Actions -->
+    <string name="action_settings">Settings</string>
+    <string name="action_back">Back</string>
+    <string name="action_close">Close</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_undo">Undo</string>
+    <string name="action_continue">Continue</string>
+    <string name="action_sign_in">Sign in</string>
+    <string name="action_sign_out">Sign out</string>
+    <string name="action_add_account">Add another account</string>
+    <string name="action_new_character">New character</string>
+</resources>

@@ -1,0 +1,269 @@
+package com.hashtagchow.magehand.ui.screens.characterhome.tracker
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import com.hashtagchow.magehand.core.model.ConditionToggle
+import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.ResetRule
+import com.hashtagchow.magehand.core.model.RestKind
+import com.hashtagchow.magehand.core.model.TrackedResource
+import com.hashtagchow.magehand.core.model.TrackerBoard
+import com.hashtagchow.magehand.core.model.TrackerKind
+import com.hashtagchow.magehand.core.model.TrackerWrite
+import com.hashtagchow.magehand.core.model.TrackerWriteFailure
+import com.hashtagchow.magehand.core.model.TrackerWriteKind
+import java.time.ZoneId
+
+/**
+ * The write half of the board → UI mapping, and the two derivations the tracker gets wrong
+ * in ways a screenshot cannot show: **which rows a rest restores**, and **which single
+ * history entry may be undone**.
+ *
+ * Pure, so it runs without a device, a Compose runtime or a clock — same reasoning as
+ * `TrackerUiStateTest`, whose fixtures these deliberately mirror.
+ */
+class TrackerWriteStateTest {
+
+    private val zone = ZoneId.of("Africa/Johannesburg")
+
+    private val shortRestResource = TrackedResource(
+        propertyId = "ki",
+        kind = TrackerKind.RESOURCE,
+        name = "Ki",
+        value = 1,
+        total = 4,
+        reset = ResetRule.SHORT_REST,
+    )
+    private val longRestSlot = TrackedResource(
+        propertyId = "slot1",
+        kind = TrackerKind.SPELL_SLOT,
+        name = "1st Level",
+        value = 3,
+        total = 4,
+        reset = ResetRule.LONG_REST,
+        spellSlotLevel = 1,
+    )
+    private val noResetResource = TrackedResource(
+        propertyId = "charges",
+        kind = TrackerKind.RESOURCE,
+        name = "Wand charges",
+        value = 2,
+        total = 7,
+        reset = null,
+    )
+
+    private fun state(
+        canWrite: Boolean = true,
+        canUndo: Boolean = false,
+        history: List<TrackerWrite> = emptyList(),
+        board: TrackerBoard = TrackerBoard(
+            slots = listOf(longRestSlot),
+            resources = listOf(shortRestResource, noResetResource),
+        ),
+    ) = toTrackerUiState(
+        creatureId = "c1",
+        board = board,
+        connection = if (canWrite) ConnectionState.LIVE else ConnectionState.OFFLINE,
+        lastSyncedAt = null,
+        isShowingSnapshot = false,
+        canWrite = canWrite,
+        canUndo = canUndo,
+        history = history,
+        zone = zone,
+    )
+
+    private fun write(
+        id: Long,
+        kind: TrackerWriteKind = TrackerWriteKind.SPEND,
+        name: String = "1st Level",
+        amount: Int = 1,
+        undoable: Boolean = true,
+        undone: Boolean = false,
+    ) = TrackerWrite(
+        id = id,
+        kind = kind,
+        targetName = name,
+        amount = amount,
+        at = 1_755_463_920_000L,
+        undoable = undoable,
+        undone = undone,
+    )
+
+    // --- canWrite ---------------------------------------------------------------
+
+    @Test
+    fun `writes are only offered while the session is live`() {
+        assertTrue(state(canWrite = true).canWrite)
+        assertFalse(state(canWrite = false).canWrite)
+    }
+
+    @Test
+    fun `undo is not offered while the session cannot write`() {
+        // The inverse op is still on the stack; it just has nowhere to go. Showing an
+        // enabled UNDO that the queue would refuse is the surprise 04 rules out.
+        assertFalse(state(canWrite = false, canUndo = true, history = listOf(write(1))).canUndo)
+        assertTrue(state(canWrite = true, canUndo = true, history = listOf(write(1))).canUndo)
+    }
+
+    // --- the history sheet ------------------------------------------------------
+
+    @Test
+    fun `only the newest reversible entry offers undo`() {
+        val rows = state(
+            history = listOf(write(3), write(2), write(1)),
+        ).history
+
+        assertEquals(listOf(true, false, false), rows.map { it.canUndo })
+        assertEquals(listOf(3L, 2L, 1L), rows.map { it.id })
+    }
+
+    @Test
+    fun `an entry that is no longer reversible is skipped over, not silently dropped`() {
+        // What a rest leaves behind: everything is still listed, nothing is undoable.
+        val rows = state(
+            history = listOf(
+                write(3, kind = TrackerWriteKind.LONG_REST, undoable = false),
+                write(2, undoable = false),
+                write(1, undoable = false),
+            ),
+        ).history
+
+        assertEquals(3, rows.size)
+        assertTrue("a rest must leave nothing undoable", rows.none { it.canUndo })
+    }
+
+    @Test
+    fun `an undone entry stays in the list and says so`() {
+        val row = state(history = listOf(write(1, undoable = false, undone = true))).history.single()
+        assertTrue(row.undone)
+        assertFalse(row.canUndo)
+    }
+
+    @Test
+    fun `no history entry is undoable while offline`() {
+        assertTrue(state(canWrite = false, history = listOf(write(1))).history.none { it.canUndo })
+    }
+
+    @Test
+    fun `history rows carry the wall-clock time in the injected zone`() {
+        assertEquals("22:52", state(history = listOf(write(1))).history.single().at)
+    }
+
+    // --- what a rest will reset -------------------------------------------------
+
+    @Test
+    fun `a short rest lists only short-rest rows`() {
+        val listed = state().rowsRestoredBy(RestKind.SHORT)
+        assertEquals(listOf("Ki"), listed.map { it.label })
+    }
+
+    @Test
+    fun `a long rest lists every row with a reset rule`() {
+        val listed = state().rowsRestoredBy(RestKind.LONG)
+        assertEquals(listOf("1st Level", "Ki"), listed.map { it.label })
+    }
+
+    @Test
+    fun `a row with no reset rule is never listed`() {
+        // A wand's charges recharge at dawn on their own terms; claiming a rest restores
+        // them would be the dialog lying about what it is about to do.
+        assertTrue(RestKind.entries.all { kind -> state().rowsRestoredBy(kind).none { it.label == "Wand charges" } })
+    }
+
+    @Test
+    fun `rows already full are still listed, so the dialog is honest about the outcome`() {
+        val full = longRestSlot.copy(value = 4)
+        val listed = state(board = TrackerBoard(slots = listOf(full))).rowsRestoredBy(RestKind.LONG)
+        assertEquals(1, listed.size)
+        assertEquals(4, listed.single().value)
+    }
+
+    // --- the concentration ✕ ----------------------------------------------------
+
+    @Test
+    fun `the concentration cross is live when the source is a flippable toggle`() {
+        val board = TrackerBoard(
+            activeToggles = listOf(
+                ConditionToggle("t1", "Concentration: Bless", enabled = true, flippable = true),
+            ),
+            concentratingOn = "Concentration: Bless",
+        )
+        assertEquals("t1", state(board = board).concentrationToggleId)
+    }
+
+    @Test
+    fun `the concentration cross is inert when the source is a computed toggle`() {
+        // Shown on the chip row, but `flipToggle` would refuse it, so the ✕ must not offer.
+        val board = TrackerBoard(
+            activeToggles = listOf(
+                ConditionToggle("t1", "Concentration: Bless", enabled = true, flippable = false),
+            ),
+            concentratingOn = "Concentration: Bless",
+        )
+        assertNull(state(board = board).concentrationToggleId)
+    }
+
+    @Test
+    fun `the concentration cross is inert when the source is not on the chip row`() {
+        // 03 §5 lets a `buff` drive the banner, and 02 says flipToggle rejects non-toggles.
+        val board = TrackerBoard(concentratingOn = "Bless")
+        assertNull(state(board = board).concentrationToggleId)
+    }
+
+    // --- the strings the snackbar and the sheet show ------------------------------
+
+    @Test
+    fun `a coalesced burst describes itself as one write of the summed amount`() {
+        assertEquals("Spent 3 × 1st Level", write(1, amount = 3).describe())
+    }
+
+    @Test
+    fun `every write kind has its own sentence`() {
+        val described = TrackerWriteKind.entries.map { kind ->
+            write(1, kind = kind, name = "Rage", amount = 2).describe()
+        }
+        assertEquals(
+            "adding a write kind without giving it a sentence would show a stale one",
+            TrackerWriteKind.entries.size,
+            described.toSet().size,
+        )
+        assertTrue(described.none { it.isBlank() })
+    }
+
+    @Test
+    fun `hp writes read as damage and healing, not as spending`() {
+        assertEquals("Took 5 damage", write(1, kind = TrackerWriteKind.TAKE_DAMAGE, amount = 5).describe())
+        assertEquals("Healed 5", write(1, kind = TrackerWriteKind.HEAL, amount = 5).describe())
+    }
+
+    @Test
+    fun `a failure prefers the two cases with their own copy over the server's words`() {
+        val offline = failure(refusedOffline = true, reason = "Method not allowed")
+        val limited = failure(rateLimited = true, reason = "too many")
+        assertEquals("Not saved — you're offline", offline.describe())
+        assertEquals("Too fast — that one didn't save", limited.describe())
+    }
+
+    @Test
+    fun `a failure otherwise quotes the server verbatim`() {
+        assertEquals("Not saved: Value must be a number", failure(reason = "Value must be a number").describe())
+        assertEquals("That didn't save", failure(reason = null).describe())
+    }
+
+    private fun failure(
+        reason: String?,
+        refusedOffline: Boolean = false,
+        rateLimited: Boolean = false,
+    ) = TrackerWriteFailure(
+        id = 1,
+        kind = TrackerWriteKind.SPEND,
+        propertyId = "slot1",
+        targetName = "1st Level",
+        reason = reason,
+        refusedOffline = refusedOffline,
+        rateLimited = rateLimited,
+    )
+}

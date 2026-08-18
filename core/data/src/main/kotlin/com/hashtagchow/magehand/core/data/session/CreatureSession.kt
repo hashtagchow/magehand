@@ -1,0 +1,288 @@
+package com.hashtagchow.magehand.core.data.session
+
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.stateIn
+import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
+import com.hashtagchow.magehand.core.data.db.TrackerPrefEntity
+import com.hashtagchow.magehand.core.data.db.toDomain
+import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
+import com.hashtagchow.magehand.core.data.tracker.CreatureSheet
+import com.hashtagchow.magehand.core.data.tracker.TrackerEngine
+import com.hashtagchow.magehand.core.data.write.OptimisticOverlay
+import com.hashtagchow.magehand.core.data.write.WriteQueue
+import com.hashtagchow.magehand.core.data.write.WriteQueueConfig
+import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.TrackerBoard
+import com.hashtagchow.magehand.core.model.TrackerOverride
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
+
+data class CreatureSessionConfig(
+    /**
+     * How long the reconnect loop may run before the session calls it
+     * [ConnectionState.OFFLINE] — 06's "retries exhausted-for-now".
+     *
+     * WP2's backoff is 1 s → 60 s, so a real outage crosses this within the first few
+     * attempts, while a wifi hiccup that recovers in a couple of seconds never shows the
+     * offline banner at all.
+     */
+    val offlineAfter: Duration = 20.seconds,
+    val writeQueue: WriteQueueConfig = WriteQueueConfig(),
+)
+
+/**
+ * One open character screen.
+ *
+ * Owns the `singleCharacter` subscription (through [CreatureFeed]), the snapshot fallback,
+ * the tracker preference layer and the [WriteQueue], and publishes exactly two things the
+ * UI needs: [connectionState] and [board].
+ *
+ * The read path, in the order 06-offline-and-sync.md specifies:
+ *
+ * ```
+ * Room snapshot (inflate) ─┐
+ *                          ├─► TrackerEngine ─► optimistic overlay ─► board
+ * DDP mirror (wins) ───────┘        ▲
+ *                          tracker_prefs ──────┘
+ * ```
+ *
+ * "Mirror state always wins over snapshot" is implemented literally: the snapshot is used
+ * only while the mirror holds no properties for this creature.
+ *
+ * Plain constructor by design; the sibling work package owns the Hilt wiring.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+class CreatureSession(
+    val accountId: String,
+    val creatureId: String,
+    private val feed: CreatureFeed,
+    private val snapshotStore: SnapshotStore,
+    private val trackerPrefDao: TrackerPrefDao,
+    private val scope: CoroutineScope,
+    /**
+     * Whether the device believes it has a network at all. Wired to `ConnectivityManager`
+     * by the UI layer; `true` by default so a caller that does not care still gets the
+     * timeout-driven OFFLINE.
+     */
+    networkAvailable: StateFlow<Boolean> = MutableStateFlow(true),
+    private val config: CreatureSessionConfig = CreatureSessionConfig(),
+) {
+
+    /** Set when the caller wants [refreshSnapshot] to be able to do a REST fetch. */
+    var serverUrl: String? = null
+    var tokenProvider: (suspend () -> String?)? = null
+
+    private val _snapshot = MutableStateFlow<CreatureSheet?>(null)
+    private val _lastSyncedAt = MutableStateFlow<Long?>(null)
+
+    /** Epoch millis of the cached snapshot — the "Offline — synced HH:MM" banner's input. */
+    val lastSyncedAt: StateFlow<Long?> = _lastSyncedAt.asStateFlow()
+
+    /**
+     * 06's four-state model, completed.
+     *
+     * `DdpClient` emits only `CONNECTING`, `LIVE` and `AUTH_FAILED`
+     * (docs/verification/WP2.md deviation #1); deriving `OFFLINE` is this layer's job,
+     * because only the data layer knows there is a snapshot to fall back to.
+     *
+     * Also note `LIVE` here means connected **and the subscription is ready** — 06's own
+     * definition — which `DdpClient` deliberately does not implement at the connection
+     * level (WP2 deviation #2).
+     */
+    val connectionState: StateFlow<ConnectionState> =
+        combine(feed.connectionState, feed.isReady, networkAvailable) { state, ready, network ->
+            Triple(state, ready, network)
+        }
+            .distinctUntilChanged()
+            .flatMapLatest { (state, ready, network) ->
+                when {
+                    state == ConnectionState.AUTH_FAILED -> flowOf(ConnectionState.AUTH_FAILED)
+                    state == ConnectionState.LIVE && ready -> flowOf(ConnectionState.LIVE)
+                    // Connected but the publication has not finished: still "connecting"
+                    // from the user's point of view, and writes stay refused.
+                    state == ConnectionState.LIVE -> flowOf(ConnectionState.CONNECTING)
+                    !network -> flowOf(ConnectionState.OFFLINE)
+                    else -> flow {
+                        emit(ConnectionState.CONNECTING)
+                        delay(config.offlineAfter)
+                        emit(ConnectionState.OFFLINE)
+                    }
+                }
+            }
+            .stateIn(scope, SharingStarted.Eagerly, ConnectionState.CONNECTING)
+
+    /**
+     * Writes for this character. Refuses everything unless [connectionState] is
+     * [ConnectionState.LIVE] — which, per above, also means the subscription is ready, so
+     * a write can never be aimed at a sheet we have not actually loaded.
+     */
+    val writeQueue: WriteQueue = WriteQueue(
+        caller = feed,
+        connectionState = connectionState,
+        scope = scope,
+        config = config.writeQueue,
+    )
+
+    val overrides: Flow<List<TrackerOverride>> =
+        trackerPrefDao.observe(accountId, creatureId).map { rows -> rows.map { it.toDomain() } }
+
+    /**
+     * The same flow, but pre-seeded with "no overrides".
+     *
+     * [board] combines four sources and cannot emit until every one of them has. Gating
+     * the first render on a Room round-trip would mean a blank tracker for as long as
+     * SQLite takes to answer, for a table that is empty on almost every character.
+     */
+    private val overridesForBoard: Flow<List<TrackerOverride>> =
+        overrides.onStart { emit(emptyList()) }.distinctUntilChanged()
+
+    /** The mirror, assembled into an engine input. */
+    private val liveSheet: Flow<CreatureSheet> = combine(
+        feed.documents(CreatureSheet.CREATURE_PROPERTIES),
+        feed.documents(CreatureSheet.CREATURES),
+        feed.documents(CreatureSheet.CREATURE_VARIABLES),
+    ) { properties, creatures, variables ->
+        CreatureSheet.fromMirror(properties, creatures, variables, creatureId)
+    }
+
+    /**
+     * The engine's input: the mirror when it holds anything, the Room snapshot otherwise.
+     * 06's "mirror state always wins over snapshot", in one place so the two boards below
+     * cannot disagree about which source they are reading.
+     */
+    private val sheet: Flow<CreatureSheet> = combine(liveSheet, _snapshot) { live, snapshot ->
+        if (live.properties.isNotEmpty()) live else snapshot ?: CreatureSheet.EMPTY
+    }
+
+    /** What the tracker renders. */
+    val board: StateFlow<TrackerBoard> = combine(
+        sheet,
+        overridesForBoard,
+        writeQueue.optimistic,
+    ) { sheet, prefs, overlay ->
+        overlay.applyTo(TrackerEngine.build(sheet, prefs))
+    }.stateIn(scope, SharingStarted.Eagerly, TrackerBoard.EMPTY)
+
+    /**
+     * The same board with the **hide** layer suppressed; pins and ordering still apply.
+     *
+     * The customize sheet (04 §5) has a "hidden section" the user un-hides from, and a
+     * hidden row is by construction absent from [board] — so the sheet cannot be built
+     * from it. `WhileSubscribed` because nothing collects this until that sheet opens.
+     */
+    val boardIgnoringHidden: StateFlow<TrackerBoard> = combine(
+        sheet,
+        overridesForBoard,
+    ) { sheet, prefs ->
+        TrackerEngine.build(sheet, prefs.map { it.copy(hidden = false) })
+    }.stateIn(scope, SharingStarted.WhileSubscribed(UNHIDDEN_BOARD_GRACE_MILLIS), TrackerBoard.EMPTY)
+
+    /** True while the board is coming from Room rather than the live mirror. */
+    val isShowingSnapshot: StateFlow<Boolean> = combine(
+        feed.documents(CreatureSheet.CREATURE_PROPERTIES),
+        _snapshot,
+    ) { properties, snapshot ->
+        properties.isEmpty() && snapshot != null
+    }.stateIn(scope, SharingStarted.Eagerly, false)
+
+    /**
+     * Opens the session: shows the cached snapshot immediately (06 step 3), then hands
+     * over to the live subscription (06 step 1).
+     *
+     * Loading the snapshot first is deliberate — a character screen that renders in
+     * milliseconds from Room and then quietly upgrades to live is the whole point of
+     * caching it.
+     */
+    suspend fun start() {
+        loadSnapshot()
+        feed.start()
+    }
+
+    /** Re-reads the cached snapshot from Room without touching the network. */
+    suspend fun loadSnapshot() {
+        val cached = snapshotStore.load(accountId, creatureId) ?: return
+        _snapshot.value = cached.sheet
+        _lastSyncedAt.value = cached.fetchedAt
+    }
+
+    /**
+     * REST-refreshes the snapshot (06 step 1). Requires [serverUrl] and [tokenProvider].
+     *
+     * Returns `false` when there is no token or no server to ask — never throws for that
+     * reason, because "we are not signed in yet" is not an error the tracker can act on.
+     * A genuine transport failure still propagates as an `ApiException`.
+     */
+    suspend fun refreshSnapshot(): Boolean {
+        val url = serverUrl ?: return false
+        val token = tokenProvider?.invoke() ?: return false
+        val cached = snapshotStore.refresh(accountId, url, token, creatureId)
+        _snapshot.value = cached.sheet
+        _lastSyncedAt.value = cached.fetchedAt
+        return true
+    }
+
+    /**
+     * Serializes the live mirror into the snapshot cache — 06 step 2, "mirror → snapshot
+     * refresh on every app-background". No network involved.
+     *
+     * Returns `false` when the mirror is empty, so a background event that arrives before
+     * the subscription is ready cannot overwrite a good snapshot with nothing.
+     */
+    suspend fun captureSnapshot(): Boolean {
+        val sheet = CreatureSheet.fromMirror(
+            properties = feed.documents(CreatureSheet.CREATURE_PROPERTIES).value,
+            creatures = feed.documents(CreatureSheet.CREATURES).value,
+            variables = feed.documents(CreatureSheet.CREATURE_VARIABLES).value,
+            creatureId = creatureId,
+        )
+        if (sheet.properties.isEmpty()) return false
+        val stored = snapshotStore.store(accountId, creatureId, sheet.toSnapshotBody())
+        _snapshot.value = sheet
+        _lastSyncedAt.value = stored.fetchedAt
+        return true
+    }
+
+    // --- override layer (03 §6) ---------------------------------------------
+
+    suspend fun setOverride(override: TrackerOverride) = trackerPrefDao.upsert(
+        TrackerPrefEntity(
+            accountId = accountId,
+            creatureId = creatureId,
+            propertyId = override.propertyId,
+            pinned = override.pinned,
+            hidden = override.hidden,
+            sortIndex = override.sortIndex,
+        ),
+    )
+
+    suspend fun clearOverride(propertyId: String) =
+        trackerPrefDao.delete(accountId, creatureId, propertyId)
+
+    /** Stops the subscription and the write queue. The DDP client outlives the session. */
+    suspend fun close() {
+        writeQueue.close()
+        feed.stop()
+    }
+
+    /** Only for diagnostics/tests — the overlay is already folded into [board]. */
+    val optimistic: StateFlow<OptimisticOverlay> get() = writeQueue.optimistic
+
+    private companion object {
+        /** Survives a recomposition / configuration change without rebuilding the board. */
+        const val UNHIDDEN_BOARD_GRACE_MILLIS = 5_000L
+    }
+}

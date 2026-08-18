@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-variant manifest additions. Merged into the debug APK only; the release
+  APK never sees any of this. See DebugSeedActivity's KDoc for the rationale and
+  docs/verification/WP5.md §5 for the probe that uses it.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+
+        <!--
+          exported=true is required for `adb shell am start`; noHistory and
+          excludeFromRecents keep it out of the user's task history so the probe
+          cannot leave a stray screen behind.
+        -->
+        <activity
+            android:name=".debug.DebugSeedActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+    </application>
+
+</manifest>

@@ -1,0 +1,198 @@
+package com.hashtagchow.magehand.ui.screens.characterhome
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import com.hashtagchow.magehand.core.data.session.OpenCharacter
+import java.io.File
+import java.lang.reflect.Method
+
+/**
+ * The write posture, as a regression test rather than as a promise.
+ *
+ * ### What replaced what
+ *
+ * WP6 shipped `ReadOnlyPostureTest`, whose claim was "the UI cannot write **at all**". WP7
+ * makes the tracker writable, so that test was *designed* to fail on this commit
+ * (docs/verification/WP6.md §10) and this is its deliberate replacement. The claim narrows
+ * but does not weaken:
+ *
+ * > **Every server write the app makes goes through the `WriteQueue`, and the UI layer
+ * > cannot construct a DiceCloud method call at all.**
+ *
+ * That matters because everything that keeps the tracker safe lives *in* the queue —
+ * LIVE-only refusal, the 250 ms / 1 s rate gates, coalescing, the optimistic overlay and
+ * its rollback, and the undo stack (docs/design/02-ddp-and-api.md §Client rule;
+ * docs/verification/WP4.md). A composable that could reach `DdpClient.call` would bypass
+ * all six at once, and nothing else in the build would notice.
+ *
+ * ### Three assertions, in order of strength
+ *
+ * 1. **`:app`'s bytecode contains no DiceCloud mutation method name.** Decisive and
+ *    comment-proof: a Kotlin string literal survives into the class file's constant pool,
+ *    KDoc does not. If nobody in `:app` can *name* `creatureProperties.damage`, nobody in
+ *    `:app` can send it — whatever they hold a reference to.
+ * 2. **`:app`'s bytecode never references `core.data.write`.** The queue, the ops and the
+ *    overlay are `:core:data`'s vocabulary. `:core:data` exports them (`api(project)`), so
+ *    this is a discipline the classpath cannot enforce — hence the test.
+ * 3. **[OpenCharacter]'s mutating surface is exactly the allow-list below.** A positive
+ *    assertion, so widening the seam is a conscious edit here rather than a silent one
+ *    there.
+ */
+class WritePostureTest {
+
+    /**
+     * Every mutating method in docs/design/02-ddp-and-api.md's catalog, plus the two
+     * insert methods the app must never touch.
+     *
+     * `login` and the read-only publications are deliberately absent: `:app` legitimately
+     * names those (WP5's connection manager path), and a test that failed on them would be
+     * asserting the wrong thing.
+     */
+    private val mutationMethods = listOf(
+        "creatureProperties.damage",
+        "creatureProperties.adjustQuantity",
+        "creatureProperties.flipToggle",
+        "creatureProperties.update",
+        "creatureProperties.equipItem",
+        "creatureProperties.insert",
+        "creature.methods.rest",
+        "creatures.insertCreature",
+        "creatures.update",
+    )
+
+    /** The intents `:app` is allowed to have. Adding one is an edit to this list. */
+    private val allowedMutators = setOf(
+        "spend",
+        "restore",
+        "changeHitPoints",
+        "setHitPoints",
+        "adjustItem",
+        "toggle",
+        "rest",
+        "undoLastWrite",
+        // Local Room rows, not the server — kept in the list so the assertion can be
+        // "these and nothing else" rather than "these plus whatever else looks harmless".
+        "setOverride",
+        "setOverrides",
+        "clearOverride",
+        "setAccentColor",
+        "captureSnapshot",
+        "close",
+    )
+
+    private val writePackagePath = "com/hashtagchow/magehand/core/data/write"
+
+    @Test
+    fun `the app module cannot name a DiceCloud mutation`() {
+        val classes = appClassFiles()
+        val offenders = classes.mapNotNull { file ->
+            val text = file.readBytes().toString(Charsets.ISO_8859_1)
+            val hits = mutationMethods.filter { text.contains(it) }
+            if (hits.isEmpty()) null else "${file.name}: $hits"
+        }
+
+        assertTrue(
+            "a class in :app names a DiceCloud mutation method directly, which means it " +
+                "could send one without the WriteQueue: $offenders",
+            offenders.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `the app module holds no reference to the write package`() {
+        val offenders = appClassFiles().mapNotNull { file ->
+            val text = file.readBytes().toString(Charsets.ISO_8859_1)
+            if (text.contains(writePackagePath)) file.name else null
+        }
+
+        assertTrue(
+            "a class in :app references core.data.write — WriteOp/WriteQueue are " +
+                ":core:data's vocabulary and the UI must go through OpenCharacter's " +
+                "intents instead: $offenders",
+            offenders.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `the UI's handle on a character exposes exactly the intents we decided on`() {
+        val mutators = OpenCharacter::class.java.methods
+            .filterNot { it.isSynthetic }
+            .map { it.name }
+            // Kotlin compiles a `val` to a JavaBeans getter — `get…` for most, `is…` for
+            // Booleans — so this drops the read surface and leaves the intents. No member
+            // of the allow-list is named that way, which is what makes the filter safe.
+            .filterNot { it.matches(PROPERTY_GETTER) }
+            .toSet()
+
+        assertEquals(
+            "OpenCharacter's mutating surface changed. If that is deliberate, add the new " +
+                "intent to allowedMutators and say why in the work package's verification doc.",
+            allowedMutators,
+            mutators,
+        )
+    }
+
+    @Test
+    fun `no intent leaks a write type or a socket into the UI's signature`() {
+        val leaked = OpenCharacter::class.java.methods.flatMap { method ->
+            method.signatureTypes
+                .filter { it.name.startsWith("com.hashtagchow.magehand.core.ddp") }
+                .map { "${method.name}: ${it.name}" }
+        }
+
+        assertTrue(
+            "OpenCharacter exposes a DDP type; the UI would then be able to call a method " +
+                "itself: $leaked",
+            leaked.isEmpty(),
+        )
+    }
+
+    /**
+     * `:app`'s own compiled classes.
+     *
+     * Gradle runs a module's unit tests with `user.dir` set to the module directory, so
+     * `build/` is a fixed relative path from here — but *where under it* the compiler
+     * writes is not stable. WP1's hard-coded `build/tmp/kotlin-classes/<variant>`
+     * stopped existing when WP8 moved to AGP 9's built-in Kotlin, which writes to
+     * `build/intermediates/built_in_kotlinc/<variant>/compile<Variant>Kotlin/classes`.
+     * The `size > 50` guard below is what caught that instead of letting the posture
+     * test pass on an empty scan, so the fix is to *discover* the outputs rather than
+     * name them — the next toolchain move then costs nothing.
+     *
+     * Missing output is a **failure**, not a skip: a posture test that quietly passes
+     * because it scanned nothing is worse than no posture test.
+     */
+    private fun appClassFiles(): List<File> {
+        val moduleDir = File(System.getProperty("user.dir") ?: ".")
+        val buildDir = File(moduleDir, "build")
+        val sep = File.separatorChar
+        val packagePath = "${sep}com${sep}hashtagchow${sep}magehand$sep"
+
+        val files = buildDir.walkTopDown()
+            .filter { it.isFile && it.extension == "class" }
+            // This module's own production classes only.
+            .filter { it.path.contains(packagePath) }
+            // The unit-test variant compiles into build/ as well, and test code is
+            // allowed to name whatever it likes — this very file does.
+            .filterNot { it.path.contains("UnitTest") || it.path.contains("androidTest") }
+            // The Hilt/KSP generated component tree names every module it stitches together,
+            // which is a graph of type names, not a call anyone can make.
+            .filterNot { it.name.startsWith("Hilt_") || it.name.contains("_ComponentTreeDeps") }
+            .toList()
+
+        assertTrue(
+            "found no compiled :app classes to scan under $buildDir — this test cannot " +
+                "prove anything without them",
+            files.size > 50,
+        )
+        return files
+    }
+
+    private val Method.signatureTypes: List<Class<*>>
+        get() = listOf(returnType) + parameterTypes
+
+    private companion object {
+        val PROPERTY_GETTER = Regex("^(get|is)[A-Z].*")
+    }
+}

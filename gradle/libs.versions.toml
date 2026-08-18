@@ -1,0 +1,114 @@
+#
+# MageHand version catalog.
+#
+# Every version below was resolved against Google's Maven and Maven Central on
+# 2026-08-18 (WP8 toolchain bump) and proven by a green `./gradlew test` +
+# `assembleRelease`. Do not bump by guesswork — re-verify against the
+# repositories and re-run the build.
+#
+# WP8 moved the project off the AGP 8 / compileSdk 36 ceiling that WP1 recorded.
+# Everything WP1 listed as "blocked until AGP 9 / compileSdk 37" is unblocked
+# here; see docs/verification/WP8.md §1.
+#
+[versions]
+agp = "9.3.1"          # newest stable 9.x (9.4.0 is still rc, 9.5.0 alpha)
+kotlin = "2.3.21"
+ksp = "2.3.11"
+
+# AndroidX / Compose
+activityCompose = "1.13.0"
+composeBom = "2026.08.00"   # -> compose 1.12.0, material3 1.5.0; needs compileSdk 37
+coreKtx = "1.19.0"
+datastore = "1.2.1"
+lifecycle = "2.11.0"
+navigationCompose = "2.9.8"
+room = "2.8.4"
+# androidx.security:security-crypto is deliberately absent: 1.1.0 deprecated
+# EncryptedSharedPreferences/MasterKey with no replacement, and WP8 replaced it
+# with AndroidKeyStore + AES-GCM directly (docs/verification/WP8.md §3).
+
+# DI
+# WP1 was pinned to 2.58 because 2.59+ hard-fail with "only compatible with AGP
+# 9.0.0 or higher". AGP is 9.x now, so the ceiling is gone.
+hilt = "2.60.1"
+hiltNavigationCompose = "1.4.0"
+
+# Networking / serialization / images
+coil = "3.5.0"
+coroutines = "1.11.0"
+kotlinxSerialization = "1.11.0"
+okhttp = "5.5.0"
+
+# Test
+junit = "4.13.2"
+# Robolectric supplies the android.content.Context that androidx.room.Room's
+# Android-target builders require — see docs/verification/WP3.md.
+robolectric = "4.16.1"
+androidxTestCore = "1.7.0"
+
+# SDK levels (referenced from the module build scripts).
+# 37 is the newest stable platform (`platforms;android-37.0`, build-tools 37.0.0);
+# 37.1 exists and 37.2 is in beta. minSdk 31 is a design decision (00-DESIGN.md).
+compileSdk = "37"
+minSdk = "31"
+targetSdk = "37"
+
+[libraries]
+# --- AndroidX core / lifecycle ---
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
+androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+# Test-only: `SavedStateHandle` for the CharacterHome ViewModel test (WP6).
+androidx-lifecycle-viewmodel-savedstate = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-savedstate", version.ref = "lifecycle" }
+
+# --- Compose (versions come from the BOM) ---
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+# material3 1.4.0 no longer brings the icon set in transitively; icons-core carries
+# the handful of glyphs the app uses. (icons-extended is ~50 MB — deliberately avoided.)
+androidx-compose-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
+
+# --- Persistence ---
+androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+
+# --- DI ---
+hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
+hilt-compiler = { group = "com.google.dagger", name = "hilt-compiler", version.ref = "hilt" }
+androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version.ref = "hiltNavigationCompose" }
+
+# --- Networking / serialization / images ---
+coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
+coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+
+# --- Test ---
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver3-junit4", version.ref = "okhttp" }
+# Lets MockWebServer speak https, so the https-only client can be tested at all.
+okhttp-tls = { group = "com.squareup.okhttp3", name = "okhttp-tls", version.ref = "okhttp" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidxTestCore" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }

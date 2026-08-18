@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Launch/manifest theme only. The real theming is Compose Material 3
+      (see ui/theme/Theme.kt); this exists so the window has sane colours
+      before the first frame. DayNight follows the system setting.
+    -->
+    <style name="Theme.MageHand" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

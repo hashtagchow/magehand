@@ -1,0 +1,372 @@
+package com.hashtagchow.magehand.ui.screens.characterhome
+
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
+import com.hashtagchow.magehand.core.data.session.OpenCharacter
+import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
+import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.RestKind
+import com.hashtagchow.magehand.core.model.TrackedResource
+import com.hashtagchow.magehand.core.model.TrackerBoard
+import com.hashtagchow.magehand.core.model.TrackerOverride
+import com.hashtagchow.magehand.core.model.TrackerWrite
+import com.hashtagchow.magehand.core.model.TrackerWriteFailure
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.CustomizeSection
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerCustomizeState
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerOverridePlan
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerUiState
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.toConnectionState
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.toCustomizeState
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.toTrackerUiState
+import com.hashtagchow.magehand.ui.webview.SheetSession
+import com.hashtagchow.magehand.ui.webview.SheetSessionFactory
+import java.time.ZoneId
+import javax.inject.Inject
+
+/**
+ * @param session `null` until the encrypted token store has been read; the Sheet
+ *   tab shows a spinner rather than an un-authenticated page in the meantime.
+ * @param tracker the Tracker tab's whole rendered state (04 §3).
+ * @param customize the customize bottom sheet's state (04 §5 + §6). Built from the
+ *   *unhidden* board, so hidden rows can be brought back.
+ */
+data class CharacterHomeUiState(
+    val creatureId: String = "",
+    val characterName: String? = null,
+    val connection: ConnectionState = ConnectionState.CONNECTING,
+    val session: SheetSession? = null,
+    val tracker: TrackerUiState = TrackerUiState(),
+    val customize: TrackerCustomizeState = TrackerCustomizeState(),
+) {
+    /** The accent seeds the whole character-home subtree, both tabs (04 §Theming). */
+    val accentColor: String? get() = tracker.accentColor
+}
+
+/**
+ * One-shot tracker feedback (04 §3): the 5 s UNDO snackbar after every mutation, and the
+ * error snackbar + shake after a rollback.
+ *
+ * An event stream rather than a field on [CharacterHomeUiState], because both are *things
+ * that happened* — two identical spends in a row must produce two snackbars, and a state
+ * field equal to its predecessor would produce one.
+ */
+sealed interface TrackerEvent {
+    /** A write the server accepted. Carries the entry so the snackbar can offer UNDO. */
+    data class Wrote(val write: TrackerWrite) : TrackerEvent
+
+    /** A write that was rolled back. [TrackerWriteFailure.propertyId] is the row to shake. */
+    data class Failed(val failure: TrackerWriteFailure) : TrackerEvent
+}
+
+/**
+ * Screens 3 + 4 (docs/design/04-screens-ux.md).
+ *
+ * ### Session lifecycle
+ *
+ * One [OpenCharacter] per opened character: created in `init`, closed in [onCleared].
+ * That is the whole of "create on enter, close on exit" — because this ViewModel is
+ * scoped to the `CharacterHome` nav entry, popping back to the character list clears it,
+ * which stops the `singleCharacter` subscription. Nothing else has to remember to.
+ *
+ * ### Writes (WP7)
+ *
+ * The tracker mutates the server now, but only through [OpenCharacter]'s named intents —
+ * `spend`, `restore`, `changeHitPoints`, `adjustItem`, `toggle`, `rest`. This class holds
+ * no `WriteQueue`, names no DDP method and builds no method parameters; it maps a tapped
+ * `propertyId` back to its board row and hands that over. Everything the queue guarantees
+ * (LIVE-only, rate limiting, coalescing, optimistic rollback, the undo stack) is therefore
+ * unbypassable from here. `WritePostureTest` pins that.
+ *
+ * The customize methods further down still write `tracker_prefs` / `theme_prefs` only —
+ * local Room rows, never the server.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+@HiltViewModel
+class CharacterHomeViewModel @Inject constructor(
+    savedStateHandle: SavedStateHandle,
+    characterListRepository: CharacterListRepository,
+    sheetSessionFactory: SheetSessionFactory,
+    private val openCharacterFactory: OpenCharacterFactory,
+) : ViewModel() {
+
+    /** Type-safe nav routes store each component under its property name. */
+    private val creatureId: String = requireNotNull(savedStateHandle["creatureId"]) {
+        "CharacterHome route is missing creatureId"
+    }
+
+    private val open = MutableStateFlow<OpenCharacter?>(null)
+
+    @Volatile
+    private var cleared = false
+
+    private val _events = MutableSharedFlow<TrackerEvent>(extraBufferCapacity = 16)
+
+    /** 04 §3's snackbars. Collected by the screen; nothing is replayed on re-subscribe. */
+    val events: SharedFlow<TrackerEvent> = _events.asSharedFlow()
+
+    init {
+        viewModelScope.launch {
+            val opened = openCharacterFactory.open(creatureId)
+            // The screen can be popped while `open` is still suspended on the socket;
+            // an OpenCharacter nobody holds would keep its subscription forever.
+            if (cleared) opened?.close() else open.value = opened
+        }
+
+        // A *new* history id is exactly "a fresh mutation reached the server": an undo
+        // submits with the undo bookkeeping suppressed, so it marks an existing entry
+        // undone rather than adding one. That is what stops UNDO offering to undo itself.
+        viewModelScope.launch {
+            var lastSeen = 0L
+            open.filterNotNull()
+                .flatMapLatest { it.writeHistory }
+                .collect { history ->
+                    val newest = history.firstOrNull() ?: return@collect
+                    if (newest.id > lastSeen) {
+                        lastSeen = newest.id
+                        _events.emit(TrackerEvent.Wrote(newest))
+                    }
+                }
+        }
+
+        viewModelScope.launch {
+            open.filterNotNull()
+                .flatMapLatest { it.writeFailures }
+                .collect { _events.emit(TrackerEvent.Failed(it)) }
+        }
+    }
+
+    private val trackerState: Flow<TrackerUiState> = open.flatMapLatest { character ->
+        if (character == null) {
+            flowOf(TrackerUiState(creatureId = creatureId))
+        } else {
+            combine(
+                combine(
+                    character.board,
+                    character.connectionState,
+                    character.lastSyncedAt,
+                    character.isShowingSnapshot,
+                    character.accentColor,
+                ) { board, connection, syncedAt, showingSnapshot, accent ->
+                    Read(board, connection, syncedAt, showingSnapshot, accent)
+                },
+                character.canWrite,
+                character.canUndo,
+                character.writeHistory,
+            ) { read, canWrite, canUndo, history ->
+                toTrackerUiState(
+                    creatureId = creatureId,
+                    board = read.board,
+                    connection = read.connection,
+                    lastSyncedAt = read.syncedAt,
+                    isShowingSnapshot = read.showingSnapshot,
+                    accentColor = read.accent,
+                    canWrite = canWrite,
+                    canUndo = canUndo,
+                    history = history,
+                    zone = zone,
+                )
+            }
+        }
+    }
+
+    private val customizeState: Flow<TrackerCustomizeState> = open.flatMapLatest { character ->
+        if (character == null) {
+            flowOf(TrackerCustomizeState())
+        } else {
+            combine(
+                character.boardIgnoringHidden,
+                character.overrides,
+                character.accentColor,
+            ) { board, overrides, accent -> toCustomizeState(board, overrides, accent) }
+        }
+    }
+
+    val uiState: StateFlow<CharacterHomeUiState> = combine(
+        characterListRepository.state,
+        sheetSessionFactory.sessions { SheetSessionFactory.characterPath(creatureId) },
+        trackerState,
+        customizeState,
+    ) { listState, session, tracker, customize ->
+        CharacterHomeUiState(
+            creatureId = creatureId,
+            // The name comes from the list the user just came from. The
+            // `singleCharacter` sub could supply it, but the list is already correct
+            // and is on screen before the sub goes ready.
+            characterName = listState.characters.firstOrNull { it.creatureId == creatureId }?.name,
+            connection = tracker.status.tone.toConnectionState(),
+            session = session,
+            tracker = tracker,
+            customize = customize,
+        )
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS),
+        CharacterHomeUiState(creatureId = creatureId),
+    )
+
+    // --- tracker writes (04 §3) ---------------------------------------------------
+
+    /** A filled pip was tapped. */
+    fun spend(propertyId: String, amount: Int = 1) = withRow(propertyId) { character, row ->
+        character.spend(row, amount)
+    }
+
+    /** An empty pip was tapped. */
+    fun restore(propertyId: String, amount: Int = 1) = withRow(propertyId) { character, row ->
+        character.restore(row, amount)
+    }
+
+    /** The HP steppers (and the number pad's Damage / Heal). Negative damages. */
+    fun changeHitPoints(delta: Int) {
+        open.value?.changeHitPoints(delta)
+    }
+
+    /** The number pad's third option: set HP to an absolute value. */
+    fun setHitPoints(value: Int) {
+        open.value?.setHitPoints(value)
+    }
+
+    /** A consumable's − / + stepper. */
+    fun adjustItem(propertyId: String, delta: Int) = withRow(propertyId) { character, row ->
+        character.adjustItem(row, delta)
+    }
+
+    /** A condition chip (or the concentration banner's ✕, which is the same write). */
+    fun toggleCondition(propertyId: String) {
+        val character = open.value ?: return
+        val toggle = character.board.value.activeToggles.firstOrNull { it.propertyId == propertyId }
+            ?: return
+        character.toggle(toggle)
+    }
+
+    /**
+     * Short or long rest. The confirm dialog (04 §3) is the screen's job and has already
+     * been shown by the time this runs — a rest is not undoable, so the dialog *is* the
+     * safety mechanism.
+     */
+    fun rest(kind: RestKind) {
+        open.value?.rest(kind)
+    }
+
+    fun undoLastWrite() {
+        val character = open.value ?: return
+        viewModelScope.launch { character.undoLastWrite() }
+    }
+
+    /**
+     * Looks the tapped row up on the current board.
+     *
+     * The UI hands back a `propertyId` and nothing else, so a stale row (one the server has
+     * since removed, or a burst that outran a re-sync) resolves to nothing and is dropped
+     * rather than written blind. The board is already overlay-adjusted, so the clamps in
+     * `OpenCharacter` see the value the user is looking at, not the last server value.
+     */
+    private inline fun withRow(propertyId: String, act: (OpenCharacter, TrackedResource) -> Unit) {
+        val character = open.value ?: return
+        val board = character.board.value
+        val row = (board.slots + board.resources + board.allItems + listOfNotNull(board.hp))
+            .firstOrNull { it.propertyId == propertyId } ?: return
+        act(character, row)
+    }
+
+    // --- customize sheet actions (04 §5, §6) — all local, all functional in WP6 ----
+
+    fun setRowHidden(propertyId: String, hidden: Boolean) = mutateOverride { current ->
+        listOf(TrackerOverridePlan.setHidden(current, propertyId, hidden))
+    }
+
+    fun setRowPinned(propertyId: String, pinned: Boolean) = mutateOverride { current ->
+        listOf(TrackerOverridePlan.setPinned(current, propertyId, pinned))
+    }
+
+    /** Moves a row one place within its section. `delta` is −1 (up) or +1 (down). */
+    fun moveRow(section: CustomizeSection, propertyId: String, delta: Int) = mutateOverride { current ->
+        val order = uiState.value.customize.sections
+            .firstOrNull { it.section == section }
+            ?.rows
+            ?.map { it.propertyId }
+            .orEmpty()
+        TrackerOverridePlan.reorder(current, order, propertyId, delta)
+    }
+
+    /** Drops every local override for this character — the sheet's "Reset" affordance. */
+    fun resetCustomizations() {
+        val character = open.value ?: return
+        viewModelScope.launch {
+            uiState.value.customize.let { state ->
+                (state.sections.flatMap { it.rows } + state.hidden).forEach {
+                    character.clearOverride(it.propertyId)
+                }
+                state.items.filter { it.pinned }.forEach { character.clearOverride(it.propertyId) }
+            }
+        }
+    }
+
+    fun setAccentColor(hex: String?) {
+        val character = open.value ?: return
+        viewModelScope.launch { character.setAccentColor(hex) }
+    }
+
+    /** 06 step 2: re-serialize the mirror into the snapshot cache when the app backgrounds. */
+    fun captureSnapshot() {
+        val character = open.value ?: return
+        viewModelScope.launch { character.captureSnapshot() }
+    }
+
+    private fun mutateOverride(plan: (List<TrackerOverride>) -> List<TrackerOverride>) {
+        val character = open.value ?: return
+        viewModelScope.launch {
+            val rows = plan(character.overrides.value)
+            if (rows.isNotEmpty()) character.setOverrides(rows)
+        }
+    }
+
+    override fun onCleared() {
+        cleared = true
+        val character = open.value ?: return
+        // `viewModelScope` is already cancelled by the time this runs, so closing has to
+        // happen somewhere else. The scope dies with the (short) close call.
+        CoroutineScope(SupervisorJob() + Dispatchers.Default).launch { character.close() }
+    }
+
+    private val zone: ZoneId get() = ZoneId.systemDefault()
+
+    /**
+     * The five read signals, bundled.
+     *
+     * `combine` tops out at five flows before it degenerates into an `Array<Any?>` with
+     * unchecked casts; the tracker now needs eight. Nesting one typed `combine` inside
+     * another keeps every element's type, which is worth a five-field private class.
+     */
+    private data class Read(
+        val board: TrackerBoard,
+        val connection: ConnectionState,
+        val syncedAt: Long?,
+        val showingSnapshot: Boolean,
+        val accent: String?,
+    )
+
+    private companion object {
+        const val STOP_TIMEOUT_MILLIS = 5_000L
+    }
+}
