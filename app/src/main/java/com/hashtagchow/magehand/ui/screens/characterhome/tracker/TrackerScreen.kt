@@ -115,6 +115,49 @@ data class TrackerActions(
 data class ShakeSignal(val propertyId: String?, val token: Long)
 
 /**
+ * Whether a [ShakeSignal] is aimed at a chip the collapsed *"N inactive"* drawer is
+ * currently hiding — in which case [InactiveConditions] has to open, or the apology plays
+ * to an empty stage.
+ *
+ * ### The sequence this exists for
+ *
+ * A failed `flipToggle` gets two pieces of feedback: a snackbar, and a shake on the row
+ * that snapped back. The shake is a `LaunchedEffect` on the row's own modifier, so it can
+ * only fire on a row that is *composed*, and a condition chip's section is decided by
+ * `ConditionToggle.shownByDefault` — `enabled || pinned`. Turning an unpinned condition on
+ * from inside the drawer therefore moves it out of the drawer while the write is in
+ * flight, and the rollback moves it back in. If the drawer is shut by then, the snackbar
+ * says "that didn't save" and nothing on screen says *what*.
+ *
+ * The drawer is shut by then more often than it sounds. Flipping the drawer's **last**
+ * chip on empties the list, which removes the whole `conditions-inactive` item from the
+ * `LazyColumn` — taking its `rememberSaveable` expansion flag with it — so the row that
+ * reappears on failure comes back into a drawer that has been reset to collapsed. Closing
+ * the drawer by hand after the tap does the same thing more directly.
+ *
+ * ### Why a function rather than three lines in the composable
+ *
+ * Because the bug it fixes is invisible: the failing version renders identically, minus an
+ * animation nobody can screenshot. Pure, so `TrackerShakeTargetTest` pins the decision on
+ * the JVM instead of trusting the composable.
+ *
+ * Auto-expanding is a deliberate, narrow exception to that drawer being the user's to
+ * open — see [InactiveConditions] on why the flag is not persisted. A rollback is the one
+ * moment the app has something to say about a chip in there, and it says it once, in
+ * response to the user's own tap.
+ */
+fun shakeIsHiddenByExpander(
+    shake: ShakeSignal?,
+    inactiveChips: List<ConditionChipState>,
+    expanded: Boolean,
+): Boolean {
+    if (expanded) return false
+    // A failure with no propertyId (a rest, say) belongs to no row and shakes nothing.
+    val target = shake?.propertyId ?: return false
+    return inactiveChips.any { it.propertyId == target }
+}
+
+/**
  * The Tracker tab (docs/design/04-screens-ux.md §3) — **writable as of WP7**.
  *
  * ### Layout, top→bottom, exactly as 04 §3 orders it
@@ -893,6 +936,14 @@ private fun InactiveConditions(
     modifier: Modifier = Modifier,
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
+
+    // The one thing allowed to open this drawer other than a tap: a rollback whose row is
+    // in here. Keyed on the token rather than on `expanded`, so re-collapsing it by hand
+    // does not immediately re-open it — only the *next* failure may.
+    LaunchedEffect(shake?.token) {
+        if (shakeIsHiddenByExpander(shake, chips, expanded)) expanded = true
+    }
+
     // "3 inactive" is the label a sighted user reads off a chevron; a screen reader gets
     // the whole sentence, because "3 inactive" alone does not say it can be opened.
     val action = if (expanded) {

@@ -252,6 +252,17 @@ class DdpClient(
         }
     }
 
+    /**
+     * Releases everything this client owns: the socket, the coroutine scope, and the
+     * single thread behind [dispatcher].
+     *
+     * Deliberately **not** the `OkHttpClient`. It is supplied by the caller (see
+     * [okHttp] and `DataModule`), it is shared across every account this process
+     * connects to, and shutting down another owner's dispatcher and connection pool
+     * from here would break the next account's connection. The corresponding
+     * obligation is on the wiring: exactly one `OkHttpClient` per process, so there is
+     * never one to reclaim. See [OkHttpDdpSocketFactory.webSocketClient].
+     */
     @Synchronized
     override fun close() {
         if (closed) return

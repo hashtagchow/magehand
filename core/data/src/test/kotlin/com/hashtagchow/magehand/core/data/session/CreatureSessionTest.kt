@@ -91,6 +91,7 @@ class CreatureSessionTest {
         feed: FakeCreatureFeed = FakeCreatureFeed(),
         networkAvailable: MutableStateFlow<Boolean> = MutableStateFlow(true),
         config: CreatureSessionConfig = CreatureSessionConfig(),
+        now: () -> Long = { 1_700_000_000_000L },
     ): CreatureSession = CreatureSession(
         accountId = accountId,
         creatureId = creatureId,
@@ -100,6 +101,7 @@ class CreatureSessionTest {
         scope = sessionScope(),
         networkAvailable = networkAvailable,
         config = config,
+        now = now,
     )
 
 
@@ -169,15 +171,96 @@ class CreatureSessionTest {
         assertEquals(ConnectionState.LIVE, session.connectionState.value)
     }
 
+    /**
+     * Was *"no network is OFFLINE immediately"*. It still short-circuits `offlineAfter` by
+     * an order of magnitude — that is the branch's whole reason to exist — but no longer on
+     * the first frame of a `false`.
+     *
+     * `OFFLINE` is the one connection state the tracker treats as **terminal**
+     * (`ConnectionStatus.isTerminalUntilActedOn`), which is what earns the "not live" dot
+     * the right to sit on top of a cold open's loading spinner. So a `ConnectivityManager`
+     * that reports "no network" for a moment — an interface handover, or a first callback
+     * arriving before the current network is known — flashed a red mark at the one moment
+     * nothing was wrong, and then took it away. That is the fastest way to teach someone
+     * the red mark means nothing, which is the same argument `ConnectionStatusTest` makes
+     * for keeping the dot off a merely-reconnecting cold open.
+     *
+     * The grace period is deliberately *not* a rule about the dot: the presentation
+     * partition in `ConnectionStatusTest` is unchanged, and a settled `OFFLINE` still
+     * surfaces through loading exactly as 1.0.2 made it. This fixes what the state machine
+     * *says*, not what the UI does with it.
+     *
+     * **What the first assertion measures changed, and the test was kept anyway.** The
+     * no-network branch used to open with `emit(CONNECTING)`; it no longer emits anything
+     * until the grace period elapses, so "still CONNECTING at 500 ms" is now `stateIn`
+     * *retaining* the previous value rather than the branch re-announcing it. Same
+     * observable contract, and it is the contract — not the mechanism — this test is for,
+     * so rewriting it would have thrown away the blip coverage to re-state the same thing.
+     * The behaviour that actually changed is the one the emit was destroying, and it needed
+     * a case of its own: see the test below.
+     */
     @Test
-    fun `no network is OFFLINE immediately, without waiting out the timeout`() = runTest {
+    fun `a momentary network blip does not announce OFFLINE, but a real loss still does`() = runTest {
         val network = MutableStateFlow(true)
         val session = session(networkAvailable = network)
         settle()
         assertEquals(ConnectionState.CONNECTING, session.connectionState.value)
 
         network.value = false
+        advanceTimeBy(500)
+        assertEquals(
+            "a blip must read as the reconnect it is",
+            ConnectionState.CONNECTING,
+            session.connectionState.value,
+        )
+
+        network.value = true
         settle()
+        assertEquals(
+            "and must leave nothing behind once the network is back",
+            ConnectionState.CONNECTING,
+            session.connectionState.value,
+        )
+
+        // A genuine loss: OFFLINE at 2 s rather than the 20 s the reconnect timeout takes.
+        network.value = false
+        advanceTimeBy(2_500)
+        assertEquals(ConnectionState.OFFLINE, session.connectionState.value)
+    }
+
+    /**
+     * The router-dead-but-wi-fi-associated case, which is the ordinary way a home network
+     * fails: the AP keeps answering, so `ConnectivityManager` still reports a validated
+     * network for a while and `OFFLINE` has to arrive the slow way, through `offlineAfter`.
+     * The connectivity callback then flips **late**, after the user has already been told.
+     *
+     * That late `false` re-enters the no-network branch, and while that branch opened with
+     * `emit(CONNECTING)` it un-told them: a settled `OFFLINE` — the one state the tracker
+     * treats as terminal, the one that earns the red dot — was replaced by "connecting" for
+     * two seconds and then re-announced. `OFFLINE` going backwards is worse than it arriving
+     * late; it reads as the app not knowing, which is the credibility the grace period was
+     * added to protect in the first place.
+     */
+    @Test
+    fun `a late network callback does not un-tell a settled OFFLINE`() = runTest {
+        val network = MutableStateFlow(true)
+        val session = session(networkAvailable = network)
+        settle()
+
+        // Still "connected" as far as the OS is concerned, so this is the 20 s road.
+        advanceTimeBy(20_500)
+        assertEquals(ConnectionState.OFFLINE, session.connectionState.value)
+
+        network.value = false
+        advanceTimeBy(500)
+        assertEquals(
+            "a late network callback must not resurrect CONNECTING over a settled OFFLINE",
+            ConnectionState.OFFLINE,
+            session.connectionState.value,
+        )
+
+        // …and it must not flap back either once that branch's own timer fires.
+        advanceTimeBy(5_000)
         assertEquals(ConnectionState.OFFLINE, session.connectionState.value)
     }
 
@@ -382,6 +465,63 @@ class CreatureSessionTest {
         assertEquals(listOf(Triple("https://dnd.example.com", "tok", creatureId)), api.snapshotCalls)
         assertEquals(4, board.slots.single { it.name == "1st Level" }.total)
         assertEquals(1_700_000_000_000L, session.lastSyncedAt.value)
+    }
+
+    /**
+     * "Last synced" means *the last moment the data was known current*, and a ready
+     * subscription is that — so both edges of readiness stamp it: the one that opens the
+     * window, and the one that closes it.
+     */
+    @Test
+    fun `readiness stamps last-synced at both of its edges`() = runTest {
+        val readyAt = 1_786_991_520_000L
+        val droppedAt = readyAt + 7_200_000L // two hours of a live session
+        var clock = readyAt
+        val feed = FakeCreatureFeed()
+        val session = session(feed, now = { clock })
+
+        session.start()
+        settle()
+        assertNull("nothing has synced, and none may be invented", session.lastSyncedAt.value)
+
+        feed.goLive()
+        settle()
+        assertEquals(readyAt, session.lastSyncedAt.value)
+
+        clock = droppedAt
+        feed.isReady.value = false
+        settle()
+        assertEquals(droppedAt, session.lastSyncedAt.value)
+    }
+
+    /**
+     * The bug this replaced. The session had been live and current for two hours, and the
+     * only thing that had ever stamped `lastSyncedAt` was the snapshot written when the
+     * screen opened — so the connection sheet greeted the drop with "last synced at 13:00"
+     * for a mirror that had been current until seconds earlier. The sheet's word is
+     * *synced*, not *saved*.
+     */
+    @Test
+    fun `a drop after hours live reports the drop, not the hours-old capture`() = runTest {
+        val openedAt = 1_786_991_520_000L
+        val droppedAt = openedAt + 7_200_000L
+        snapshots.store(accountId, creatureId, Fixtures.sabrielBody, fetchedAt = openedAt)
+
+        var clock = openedAt
+        val feed = FakeCreatureFeed()
+        val session = session(feed, now = { clock })
+        session.start()
+        awaitBoard(session, "the cached snapshot to render") { it.slots.isNotEmpty() }
+        assertEquals("the snapshot's own time, until the sub says otherwise", openedAt, session.lastSyncedAt.value)
+
+        feed.publish(Fixtures.sabrielSheet(), creatureId)
+        feed.goLive()
+        settle()
+
+        clock = droppedAt
+        feed.isReady.value = false
+        settle()
+        assertEquals(droppedAt, session.lastSyncedAt.value)
     }
 
     @Test

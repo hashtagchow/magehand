@@ -38,6 +38,7 @@ import com.hashtagchow.magehand.core.data.db.MageHandDatabase
 import com.hashtagchow.magehand.core.data.db.SnapshotDao
 import com.hashtagchow.magehand.core.data.db.ThemePrefDao
 import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
+import com.hashtagchow.magehand.core.ddp.OkHttpDdpSocketFactory
 import com.hashtagchow.magehand.core.data.session.DefaultOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
@@ -61,7 +62,7 @@ object DataModule {
 
     @Provides
     @Singleton
-    fun provideDiceCloudApi(): DiceCloudApi = OkHttpDiceCloudApi(newHttpClient())
+    fun provideDiceCloudApi(): DiceCloudApi = OkHttpDiceCloudApi(newApiClient())
 
     @Provides
     @Singleton
@@ -181,6 +182,12 @@ object DataModule {
     ): DdpConnectionManager = DefaultDdpConnectionManager(
         accountRepository = accountRepository,
         scope = newAppScope("ddp-connection"),
+        // The whole reason [baseHttpClient] exists: every account switch builds a new
+        // DdpClient, and each one used to bring its own dispatcher and connection pool
+        // that nothing ever shut down.
+        clientFactory = DefaultDdpConnectionManager.sharedClientFactory(
+            OkHttpDdpSocketFactory.webSocketClient(baseHttpClient),
+        ),
     )
 
     /**
@@ -240,17 +247,37 @@ object DataModule {
         CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineName(name))
 
     /**
-     * Not a `@Provides`: see the class comment. WP2's DDP client will eventually
-     * want to share this client's connection pool and dispatcher; promoting it to
-     * a real binding is that WP's call, and needs `okhttp` to become an `api`
-     * dependency of this module.
+     * **The process's one OkHttp client.**
+     *
+     * An `OkHttpClient` owns a dispatcher thread pool and a connection pool, and
+     * releases neither until an idle timer fires or someone shuts the executor down.
+     * Both the REST API and every DDP websocket therefore derive from this single
+     * instance via `newBuilder()`, which keeps the pools shared while letting each use
+     * set its own timeouts. Nothing shuts it down, and nothing needs to: there is one,
+     * and it lives as long as the process.
+     *
+     * Still not a `@Provides` — the WP3 note below stands. `okhttp` is an
+     * `implementation` dependency here, so binding an `OkHttpClient` would force
+     * `:app`'s Hilt component processing to resolve a class that is not on its
+     * classpath. A `private val` inside the module gives the sharing without the
+     * binding, which is why the "promote it to a real binding" plan is no longer
+     * needed to close the leak.
      */
-    private fun newHttpClient(): Call.Factory = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+    private val baseHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+
+    /**
+     * The REST view of [baseHttpClient]: same dispatcher, same connection pool,
+     * different timeouts.
+     */
+    private fun newApiClient(): Call.Factory = baseHttpClient.newBuilder()
         // A creature snapshot is ~1.1 MB and the server force-recomputes a stale
         // sheet before answering, so the read timeout has to be generous.
         .readTimeout(90, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
         .build()
 }

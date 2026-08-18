@@ -256,10 +256,29 @@ private fun CustomizeRowItem(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
+            // Two lines, not one — this is the conditions section's fix for a name column
+            // that the pin checkbox left at ~136 dp on a 360 dp phone (24 dp inset, then
+            // the checkbox and three 48 dp arrows). Plumbing toggles are the longest names
+            // on any sheet and the least guessable from a prefix: "Racial ASI Disabler"
+            // and "Racial ASI Disabled" ellipsize to the same string, and picking the
+            // wrong one pins the wrong row.
+            //
+            // Vertical space is the cheap axis here. This is a scrolling sheet the user
+            // opens deliberately, unlike the tracker itself, where a row's height is
+            // competing with pips. `maxLines` is a ceiling, so every short name — which is
+            // every slot, resource and item — renders exactly as before.
+            //
+            // The alternatives all cost more than they return: shrinking the icon buttons
+            // or the checkbox's touch wrapper breaks the 48 dp target this sheet's own
+            // KDoc calls its reason for using arrows instead of drag; moving the pin to
+            // the leading edge saves no width at all and would start condition names 48 dp
+            // to the right of every other section's in the same scroll; and pulling the
+            // 24 dp inset in would unpick the alignment it shares with the section
+            // headers. Dropping a control was not on the table.
             Text(
                 text = row.name,
                 style = MaterialTheme.typography.bodyLarge,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
             row.detail?.let {

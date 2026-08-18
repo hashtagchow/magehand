@@ -55,7 +55,12 @@ class DiceCloudSsoWebViewClient(
     private val session: SheetSession,
     private val openExternally: (Uri) -> Unit,
     private val onPhaseChanged: (SsoInjectionPhase) -> Unit = {},
-    private val onPageLoaded: (String) -> Unit = {},
+    /**
+     * One history event: the committed URL (when the callback had one) and whether the
+     * WebView can now go back. Both travel together because both are read by the same
+     * recomposition — see [SheetNavigationState].
+     */
+    private val onNavigated: (url: String?, canGoBack: Boolean) -> Unit = { _, _ -> },
 ) : WebViewClient() {
 
     private enum class Stage { INJECTING, NAVIGATING, READY }
@@ -75,21 +80,40 @@ class DiceCloudSsoWebViewClient(
             stage == Stage.INJECTING && isBootstrap(url) -> inject(view, SsoInjectionPhase.PAGE_FINISHED)
             stage == Stage.NAVIGATING && !isBootstrap(url) -> stage = Stage.READY
         }
-        url?.let(onPageLoaded)
+        onNavigated(url, view.canGoBack())
     }
 
     /**
-     * docs/design/05-security.md §2: the WebView is dedicated to the account's
-     * server origin, and anything else leaves for the system browser. That covers
-     * the PWA's outbound links (Patreon, the docs site, HeroForge portraits opened
-     * full-size) and, more importantly, any redirect to a host we did not choose —
-     * the injected token must never travel to one.
+     * The PWA is a single-page app: after the first load, "going to another page" is
+     * a `pushState`, which fires *this* and never [onPageFinished]. Without it the
+     * back handler's enablement would be frozen at whatever the first real page load
+     * left behind.
+     */
+    override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+        onNavigated(url, view.canGoBack())
+    }
+
+    /**
+     * Routes one navigation, per [decideNavigation] — which holds the reasoning and
+     * the tests. This method's only job is to turn the three inputs into a `Boolean`
+     * for the framework.
      */
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         val url = request.url
-        if (isSameOrigin(url)) return false
-        openExternally(url)
-        return true
+        return when (decideNavigation(request.isForMainFrame, url.scheme, isSameOrigin(url))) {
+            NavigationDecision.LOAD -> false
+            NavigationDecision.OPEN_EXTERNAL -> {
+                openExternally(url)
+                true
+            }
+
+            NavigationDecision.BLOCK -> {
+                // Scheme only: a blocked URL is by definition one we do not trust, and
+                // its path could carry anything the sheet's author put there.
+                Log.w(TAG, "blocked a '${url.scheme}' navigation out of the sheet")
+                true
+            }
+        }
     }
 
     private fun inject(view: WebView, phase: SsoInjectionPhase) {

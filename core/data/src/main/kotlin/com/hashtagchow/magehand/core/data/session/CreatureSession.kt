@@ -10,12 +10,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.dropWhile
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
 import com.hashtagchow.magehand.core.data.db.TrackerPrefEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
@@ -41,6 +43,28 @@ data class CreatureSessionConfig(
      * offline banner at all.
      */
     val offlineAfter: Duration = 20.seconds,
+    /**
+     * The same idea as [offlineAfter], applied to the *other* road to `OFFLINE`: the
+     * device telling us it has no network at all.
+     *
+     * That branch used to publish `OFFLINE` on the very first `false`, and it is the one
+     * state the UI treats as terminal — `ConnectionStatus.isTerminalUntilActedOn`, which
+     * is what puts the connection dot on screen even over a cold open's spinner. So a
+     * `ConnectivityManager` that reports `false` for a moment (an interface handover, or
+     * the first callback arriving before the current network is known) painted a red
+     * "not live" dot for a frame and then took it away again — a mark that means
+     * "something is wrong", shown at the one moment nothing is.
+     *
+     * A grace period is the same answer [offlineAfter] already gives for a flapping
+     * socket, and it costs the user nothing: the reconnect loop is running throughout, so
+     * the state during the grace is `CONNECTING`, which is true.
+     *
+     * Two seconds, because it has to outlast a wifi→cellular handover (hundreds of ms,
+     * occasionally over a second) without approaching [offlineAfter] — this branch exists
+     * precisely so a genuinely networkless device does not wait out the full timeout, and
+     * 2 s keeps ~90% of that.
+     */
+    val offlineOnNetworkLossAfter: Duration = 2.seconds,
     val writeQueue: WriteQueueConfig = WriteQueueConfig(),
 )
 
@@ -80,6 +104,8 @@ class CreatureSession(
      */
     networkAvailable: StateFlow<Boolean> = MutableStateFlow(true),
     private val config: CreatureSessionConfig = CreatureSessionConfig(),
+    /** Injected so [lastSyncedAt]'s stamps are assertable; same convention as `SnapshotStore`. */
+    private val now: () -> Long = System::currentTimeMillis,
 ) {
 
     /** Set when the caller wants [refreshSnapshot] to be able to do a REST fetch. */
@@ -89,8 +115,46 @@ class CreatureSession(
     private val _snapshot = MutableStateFlow<CreatureSheet?>(null)
     private val _lastSyncedAt = MutableStateFlow<Long?>(null)
 
-    /** Epoch millis of the cached snapshot — the "Offline — synced HH:MM" banner's input. */
+    /**
+     * Epoch millis of **the last moment this creature's data was known to be current** —
+     * what the connection sheet renders as *"Last synced at HH:MM"*.
+     *
+     * ### Why the subscription stamps this, and not only the snapshot
+     *
+     * It used to be stamped by [loadSnapshot], [refreshSnapshot] and [captureSnapshot]
+     * alone, i.e. only when a *copy* was written to Room. A session that went live at
+     * 13:00 and dropped at 15:00 therefore told the user "last synced at 13:00", when the
+     * mirror had in fact been current until seconds earlier. The sheet's sentence says
+     * *synced*, not *saved*, so that was simply wrong.
+     *
+     * A ready `singleCharacter` subscription **is** currency: Meteor sends the initial
+     * document set before `ready`, and every later change arrives as it happens. So the
+     * window during which the data is current opens when the sub goes ready and closes
+     * when it stops being ready — and those two edges are the only moments worth
+     * recording, because in between the answer is continuously "now".
+     *
+     * ### Why not stamp on each live update batch
+     *
+     * Because that would quietly redefine the string as *"last time something changed"*.
+     * A character nobody touched for an hour of a LIVE session would then read as an hour
+     * stale, which is the same lie in the opposite direction — and the batch that does
+     * arrive says nothing stronger about currency than the readiness that preceded it.
+     *
+     * `null` until something has actually synced: never a fabricated "now" at
+     * construction, which is what the sheet's "has never finished syncing" line depends
+     * on, and why the collector below drops the readiness flow's leading `false`.
+     */
     val lastSyncedAt: StateFlow<Long?> = _lastSyncedAt.asStateFlow()
+
+    init {
+        scope.launch {
+            // `dropWhile` skips the StateFlow's initial `false` — a session that never
+            // reaches the server must keep reporting "never synced". After that, every
+            // edge stamps: `true` opens the current-data window, `false` closes it at the
+            // moment it closed rather than leaving the last *saved* time standing.
+            feed.isReady.dropWhile { !it }.collect { _lastSyncedAt.value = now() }
+        }
+    }
 
     /**
      * 06's four-state model, completed.
@@ -115,7 +179,26 @@ class CreatureSession(
                     // Connected but the publication has not finished: still "connecting"
                     // from the user's point of view, and writes stay refused.
                     state == ConnectionState.LIVE -> flowOf(ConnectionState.CONNECTING)
-                    !network -> flowOf(ConnectionState.OFFLINE)
+                    // No network *and* no socket: still OFFLINE far sooner than the
+                    // timeout below, but not on the first frame of a `false` — see
+                    // CreatureSessionConfig.offlineOnNetworkLossAfter.
+                    //
+                    // No leading `emit(CONNECTING)`, deliberately, and unlike the branch
+                    // below. `stateIn` holds the previous value across a `flatMapLatest`
+                    // switch, so the grace period is served by *silence* — whatever was
+                    // true a moment ago stays true until the delay elapses. Emitting
+                    // CONNECTING here instead **overwrote** a state that had already
+                    // settled: a router that is dead while wi-fi stays associated reaches
+                    // OFFLINE through the branch below (`offlineAfter`), and then
+                    // `ConnectivityManager` notices and flips `network` to false — a
+                    // *late* flip, long after the user has been told they are offline.
+                    // That re-entered this branch and put CONNECTING back for two full
+                    // seconds, un-telling them. The cold-open case the emit was there for
+                    // is already covered: `stateIn`'s initial value is CONNECTING.
+                    !network -> flow {
+                        delay(config.offlineOnNetworkLossAfter)
+                        emit(ConnectionState.OFFLINE)
+                    }
                     else -> flow {
                         emit(ConnectionState.CONNECTING)
                         delay(config.offlineAfter)

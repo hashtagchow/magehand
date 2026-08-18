@@ -111,6 +111,18 @@ class WriteQueue(
     private val lock = Any()
     private val queue = ArrayDeque<Entry>()
 
+    /**
+     * The entry [dispatch] is currently working on, or `null` when the worker is idle.
+     *
+     * It has to be tracked separately because [takeCoalescedHead] *removes* it from
+     * [queue] before the call goes out, so between that removal and [resolve] the
+     * entry — and every submission behind it — is reachable from nowhere else. That is
+     * the window [close] used to miss.
+     *
+     * Guarded by [lock], like [queue].
+     */
+    private var inFlight: Entry? = null
+
     /** Pending optimistic changes, oldest first, keyed by submission id. */
     private val pending = LinkedHashMap<Long, OptimisticChange>()
 
@@ -237,12 +249,33 @@ class WriteQueue(
         _outstanding.first { it == 0 }
     }
 
+    /**
+     * Shuts the worker down and settles **everything** it will now never finish —
+     * both the entries still queued and the one already on the wire.
+     *
+     * The in-flight entry is the interesting half. Cancelling [worker] cancels it at
+     * its `caller.call` suspension point, so [dispatch] unwinds on a
+     * `CancellationException` and [resolve] is never reached; a caller awaiting that
+     * submission from a scope this cancellation does not reach — anything outside a
+     * `viewModelScope` — would suspend forever. Settling it here rather than by
+     * running [resolve] under `NonCancellable` is deliberate: `NonCancellable` would
+     * only protect the resolve *after* the call returns, and the call is precisely
+     * what got cancelled, so the deferred would still never complete. This also keeps
+     * every completion decision in one place holding one lock, which is the
+     * concurrency argument the rest of the class is built on.
+     *
+     * `cancel()` rather than `completeExceptionally()` for the same reason it was
+     * already used for the queued ones: the write did not fail, it never happened.
+     * A close is the app tearing the connection down, not the server saying no —
+     * so no [WriteFailure] is emitted either.
+     */
     fun close() {
         worker.cancel()
         wakeUp.close()
         val stranded = synchronized(lock) {
-            val all = queue.flatMap { it.submissions }
+            val all = queue.flatMap { it.submissions } + inFlight?.submissions.orEmpty()
             queue.clear()
+            inFlight = null
             pending.clear()
             _outstanding.value = 0
             republishOptimistic()
@@ -291,9 +324,20 @@ class WriteQueue(
      * be reordered into `spend×2` then `set-to-0`, and the user would end up with a
      * different number than they asked for. Ops aimed at *other* properties are safely
      * skipped over — the server applies each property's write independently.
+     *
+     * **It also claims the entry as [inFlight], under the same lock acquisition that
+     * removes it from [queue].** Removing and claiming were two separate `synchronized`
+     * blocks — this one and the one that opened `dispatch` — and between them the entry
+     * was in neither: a [close] landing in that window found an empty queue and a `null`
+     * `inFlight`, and every submission behind the entry stayed unsettled forever. The
+     * window was a handful of instructions wide and needed a close on another thread to
+     * hit it, which is exactly the kind of bug that only ever reproduces in the field.
+     * Making removal and claim one atomic step removes the window rather than narrowing
+     * it; there is no longer any moment at which a dispatchable entry is unreachable.
      */
     private fun takeCoalescedHead(): Entry? = synchronized(lock) {
         val head = queue.removeFirstOrNull() ?: return@synchronized null
+        inFlight = head
         val key = head.op.coalesceKey ?: return@synchronized head
         val target = head.op.targetId
 
@@ -328,6 +372,10 @@ class WriteQueue(
         head
     }
 
+    /**
+     * [entry] arrives already claimed as [inFlight] — see [takeCoalescedHead]. From here
+     * until [resolve], [close] is the only other thing that can settle these submissions.
+     */
     private suspend fun dispatch(entry: Entry) {
         if (entry.op is WriteOp.Noop) {
             config.logger("write: coalesced away ${entry.submissions.size} op(s)")
@@ -432,6 +480,9 @@ class WriteQueue(
      */
     private fun resolve(entry: Entry, failure: Throwable?) {
         synchronized(lock) {
+            // Identity, not null-check: a close() that already settled this entry has
+            // moved on, and clearing unconditionally could drop a later claim.
+            if (inFlight === entry) inFlight = null
             entry.submissions.forEach { pending.remove(it.id) }
             _outstanding.value = (_outstanding.value - entry.submissions.size).coerceAtLeast(0)
             republishOptimistic()

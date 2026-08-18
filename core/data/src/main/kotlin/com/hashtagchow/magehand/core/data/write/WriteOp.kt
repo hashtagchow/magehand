@@ -10,6 +10,50 @@ import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerWriteKind
 
+/** The three kinds that mean "the row went down" — see [intentForMergedValue]. */
+private val CONSUMPTION_KINDS = setOf(
+    TrackerWriteKind.SPEND,
+    TrackerWriteKind.TAKE_DAMAGE,
+    TrackerWriteKind.ITEM_USE,
+)
+
+/**
+ * The label a coalesced increment should carry, given the head op's [headIntent] and
+ * the value the merge summed to.
+ *
+ * Coalescing sums increments **of either sign** — that is the point of it; a spend and
+ * a restore inside the same rate-limit window are meant to cancel down to one call.
+ * But the merged op used to keep the head's label, so tapping `−1` then `+3` on a
+ * spell slot produced one call for a net *restore* of 2 filed in the history and on
+ * the undo stack as "Spent 2". The user then reads a lie, and the snackbar offers to
+ * undo something that never happened.
+ *
+ * Recomputing beats refusing to merge conflicting intents: refusing would break the
+ * queue's third guarantee — "a pair that cancels out is dropped entirely" — which is
+ * exactly the spend-then-restore case, and would send two calls where the server's
+ * rate limiter wants one.
+ *
+ * It reads the **merged sign alone**, never "did the sign change", because
+ * `takeCoalescedHead` folds one candidate at a time: a burst that passes through zero
+ * on its way (`+1, −1, −1`) would leave a difference-based rule with no sign to
+ * compare against on the next step. Absolute is also simply true — both methods take
+ * a *consumption* amount (see [WriteOp.Companion.adjust]), so positive always means
+ * the row went down, whatever route the sum took.
+ *
+ * Only the direction moves: `SPEND ↔ RESTORE`, `TAKE_DAMAGE ↔ HEAL` and
+ * `ITEM_USE ↔ ITEM_ADD` are precisely [TrackerWriteKind.inverted]'s pairs, so a
+ * spell-slot burst can never come out labelled as HP and vice versa. A zero sum keeps
+ * the head's label and is academic anyway: the queue turns it into a [WriteOp.Noop],
+ * which is never filed.
+ */
+private fun intentForMergedValue(headIntent: TrackerWriteKind?, mergedValue: Int): TrackerWriteKind? {
+    if (headIntent == null || mergedValue == 0) return headIntent
+    // A hand-built op labelled with a non-invertible kind (an absolute `set`'s
+    // vocabulary on an `increment`): keep the caller's word rather than guess.
+    val inverse = headIntent.inverted() ?: return headIntent
+    return if ((headIntent in CONSUMPTION_KINDS) == (mergedValue > 0)) headIntent else inverse
+}
+
 /** `creatureProperties.damage` / `adjustQuantity` take one of these two operations. */
 enum class WriteOperation(val wireValue: String) {
     SET("set"),
@@ -85,6 +129,11 @@ sealed class WriteOp {
      * re-inferred from the sign of [Damage.value], because `damage increment -1` is
      * "restore a slot" on a spell slot and "heal 1" on the HP row, and those read
      * differently in a list of things you did.
+     *
+     * The factory chooses the *vocabulary* (spend/restore vs damage/heal vs item
+     * use/add); only the **direction** within that vocabulary is re-derived, and only
+     * where it can actually change — when coalescing sums increments of both signs.
+     * See [intentForMergedValue].
      */
     open val intent: TrackerWriteKind? get() = null
 
@@ -147,7 +196,13 @@ sealed class WriteOp {
             if (other !is Damage) return null
             if (other.propertyId != propertyId) return null
             if (operation != WriteOperation.INCREMENT || other.operation != WriteOperation.INCREMENT) return null
-            return copy(value = value + other.value, resultingValue = null, undo = null)
+            val merged = value + other.value
+            return copy(
+                value = merged,
+                resultingValue = null,
+                undo = null,
+                intent = intentForMergedValue(intent, merged),
+            )
         }
 
         override val description: String get() = "damage ${operation.wireValue} $value on $propertyId"
@@ -198,7 +253,13 @@ sealed class WriteOp {
             if (other !is AdjustQuantity) return null
             if (other.propertyId != propertyId) return null
             if (operation != WriteOperation.INCREMENT || other.operation != WriteOperation.INCREMENT) return null
-            return copy(value = value + other.value, resultingValue = null, undo = null)
+            val merged = value + other.value
+            return copy(
+                value = merged,
+                resultingValue = null,
+                undo = null,
+                intent = intentForMergedValue(intent, merged),
+            )
         }
 
         override val description: String get() = "adjustQuantity ${operation.wireValue} $value on $propertyId"

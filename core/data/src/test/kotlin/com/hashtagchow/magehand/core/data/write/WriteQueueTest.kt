@@ -1,5 +1,6 @@
 package com.hashtagchow.magehand.core.data.write
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -20,6 +21,7 @@ import com.hashtagchow.magehand.core.ddp.DdpError
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerKind
+import com.hashtagchow.magehand.core.model.TrackerWriteKind
 
 /**
  * Everything the WP4 brief asks the queue to prove — timing, coalescing, rollback and
@@ -223,6 +225,30 @@ class WriteQueueTest {
         // Two calls would have been +1 then +1-1 = 0; the zero is dropped entirely.
         assertEquals(1, h.caller.calls.size)
         assertEquals(1, h.caller.calls.single().int("value"))
+    }
+
+    /**
+     * The end-to-end version of `WriteOpCoalesceTest`: one call *and* one truthful
+     * history row. The burst below is +1 then −3, so the server sees a restore of 2 and
+     * the user must be told about a restore of 2 — not the "Spent" the head op wanted.
+     *
+     * (Every submit lands before the worker's first turn, so the whole burst is one
+     * coalesced entry — which is exactly the window the bug lived in.)
+     */
+    @Test
+    fun `a burst that nets out the other way is filed as what it actually did`() = queueTest {
+        val h = harness()
+        h.queue.submit(WriteOp.spend(slot))
+        repeat(3) { h.queue.submit(WriteOp.restore(slot)) }
+        advanceUntilIdle()
+
+        assertEquals(1, h.caller.calls.size)
+        assertEquals("a net restore of 2 is `increment -2`", -2, h.caller.calls.single().int("value"))
+
+        val burst = h.queue.history.value.first() // newest first
+        assertEquals(TrackerWriteKind.RESTORE, burst.kind)
+        assertEquals(2, burst.amount)
+        assertEquals("1st Level", burst.targetName)
     }
 
     @Test
@@ -641,6 +667,98 @@ class WriteQueueTest {
 
         assertTrue(stranded.isCancelled)
         assertTrue(h.queue.optimistic.value.isEmpty)
+    }
+
+    /**
+     * The half the test above did not cover: `takeCoalescedHead()` has already removed
+     * the head from the queue, so a `close()` that only drains the queue leaves the
+     * submissions behind the *in-flight* call unresolved forever. A caller awaiting one
+     * from outside a `viewModelScope` would simply never wake up.
+     */
+    @Test
+    fun `closing the queue also settles the call that is already in flight`() = queueTest {
+        val h = harness()
+        h.caller.gate = CompletableDeferred()
+        val inFlight = h.queue.submit(WriteOp.Damage("a", WriteOperation.INCREMENT, 1))
+        advanceTimeBy(10)
+        // It really is on the wire, so the assertion below is about the right window.
+        assertEquals(1, h.caller.calls.size)
+        assertFalse(inFlight.isCompleted)
+
+        h.queue.close()
+        advanceUntilIdle()
+
+        assertTrue("the in-flight submission never settled", inFlight.isCompleted)
+        assertTrue(inFlight.isCancelled)
+    }
+
+    /**
+     * Every submission the head *absorbed* has to be settled too, not just the one that
+     * created it — the claim is made on the merged entry, which is why the claim now
+     * happens inside `takeCoalescedHead()` after the merge rather than in `dispatch()`.
+     *
+     * **What this does not cover, honestly.** Moving the claim also closed a window of a
+     * few instructions between "removed from the queue" and "claimed as in-flight", during
+     * which a concurrent `close()` saw the entry in neither place and left it unsettled.
+     * That window has no suspension point in it, so a single-threaded `TestScope` cannot
+     * schedule a `close()` inside it — there is no deterministic way to hit it from a test
+     * without instrumenting the production code with a seam that exists only for the test.
+     * A multi-threaded stress loop could hit it *sometimes*, which is worse than not
+     * testing it: a race test that passes with the bug present is false assurance. So the
+     * window is closed by construction — removal and claim are now one lock acquisition,
+     * and there is no intermediate state to observe — and what is pinned here is the
+     * observable consequence: whatever `close()` finds, no submission is left hanging.
+     */
+    @Test
+    fun `closing settles every submission behind a coalesced in-flight entry`() = queueTest {
+        val h = harness()
+        h.caller.gate = CompletableDeferred()
+        // The first goes on the wire; the rest pile up and merge into the next head.
+        val first = h.queue.submit(WriteOp.Damage("a", WriteOperation.INCREMENT, 1))
+        advanceTimeBy(10)
+        assertEquals(1, h.caller.calls.size)
+
+        val merged = (1..3).map { h.queue.submit(WriteOp.Damage("a", WriteOperation.INCREMENT, 1)) }
+        // Let the gated first call finish so the worker takes and coalesces the rest.
+        h.caller.gate?.complete(Unit)
+        h.caller.gate = CompletableDeferred()
+        advanceUntilIdle()
+        assertEquals("the three taps should have coalesced into one call", 2, h.caller.calls.size)
+        merged.forEach { assertFalse("a coalesced submission settled early", it.isCompleted) }
+
+        h.queue.close()
+        advanceUntilIdle()
+
+        assertTrue(first.isCompleted)
+        merged.forEachIndexed { index, deferred ->
+            assertTrue("coalesced submission $index never settled", deferred.isCompleted)
+            assertTrue("coalesced submission $index should be cancelled", deferred.isCancelled)
+        }
+        assertTrue(h.queue.optimistic.value.isEmpty)
+    }
+
+    /**
+     * The consequence that made it a bug rather than an untidiness: `await()` has to
+     * return control, one way or another.
+     */
+    @Test
+    fun `awaiting an in-flight write across a close completes exceptionally`() = queueTest {
+        val h = harness()
+        h.caller.gate = CompletableDeferred()
+        val inFlight = h.queue.submit(WriteOp.Damage("a", WriteOperation.INCREMENT, 1))
+        advanceTimeBy(10)
+
+        var outcome: Throwable? = null
+        // A scope the queue's close() does not cancel — a repository awaiting a write,
+        // not a ViewModel.
+        val awaiter = backgroundScope.launch {
+            outcome = runCatching { inFlight.await() }.exceptionOrNull()
+        }
+        h.queue.close()
+        advanceUntilIdle()
+
+        assertTrue("await() never returned", awaiter.isCompleted)
+        assertTrue("expected a cancellation, got $outcome", outcome is CancellationException)
     }
 
     // -----------------------------------------------------------------------

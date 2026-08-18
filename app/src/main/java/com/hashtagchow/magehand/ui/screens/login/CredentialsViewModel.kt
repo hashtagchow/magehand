@@ -101,6 +101,9 @@ class CredentialsViewModel @Inject constructor(
         is ApiException.ServerError ->
             "Nothing is wrong with your details — the server itself is unhappy. Try again shortly."
 
+        is ApiException.SecureStorageUnavailable ->
+            "Your details were correct — this device's keystore refused to store the session. Restart the device and try again."
+
         else -> null
     }
 

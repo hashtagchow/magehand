@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -107,6 +108,58 @@ class AesGcmTokenCodecTest {
     fun `garbage returns null instead of throwing`() {
         for (junk in listOf("", "not base64 at all !!!", "AAAA", Base64.encodeToString(ByteArray(5), Base64.NO_WRAP))) {
             assertNull("input: '$junk'", AesGcmTokenCodec.decrypt(key, junk))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Transient vs permanent — the distinction `decrypt`'s String? cannot carry
+    //
+    // A wedged keymaster throws ProviderException, an unchecked RuntimeException, out
+    // of the *cipher operation* rather than out of the key handout. Nothing in
+    // Cipher's signature hints at it, `catch (GeneralSecurityException)` does not cover
+    // it, and it is the half of the 1.0.2 crash that a key-provider guard cannot see.
+    // See [WedgedKeystore] for why the double is faithful.
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `a wedged cipher is Unavailable, not Unreadable`() {
+        val sealed = AesGcmTokenCodec.encrypt(key, token)
+
+        val result = withWedgedKeystore { AesGcmTokenCodec.unseal(NonExportableAesKey, sealed) }
+
+        assertTrue(
+            "a transient platform failure must not be reported as a dead blob, got $result",
+            result is AesGcmTokenCodec.Unsealed.Unavailable,
+        )
+    }
+
+    @Test
+    fun `a wedged cipher does not escape as an exception`() {
+        val sealed = AesGcmTokenCodec.encrypt(key, token)
+        // The regression itself: 1.0.2 let ProviderException out of here, through
+        // KeystoreTokenStore.read(), and into the ViewModel that took the app down.
+        val thrown = runCatching { withWedgedKeystore { AesGcmTokenCodec.decrypt(NonExportableAesKey, sealed) } }
+        assertNull("decrypt threw ${thrown.exceptionOrNull()}", thrown.exceptionOrNull())
+        assertNull(thrown.getOrNull())
+    }
+
+    @Test
+    fun `the permanent failures stay Unreadable`() {
+        // The other direction of the same fix: none of these may claim to be transient,
+        // or the store would keep a genuinely dead blob forever.
+        val sealed = AesGcmTokenCodec.encrypt(key, token)
+        val tampered = Base64.decode(sealed, Base64.NO_WRAP).also {
+            it[it.size - 20] = (it[it.size - 20].toInt() xor 0x01).toByte()
+        }
+
+        val permanent = listOf(
+            "a key that no longer matches" to AesGcmTokenCodec.unseal(freshKey(), sealed),
+            "a failed tag check" to AesGcmTokenCodec.unseal(key, Base64.encodeToString(tampered, Base64.NO_WRAP)),
+            "not base64" to AesGcmTokenCodec.unseal(key, "not base64 at all !!!"),
+            "a truncated blob" to AesGcmTokenCodec.unseal(key, Base64.encodeToString(ByteArray(5), Base64.NO_WRAP)),
+        )
+        permanent.forEach { (what, result) ->
+            assertTrue("$what should be Unreadable, got $result", result is AesGcmTokenCodec.Unsealed.Unreadable)
         }
     }
 }

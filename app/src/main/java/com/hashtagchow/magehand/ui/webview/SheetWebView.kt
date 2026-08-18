@@ -1,6 +1,5 @@
 package com.hashtagchow.magehand.ui.webview
 
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -41,11 +40,20 @@ class SheetWebViewState internal constructor(
     var injectionPhase: SsoInjectionPhase by mutableStateOf(SsoInjectionPhase.PENDING)
         internal set
 
-    /** The last URL the WebView finished loading; drives the back handler's enablement. */
-    var currentUrl: String? by mutableStateOf(null)
-        internal set
+    /**
+     * The WebView's history, mirrored into snapshot state by the client's callbacks.
+     *
+     * Mirrored rather than queried: `WebView.canGoBack()` is an ordinary method call,
+     * and a composable that reads one is never invalidated when the answer changes.
+     * See [SheetNavigationState].
+     */
+    val navigation: SheetNavigationState = SheetNavigationState()
 
-    fun canGoBack(): Boolean = webView.canGoBack()
+    /** The last URL the WebView committed. */
+    val currentUrl: String? get() = navigation.currentUrl
+
+    /** Whether the PWA has history to step back through. */
+    val canGoBack: Boolean get() = navigation.canGoBack
 
     fun goBack() = webView.goBack()
 }
@@ -72,7 +80,7 @@ fun rememberSheetWebViewState(session: SheetSession?): SheetWebViewState? {
                 session = session,
                 openExternally = { uri -> context.openInSystemBrowser(uri) },
                 onPhaseChanged = { created.injectionPhase = it },
-                onPageLoaded = { created.currentUrl = it },
+                onNavigated = { url, canGoBack -> created.navigation.onNavigated(url, canGoBack) },
             )
             created.webView.loadUrl(session.bootstrapUrl)
         }
@@ -109,7 +117,7 @@ fun SheetWebViewHost(
         },
     )
 
-    BackHandler(enabled = state.canGoBack()) { state.goBack() }
+    BackHandler(enabled = state.canGoBack) { state.goBack() }
 }
 
 /**
@@ -162,10 +170,21 @@ private fun createHardenedWebView(context: Context): WebView = WebView(context).
     WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
 }
 
+/**
+ * Only ever reached for an `http`/`https` URL — [decideNavigation] blocks every other
+ * scheme before it gets here.
+ *
+ * The catch is [RuntimeException], not `ActivityNotFoundException`, because "no app
+ * can open this" is not the only way `ACTION_VIEW` fails: `FileUriExposedException`,
+ * `SecurityException` from a target activity's permission, and the transaction-size
+ * failure a very long URL can provoke are all unchecked, and every one of them would
+ * be a crash triggered by a link in a character sheet the user did not write. Nothing
+ * that happens in the system browser is worth taking the app down for.
+ */
 private fun Context.openInSystemBrowser(uri: Uri) {
     try {
         startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    } catch (e: ActivityNotFoundException) {
-        Log.w("MageHandSso", "No app can open $uri", e)
+    } catch (e: RuntimeException) {
+        Log.w("MageHandSso", "Could not hand a '${uri.scheme}' link to another app", e)
     }
 }

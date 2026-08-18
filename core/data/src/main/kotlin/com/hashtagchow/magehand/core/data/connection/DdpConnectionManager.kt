@@ -9,7 +9,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.account.AccountRepository
 import com.hashtagchow.magehand.core.ddp.DdpClient
+import com.hashtagchow.magehand.core.ddp.OkHttpDdpSocketFactory
 import com.hashtagchow.magehand.core.model.Account
+import okhttp3.OkHttpClient
 
 /**
  * The live DDP connection belonging to the **active account**, and nothing else.
@@ -72,12 +74,7 @@ fun websocketUrlFor(serverOrigin: String): String =
 class DefaultDdpConnectionManager(
     private val accountRepository: AccountRepository,
     private val scope: CoroutineScope,
-    private val clientFactory: (Account, suspend () -> String?) -> DdpClient = { account, tokenProvider ->
-        DdpClient.okHttp(
-            url = websocketUrlFor(account.serverUrl),
-            resumeTokenProvider = tokenProvider,
-        )
-    },
+    private val clientFactory: (Account, suspend () -> String?) -> DdpClient = sharedClientFactory(),
 ) : DdpConnectionManager {
 
     private val _connection = MutableStateFlow<AccountConnection?>(null)
@@ -106,4 +103,36 @@ class DefaultDdpConnectionManager(
     }
 
     private data class ConnectionKey(val accountId: String, val serverUrl: String)
+
+    companion object {
+
+        /**
+         * The production [clientFactory]: every account's [DdpClient] is built on **one**
+         * `OkHttpClient`.
+         *
+         * The bug this closes: the old default called `DdpClient.okHttp(url)` with no
+         * client, so each account switch default-constructed a fresh `OkHttpClient`
+         * carrying its own dispatcher thread pool and connection pool. `DdpClient.close()`
+         * shuts down its own executor but — correctly, since it does not own it — not
+         * OkHttp's, so every switch stranded a pool set on a ~60 s idle timer. Sharing is
+         * the architectural fix rather than teaching `close()` to tear the client down,
+         * because sharing is also what OkHttp is designed for, and a client that shuts
+         * down something it was handed is a worse contract than one that never does.
+         *
+         * @param httpClient the process's client. `DataModule` passes the same base the
+         *   REST API uses, so there is exactly one dispatcher and one connection pool in
+         *   the app; the default is for tests and for callers with no DI graph.
+         * @param build the `url → client` seam, injectable purely so a test can observe
+         *   *which* `OkHttpClient` each account was given.
+         */
+        internal fun sharedClientFactory(
+            httpClient: OkHttpClient = OkHttpDdpSocketFactory.defaultClient(),
+            build: (String, OkHttpClient, suspend () -> String?) -> DdpClient =
+                { url, client, tokenProvider ->
+                    DdpClient.okHttp(url = url, httpClient = client, resumeTokenProvider = tokenProvider)
+                },
+        ): (Account, suspend () -> String?) -> DdpClient = { account, tokenProvider ->
+            build(websocketUrlFor(account.serverUrl), httpClient, tokenProvider)
+        }
+    }
 }

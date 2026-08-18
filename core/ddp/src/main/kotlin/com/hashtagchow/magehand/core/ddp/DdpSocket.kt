@@ -80,11 +80,35 @@ class OkHttpDdpSocketFactory(
     }
 
     companion object {
-        fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+        /**
+         * A websocket-tuned view of [base] that **shares its dispatcher, connection
+         * pool and cache** — `newBuilder()`, not a fresh `Builder()`.
+         *
+         * That sharing is the whole point. An `OkHttpClient` owns a thread pool and a
+         * connection pool, and neither is reclaimed until an idle timer (~60 s for
+         * connections, and the dispatcher's threads outlive that) or an explicit
+         * `dispatcher.executorService.shutdown()`. Building one per [DdpClient] — which
+         * is one per account switch — stranded a set of both every time the user
+         * changed account, because `DdpClient.close()` has no business shutting down a
+         * client it did not create. One base client for the process, derived here and
+         * for the REST API, means there is nothing to strand.
+         *
+         * The timeouts are the websocket ones: no read timeout at all, because a DDP
+         * connection is idle by design between messages and liveness is proven by
+         * `DdpClient`'s own DDP-level ping/pong rather than by the socket timing out.
+         */
+        fun webSocketClient(base: OkHttpClient): OkHttpClient = base.newBuilder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.SECONDS) // websockets are long-lived
             .writeTimeout(15, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
+
+        /**
+         * A standalone websocket client. Convenience for tests and for the
+         * `DdpClient.okHttp` default — production goes through [webSocketClient] with
+         * the process's one base client (`DataModule`).
+         */
+        fun defaultClient(): OkHttpClient = webSocketClient(OkHttpClient())
     }
 }

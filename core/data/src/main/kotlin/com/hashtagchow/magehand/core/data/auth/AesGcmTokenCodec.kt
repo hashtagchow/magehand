@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.core.data.auth
 
 import android.util.Base64
 import java.security.GeneralSecurityException
+import java.security.ProviderException
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
@@ -65,33 +66,77 @@ internal object AesGcmTokenCodec {
     }
 
     /**
-     * The inverse of [encrypt].
-     *
-     * Returns `null` — never throws — for every "this is not our ciphertext, or not
-     * ours any more" case: wrong version, truncated blob, non-Base64, a failed GCM
-     * tag check, or a Keystore key that was invalidated (secure-lock-screen removal
-     * wipes auth-bound keys, and a restored-from-backup app has no key at all).
-     * The store's contract is that a token either reads back intact or is absent.
+     * The outcome of [unseal]. **Three** states, not two, because "this blob is dead"
+     * and "this blob cannot be opened *right now*" have opposite consequences: the
+     * first justifies deleting it, the second makes deleting it data loss. Collapsing
+     * them is what turned a one-boot StrongBox wedge into a permanent sign-out.
      */
-    fun decrypt(key: SecretKey, encoded: String): String? {
+    internal sealed interface Unsealed {
+
+        /** The token, recovered intact. */
+        class Plaintext(val value: String) : Unsealed
+
+        /**
+         * Permanently unreadable, and no retry will change that: wrong version byte,
+         * truncated blob, non-Base64, a failed GCM tag check, or a key that no longer
+         * matches the one the blob was sealed under (removing the secure lock screen
+         * wipes auth-bound keys; a restored-from-backup app has a different key).
+         */
+        object Unreadable : Unsealed
+
+        /**
+         * The platform refused to *perform* the operation. The blob is very probably
+         * fine — we never got far enough to find out.
+         *
+         * AndroidKeyStore's cipher SPI throws [ProviderException] (an unchecked
+         * `RuntimeException`, so nothing in the signature hints at it) straight out of
+         * `Cipher.init`/`doFinal` when the keymaster or StrongBox is wedged. That is a
+         * *different* moment from the key handout failing, and it is the one that
+         * survived the 1.0.2 fix: a Keystore key hands out fine and then will not
+         * operate, so a `readableKey()`-shaped guard never sees it.
+         */
+        class Unavailable(val cause: Throwable) : Unsealed
+    }
+
+    /**
+     * The inverse of [encrypt] — never throws, for any input or platform state.
+     *
+     * See [Unsealed] for why the failure half is two states rather than one.
+     */
+    internal fun unseal(key: SecretKey, encoded: String): Unsealed {
         val blob = try {
             Base64.decode(encoded, Base64.NO_WRAP)
         } catch (_: IllegalArgumentException) {
-            return null
+            return Unsealed.Unreadable
         }
-        if (blob.size <= 1 + IV_LENGTH) return null
-        if (blob[0] != VERSION) return null
+        if (blob.size <= 1 + IV_LENGTH) return Unsealed.Unreadable
+        if (blob[0] != VERSION) return Unsealed.Unreadable
 
         val iv = blob.copyOfRange(1, 1 + IV_LENGTH)
         val body = blob.copyOfRange(1 + IV_LENGTH, blob.size)
         return try {
             val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_LENGTH_BITS, iv))
-            String(cipher.doFinal(body), Charsets.UTF_8)
+            Unsealed.Plaintext(String(cipher.doFinal(body), Charsets.UTF_8))
         } catch (_: GeneralSecurityException) {
-            null
+            Unsealed.Unreadable
         } catch (_: IllegalStateException) {
-            null
+            Unsealed.Unreadable
+        } catch (e: ProviderException) {
+            // Deliberately *not* folded in with the two above: this is the transient one.
+            Unsealed.Unavailable(e)
         }
     }
+
+    /**
+     * [unseal] flattened to "the token, or nothing".
+     *
+     * **Not for the store's read path.** This collapses [Unsealed.Unavailable] into
+     * `null`, which is precisely the conflation [Unsealed] exists to prevent — a caller
+     * that then evicts on `null` deletes a good token because the keymaster hiccuped.
+     * It survives because the framing, tamper and round-trip assertions in
+     * `AesGcmTokenCodecTest` genuinely do not care why a blob failed to open.
+     */
+    fun decrypt(key: SecretKey, encoded: String): String? =
+        (unseal(key, encoded) as? Unsealed.Plaintext)?.value
 }

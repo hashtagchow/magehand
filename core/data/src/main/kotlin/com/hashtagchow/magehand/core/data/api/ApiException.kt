@@ -4,7 +4,9 @@ import com.hashtagchow.magehand.core.data.server.ServerUrlProblem
 import java.io.IOException
 
 /**
- * Every failure mode of the DiceCloud REST client, as a closed hierarchy.
+ * Every failure mode of **signing in** — the DiceCloud REST client's, plus the one
+ * local failure that stops a sign-in dead ([SecureStorageUnavailable]) — as a closed
+ * hierarchy.
  *
  * The point of the hierarchy is the distinction the login screen has to make:
  * **"you typed the wrong password"** ([InvalidCredentials]) versus **"this isn't
@@ -64,4 +66,23 @@ sealed class ApiException(
      * the user typed credentials for some other account.
      */
     class AccountMismatch : ApiException("Those credentials are for a different DiceCloud account.")
+
+    /**
+     * The server said yes, but the device's Keystore would not seal the resume token.
+     *
+     * The only member of this hierarchy that never touched the network. It is here
+     * rather than in its own hierarchy because this *is* the login screen's typed
+     * error channel — `DefaultAccountRepository.runApi` converts exactly this type
+     * into a failed `Result`, and `CredentialsViewModel` renders exactly that. A
+     * wedged keymaster or an invalidated key would otherwise escape `runApi` as a
+     * "programming error" and take the process down at the moment the user finished
+     * typing their password.
+     *
+     * Not retried and not worked around: storing the token unsealed is the one thing
+     * docs/design/05-security.md §"Token & credential handling" forbids outright.
+     */
+    class SecureStorageUnavailable(cause: Throwable?) : ApiException(
+        "This device's secure storage isn't available, so the sign-in can't be saved.",
+        cause,
+    )
 }
