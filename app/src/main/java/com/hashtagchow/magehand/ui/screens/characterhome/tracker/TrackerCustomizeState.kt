@@ -60,6 +60,22 @@ data class TrackerCustomizeState(
     val hidden: List<CustomizeRow> = emptyList(),
     val items: List<ItemPickRow> = emptyList(),
     val accentColor: String? = null,
+    /**
+     * Whether **reordering is the only thing this sheet can do**
+     * (docs/design/09-local-characters.md decision 8, for a local character).
+     *
+     * Three of this sheet's four controls have no meaning for a character the player typed in
+     * by hand, and `LocalOpenCharacter` documents each as a deliberate no-op: *hide* is what
+     * deleting the row in the form does properly; *pin* says nothing, because every local row
+     * is on the tracker by construction; and the *accent* lives in `theme_prefs`, which is
+     * account-keyed and therefore unreachable without the sentinel account decision 1 forbids.
+     *
+     * The sheet hides them rather than dimming them. A disabled control invites the user to
+     * find out why it is disabled; an absent one is simply not part of this sheet, which is
+     * the truth — 09 decision 8 asks for **one** mechanism (`sortIndex`), and this is what one
+     * mechanism looks like from the front.
+     */
+    val reorderOnly: Boolean = false,
 ) {
     val hasHiddenRows: Boolean get() = hidden.isNotEmpty()
 }
@@ -68,11 +84,22 @@ data class TrackerCustomizeState(
  * Builds the sheet's state.
  *
  * @param board must be `boardIgnoringHidden` — see the file comment.
+ * @param showToggles FR-6 (docs/design/09-local-characters.md decision 9): when false the
+ *   sheet's CONDITIONS section is hidden. The filter is applied to the *whole* row list
+ *   before it is split into visible and hidden, which is the difference between hiding the
+ *   section and hiding half of it: a condition the user had previously hidden would
+ *   otherwise reappear under "Hidden", offering to un-hide a row the tracker will not draw.
+ *
+ *   Nothing is deleted by this — `tracker_prefs` keeps every condition override, so turning
+ *   the switch back on restores exactly the arrangement the user had (09 decision 9: "when
+ *   true: exactly the shipped FR-1/2 behavior").
  */
 fun toCustomizeState(
     board: TrackerBoard,
     overrides: List<TrackerOverride>,
     accentColor: String?,
+    showToggles: Boolean = true,
+    reorderOnly: Boolean = false,
 ): TrackerCustomizeState {
     val byId = overrides.associateBy { it.propertyId }
     fun hidden(id: String) = byId[id]?.hidden == true
@@ -116,7 +143,8 @@ fun toCustomizeState(
                 ),
             )
         }
-        board.activeToggles.forEach {
+        val toggles = if (showToggles) board.activeToggles else emptyList()
+        toggles.forEach {
             add(
                 CustomizeRow(
                     propertyId = it.propertyId,
@@ -145,6 +173,7 @@ fun toCustomizeState(
             )
         },
         accentColor = accentColor,
+        reorderOnly = reorderOnly,
     )
 }
 

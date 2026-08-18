@@ -218,11 +218,7 @@ fun RestConfirmDialog(
                         )
                     }
                 }
-                // Deliberately hedged. `creature.methods.rest` applies the sheet's own
-                // reset rules and triggers, and what those cover varies by character —
-                // the WP7 probe's bare test dummy had its slots and Rage restored and its
-                // hit points left alone, because it has no hit dice to spend.
-                if (kind == RestKind.LONG) Text(stringResource(R.string.tracker_rest_hp_note))
+                if (state.showsRestHpNote(kind)) Text(stringResource(R.string.tracker_rest_hp_note))
                 Text(
                     text = stringResource(R.string.tracker_rest_not_undoable),
                     style = MaterialTheme.typography.bodyMedium,
@@ -258,6 +254,31 @@ fun RestConfirmDialog(
  */
 fun TrackerUiState.rowsRestoredBy(kind: RestKind): List<PipRowState> =
     (slots + resources).filter { row -> kind.restores(row.reset) }
+
+/**
+ * Whether the long-rest confirm adds `tracker_rest_hp_note` — *"The server also applies …
+ * hit points, hit dice and any rest triggers"*.
+ *
+ * Two conditions, and the second one is the fix. The note is deliberately hedged about what a
+ * long rest does beyond the rows listed above it, because `creature.methods.rest` applies the
+ * sheet's own reset rules and triggers and what those cover varies by character — the WP7
+ * probe's bare test dummy had its slots and Rage restored and its hit points left alone,
+ * because it has no hit dice to spend.
+ *
+ * But every word of that is about **the server**. A local character has none, and
+ * `LocalOpenCharacter.rest` is `current = total` on the qualifying rows and nothing else — it
+ * does not touch `currentHp` at all (09 decision 7). Shown unconditionally, the note promised
+ * hit points back to the one flow that cannot deliver them, on the *primary* local surface, in
+ * a dialog whose entire job is to say truthfully what the button is about to do.
+ *
+ * `hasConnection` and not `canWrite`: it is the same "is there a server behind this at all"
+ * question 09 decision 8 answers for the connection dot, and it is already false for every
+ * local character (see [TrackerUiState.hasConnection]). A DiceCloud character that is merely
+ * offline still has a server whose rest rules the note describes — and cannot open this
+ * dialog anyway, since the rest buttons are inert without `canWrite`.
+ */
+fun TrackerUiState.showsRestHpNote(kind: RestKind): Boolean =
+    kind == RestKind.LONG && hasConnection
 
 private val KEYPAD = listOf(
     listOf("1", "2", "3"),

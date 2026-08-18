@@ -25,6 +25,7 @@ import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
 import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
+import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -107,6 +108,7 @@ class CharacterHomeViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     characterListRepository: CharacterListRepository,
     sheetSessionFactory: SheetSessionFactory,
+    appSettingsStore: AppSettingsStore,
     private val openCharacterFactory: OpenCharacterFactory,
     private val connectionManager: DdpConnectionManager,
 ) : ViewModel() {
@@ -157,6 +159,13 @@ class CharacterHomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * FR-6 applies to **every** character, not only local ones (09 decision 9: "for ALL
+     * characters"). It is read here rather than in the composable so the gate is on the state
+     * the screen renders, which is what `TrackerUiStateTest` can pin.
+     */
+    private val showToggles: Flow<Boolean> = appSettingsStore.showToggles
+
     private val trackerState: Flow<TrackerUiState> = open.flatMapLatest { character ->
         if (character == null) {
             flowOf(TrackerUiState(creatureId = creatureId))
@@ -174,7 +183,8 @@ class CharacterHomeViewModel @Inject constructor(
                 character.canWrite,
                 character.canUndo,
                 character.writeHistory,
-            ) { read, canWrite, canUndo, history ->
+                showToggles,
+            ) { read, canWrite, canUndo, history, toggles ->
                 toTrackerUiState(
                     creatureId = creatureId,
                     board = read.board,
@@ -186,6 +196,7 @@ class CharacterHomeViewModel @Inject constructor(
                     canUndo = canUndo,
                     history = history,
                     zone = zone,
+                    showToggles = toggles,
                 )
             }
         }
@@ -199,7 +210,10 @@ class CharacterHomeViewModel @Inject constructor(
                 character.boardIgnoringHidden,
                 character.overrides,
                 character.accentColor,
-            ) { board, overrides, accent -> toCustomizeState(board, overrides, accent) }
+                showToggles,
+            ) { board, overrides, accent, toggles ->
+                toCustomizeState(board, overrides, accent, toggles)
+            }
         }
     }
 

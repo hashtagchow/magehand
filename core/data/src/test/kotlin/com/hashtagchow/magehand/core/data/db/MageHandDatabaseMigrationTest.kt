@@ -14,6 +14,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -23,13 +24,13 @@ import org.robolectric.annotation.Config
 import java.io.File
 
 /**
- * v1 → v2 migration, end to end, on real SQLite.
+ * Every migration, end to end, on real SQLite.
  *
- * The v1 database is not hand-written here: it is created by replaying the **committed**
- * `core/data/schemas/…/1.json` — the exact schema WP3 shipped to any device that already
- * has the app. If someone edits that file (they must not), or edits [MIGRATION_1_2] so it
- * no longer produces v2's schema, Room's own validator fails this test rather than a
- * user's upgrade.
+ * No starting database here is hand-written: each one is created by replaying the **committed**
+ * `core/data/schemas/…/<version>.json` — the exact schema that shipped to any device already
+ * running that version. If someone edits one of those files (they must not), or edits a
+ * migration so it no longer produces the next version's schema, Room's own validator fails
+ * this test rather than a user's upgrade.
  *
  * Robolectric for the same reason as `AccountDaoTest`: every `Room.*databaseBuilder`
  * overload in the Android artifact needs a `Context` (docs/verification/WP3.md §5).
@@ -61,18 +62,28 @@ class MageHandDatabaseMigrationTest {
         listOf("", "-wal", "-shm", "-journal").forEach { File(databaseFile.path + it).delete() }
     }
 
-    /** Replays the committed v1 schema, including Room's `room_master_table` identity row. */
-    private fun createVersion1Database(): SQLiteDatabase {
+    /**
+     * Replays a committed schema, including Room's `room_master_table` identity row.
+     *
+     * Parameterised over the version rather than copied per version: v2 → v3 needs the exact
+     * same replay v1 → v2 needed, and a second copy of it is a second place for the schema
+     * path to go stale.
+     */
+    private fun createDatabaseAtVersion(version: Int): SQLiteDatabase {
         val repoRoot = System.getProperty("magehand.repoRoot")
             ?: error("magehand.repoRoot system property not set by the build script")
         val schemaFile = File(
             repoRoot,
-            "core/data/schemas/com.hashtagchow.magehand.core.data.db.MageHandDatabase/1.json",
+            "core/data/schemas/com.hashtagchow.magehand.core.data.db.MageHandDatabase/$version.json",
         )
-        assertTrue("missing committed v1 schema at ${schemaFile.path}", schemaFile.isFile)
+        assertTrue("missing committed v$version schema at ${schemaFile.path}", schemaFile.isFile)
 
         val schema = (Json.parseToJsonElement(schemaFile.readText()) as JsonObject)["database"]!!.jsonObject
-        assertEquals("committed schema is not version 1", 1, schema["version"]!!.jsonPrimitive.content.toInt())
+        assertEquals(
+            "committed schema is not version $version",
+            version,
+            schema["version"]!!.jsonPrimitive.content.toInt(),
+        )
 
         val db = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
         for (entity in schema["entities"]!!.jsonArray) {
@@ -84,13 +95,22 @@ class MageHandDatabaseMigrationTest {
             }
         }
         schema["setupQueries"]!!.jsonArray.forEach { db.execSQL(it.jsonPrimitive.content) }
-        db.version = 1
+        db.version = version
         return db
     }
 
+    private fun createVersion1Database(): SQLiteDatabase = createDatabaseAtVersion(1)
+
+    private fun createVersion2Database(): SQLiteDatabase = createDatabaseAtVersion(2)
+
     private fun JsonArray?.orEmpty(): List<kotlinx.serialization.json.JsonElement> = this ?: emptyList()
 
-    private fun openVersion2(): MageHandDatabase =
+    /**
+     * Opens at the **current** version with every migration registered. Opening is what
+     * actually runs them — and Room validates the resulting schema against its compiled
+     * expectation before handing the database over, which is the assertion that matters.
+     */
+    private fun openCurrent(): MageHandDatabase =
         Room.databaseBuilder(context, MageHandDatabase::class.java, databaseName)
             .addMigrations(*MageHandDatabase.MIGRATIONS)
             .allowMainThreadQueries()
@@ -104,8 +124,10 @@ class MageHandDatabaseMigrationTest {
                 buildSet { while (cursor.moveToNext()) add(cursor.getString(0)) }
             }
 
+    // --- v1 → current -------------------------------------------------------
+
     @Test
-    fun `migrating v1 to v2 keeps every account row intact`() = runTest {
+    fun `migrating from v1 keeps every account row intact`() = runTest {
         createVersion1Database().use { v1 ->
             v1.execSQL(
                 "INSERT INTO accounts (id, serverUrl, userId, username, addedAt, lastUsedAt) " +
@@ -113,9 +135,7 @@ class MageHandDatabaseMigrationTest {
             )
         }
 
-        // Opening with the migration registered is what actually runs it — and Room
-        // validates the resulting schema against v2 before handing the database over.
-        val db = openVersion2()
+        val db = openCurrent()
         val accounts = db.accountDao().getAll()
 
         assertEquals(1, accounts.size)
@@ -127,14 +147,14 @@ class MageHandDatabaseMigrationTest {
             assertEquals(10L, addedAt)
             assertEquals(20L, lastUsedAt)
         }
-        assertEquals(2, db.openHelper.readableDatabase.version)
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
     }
 
     @Test
-    fun `migrating v1 to v2 creates the four WP4 tables`() = runTest {
+    fun `migrating from v1 creates the four WP4 tables`() = runTest {
         createVersion1Database().close()
 
-        val db = openVersion2()
+        val db = openCurrent()
         val tables = tableNames(db)
 
         assertTrue("accounts must survive", "accounts" in tables)
@@ -146,7 +166,7 @@ class MageHandDatabaseMigrationTest {
     @Test
     fun `the migrated database is usable by every new DAO`() = runTest {
         createVersion1Database().close()
-        val db = openVersion2()
+        val db = openCurrent()
 
         db.characterDao().upsert(
             CharacterEntity("acc-1", "creature-1", "Sabriel", null, "owner-1", true, 5),
@@ -161,24 +181,224 @@ class MageHandDatabaseMigrationTest {
         assertEquals("#7C4DFF", db.themePrefDao().find("acc-1", "creature-1")?.accentColor)
     }
 
+    /**
+     * The two-step path. A device that never opened the 1.0.x build sitting on v2 is not the
+     * only upgrade shape: one still on v1 must cross both migrations in one open, and the
+     * chained result must satisfy the same validator.
+     */
     @Test
-    fun `a fresh install creates v2 directly and needs no migration`() = runTest {
-        // No v1 file at all: Room must be able to build the whole schema from scratch.
-        val db = openVersion2()
-        val tables = tableNames(db)
-        assertTrue(tables.containsAll(listOf("accounts", "characters", "snapshots", "tracker_prefs", "theme_prefs")))
-        assertEquals(0, db.accountDao().getAll().size)
+    fun `migrating from v1 runs both migrations and lands on the current version`() = runTest {
+        createVersion1Database().use { v1 ->
+            v1.execSQL(
+                "INSERT INTO accounts (id, serverUrl, userId, username, addedAt, lastUsedAt) " +
+                    "VALUES ('acc-1', 'https://dnd.example.com', 'user', 'name', 1, 2)",
+            )
+        }
+
+        val db = openCurrent()
+
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
+        assertEquals(1, db.accountDao().getAll().size)
+        assertTrue("local_characters" in tableNames(db))
+    }
+
+    // --- v2 → v3 (FR-5) -----------------------------------------------------
+
+    /**
+     * The migration 09 decision 2 specifies, against the schema that is actually in the
+     * field: 1.0.3 shipped v2, so this is the upgrade every existing install will take.
+     *
+     * Every v2 table is populated first and read back after, byte for byte. "Additive" is a
+     * claim about what did *not* happen, and the only way to test it is to have something
+     * there that could have been lost.
+     */
+    @Test
+    fun `migrating v2 to v3 preserves every existing row`() = runTest {
+        createVersion2Database().use { v2 ->
+            v2.execSQL(
+                "INSERT INTO accounts (id, serverUrl, userId, username, addedAt, lastUsedAt) " +
+                    "VALUES ('acc-1', 'https://dnd.example.com', 'FakeDmUser23456ab', 'DungeonMaster', 10, 20)",
+            )
+            v2.execSQL(
+                "INSERT INTO characters (accountId, creatureId, name, picture, owner, isOwned, lastOpenedAt) " +
+                    "VALUES ('acc-1', 'creature-1', 'Sabriel', 'pic.png', 'owner-1', 1, 55)",
+            )
+            v2.execSQL(
+                "INSERT INTO snapshots (accountId, creatureId, json, fetchedAt) " +
+                    "VALUES ('acc-1', 'creature-1', X'010203', 77)",
+            )
+            v2.execSQL(
+                "INSERT INTO tracker_prefs (accountId, creatureId, propertyId, pinned, hidden, sortIndex) " +
+                    "VALUES ('acc-1', 'creature-1', 'prop-1', 1, 0, 3)",
+            )
+            v2.execSQL(
+                "INSERT INTO theme_prefs (accountId, creatureId, accentColor) " +
+                    "VALUES ('acc-1', 'creature-1', '#7C4DFF')",
+            )
+        }
+
+        val db = openCurrent()
+
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
+
+        with(db.accountDao().getAll().single()) {
+            assertEquals("acc-1", id)
+            assertEquals("https://dnd.example.com", serverUrl)
+            assertEquals("FakeDmUser23456ab", userId)
+            assertEquals("DungeonMaster", username)
+            assertEquals(10L, addedAt)
+            assertEquals(20L, lastUsedAt)
+        }
+
+        with(db.characterDao().find("acc-1", "creature-1")!!) {
+            assertEquals("Sabriel", name)
+            assertEquals("pic.png", picture)
+            assertEquals("owner-1", owner)
+            assertTrue(isOwned)
+            assertEquals(55L, lastOpenedAt)
+        }
+
+        with(db.snapshotDao().find("acc-1", "creature-1")!!) {
+            assertTrue("snapshot bytes changed", byteArrayOf(1, 2, 3).contentEquals(json))
+            assertEquals(77L, fetchedAt)
+        }
+
+        with(db.trackerPrefDao().get("acc-1", "creature-1").single()) {
+            assertEquals("prop-1", propertyId)
+            assertTrue(pinned)
+            assertEquals(false, hidden)
+            assertEquals(3, sortIndex)
+        }
+
+        assertEquals("#7C4DFF", db.themePrefDao().find("acc-1", "creature-1")?.accentColor)
     }
 
     @Test
-    fun `reopening an already migrated database does not run the migration again`() = runTest {
-        createVersion1Database().close()
-        openVersion2().also { it.openHelper.readableDatabase }.close()
+    fun `migrating v2 to v3 creates both local tables and leaves the others alone`() = runTest {
+        createVersion2Database().close()
+
+        val db = openCurrent()
+        val tables = tableNames(db)
+
+        listOf("accounts", "characters", "snapshots", "tracker_prefs", "theme_prefs").forEach {
+            assertTrue("v2 table $it must survive, got $tables", it in tables)
+        }
+        listOf("local_characters", "local_tracker_rows").forEach {
+            assertTrue("missing table $it after migration, got $tables", it in tables)
+        }
+    }
+
+    @Test
+    fun `the migrated database is usable by the local character DAO`() = runTest {
+        createVersion2Database().close()
+        val db = openCurrent()
+        val dao = db.localCharacterDao()
+
+        dao.save(
+            LocalCharacterEntity(
+                id = "local-1",
+                name = "Brambles",
+                level = 3,
+                strength = 8,
+                dexterity = 14,
+                constitution = 12,
+                intelligence = 16,
+                wisdom = 10,
+                charisma = 13,
+                maxHp = 22,
+                currentHp = 22,
+                armorClass = 15,
+                createdAt = 100,
+                updatedAt = 100,
+            ),
+            listOf(
+                LocalTrackerRowEntity("row-1", "local-1", "slot", "1st Level", 4, 4, "longRest", 0),
+                LocalTrackerRowEntity("row-2", "local-1", "item", "Healing Potion", 2, 2, "none", 1),
+            ),
+        )
+
+        assertEquals("Brambles", dao.find("local-1")?.name)
+        assertEquals(listOf("row-1", "row-2"), dao.getRows("local-1").map { it.id })
+    }
+
+    /**
+     * The foreign key the migration writes is not decoration: Room turns `PRAGMA foreign_keys`
+     * on for every connection, so deleting a character must take its rows with it. A migration
+     * that dropped the clause would still pass the schema validator on some Room versions and
+     * would silently start leaking orphan rows.
+     */
+    @Test
+    fun `deleting a migrated local character cascades to its rows`() = runTest {
+        createVersion2Database().close()
+        val db = openCurrent()
+        val dao = db.localCharacterDao()
+
+        dao.save(
+            LocalCharacterEntity(
+                "local-1", "Brambles", null, 10, 10, 10, 10, 10, 10, 10, 10, 10, 1, 1,
+            ),
+            listOf(LocalTrackerRowEntity("row-1", "local-1", "resource", "Rage", 3, 3, "longRest", 0)),
+        )
+        assertEquals(1, dao.getRows("local-1").size)
+
+        dao.delete("local-1")
+
+        assertNull(dao.find("local-1"))
+        assertTrue("rows outlived their character", dao.getRows("local-1").isEmpty())
+    }
+
+    // --- fresh install / re-open --------------------------------------------
+
+    @Test
+    fun `a fresh install creates the current version directly and needs no migration`() = runTest {
+        // No file at all: Room must be able to build the whole schema from scratch.
+        val db = openCurrent()
+        val tables = tableNames(db)
+        assertTrue(
+            tables.containsAll(
+                listOf(
+                    "accounts", "characters", "snapshots", "tracker_prefs", "theme_prefs",
+                    "local_characters", "local_tracker_rows",
+                ),
+            ),
+        )
+        assertEquals(0, db.accountDao().getAll().size)
+        assertEquals(0, db.localCharacterDao().count())
+    }
+
+    @Test
+    fun `reopening an already migrated database does not run the migrations again`() = runTest {
+        createVersion2Database().close()
+        openCurrent().also { it.openHelper.readableDatabase }.close()
         database = null
 
-        // Second open: still version 2, nothing re-created, no "table already exists".
-        val reopened = openVersion2()
-        assertEquals(2, reopened.openHelper.readableDatabase.version)
-        assertTrue("characters" in tableNames(reopened))
+        // Second open: still current, nothing re-created, no "table already exists".
+        val reopened = openCurrent()
+        assertEquals(CURRENT_VERSION, reopened.openHelper.readableDatabase.version)
+        assertTrue("local_characters" in tableNames(reopened))
+    }
+
+    /**
+     * `fallbackToDestructiveMigration` is forbidden (09 decision 2, and WP3's reason: dropping
+     * `accounts` orphans every Keystore-held token). The way that stays true is that a version
+     * bump without a migration *fails*, so this pins the chain's shape: one migration per step,
+     * no gaps.
+     */
+    @Test
+    fun `every schema step from one to the current version has a migration`() {
+        val steps = MageHandDatabase.MIGRATIONS
+            .map { it.startVersion to it.endVersion }
+            .sortedBy { it.first }
+
+        assertEquals(
+            "migration chain has a gap or an overlap",
+            (1 until CURRENT_VERSION).map { it to it + 1 },
+            steps,
+        )
+    }
+
+    private companion object {
+        /** Keep in step with `@Database(version = …)`. */
+        const val CURRENT_VERSION = 3
     }
 }

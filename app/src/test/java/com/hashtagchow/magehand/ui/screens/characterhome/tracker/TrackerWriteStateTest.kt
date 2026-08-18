@@ -63,6 +63,8 @@ class TrackerWriteStateTest {
             slots = listOf(longRestSlot),
             resources = listOf(shortRestResource, noResetResource),
         ),
+        /** 09 decision 8. False is a local character — there is no server behind the rest. */
+        hasConnection: Boolean = true,
     ) = toTrackerUiState(
         creatureId = "c1",
         board = board,
@@ -73,6 +75,7 @@ class TrackerWriteStateTest {
         canUndo = canUndo,
         history = history,
         zone = zone,
+        hasConnection = hasConnection,
     )
 
     private fun write(
@@ -179,6 +182,29 @@ class TrackerWriteStateTest {
         val listed = state(board = TrackerBoard(slots = listOf(full))).rowsRestoredBy(RestKind.LONG)
         assertEquals(1, listed.size)
         assertEquals(4, listed.single().value)
+    }
+
+    @Test
+    fun `a server character's long rest still carries the hedged hit-points note`() {
+        // Unchanged for the DiceCloud path: `creature.methods.rest` really does apply the
+        // sheet's own HP and hit-dice rules on top of the rows listed above it.
+        assertTrue(state().showsRestHpNote(RestKind.LONG))
+    }
+
+    @Test
+    fun `a local character's long rest promises no hit points, because it restores none`() {
+        // `LocalOpenCharacter.rest` is `current = total` on the qualifying rows and nothing
+        // else — `currentHp` is untouched. Showing the note here would have the primary local
+        // flow promise hit points that never arrive, in the one dialog whose whole job is to
+        // say truthfully what the button does.
+        assertFalse(state(hasConnection = false).showsRestHpNote(RestKind.LONG))
+    }
+
+    @Test
+    fun `a short rest never carries the note, on either kind of character`() {
+        // The note is specifically about what a *long* rest does beyond the listed rows.
+        assertFalse(state().showsRestHpNote(RestKind.SHORT))
+        assertFalse(state(hasConnection = false).showsRestHpNote(RestKind.SHORT))
     }
 
     // --- the concentration ✕ ----------------------------------------------------

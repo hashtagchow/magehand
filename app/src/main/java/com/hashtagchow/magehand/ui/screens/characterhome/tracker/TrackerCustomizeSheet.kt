@@ -108,12 +108,23 @@ fun TrackerCustomizeSheet(
                         style = MaterialTheme.typography.headlineSmall,
                         modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = onReset) {
-                        Text(stringResource(R.string.customize_reset))
+                    // "Reset" clears the override layer, and in reorder-only mode there is no
+                    // override layer to clear — `sortIndex` *is* the order, so a reset would
+                    // either do nothing or scramble the arrangement the player built.
+                    if (!state.reorderOnly) {
+                        TextButton(onClick = onReset) {
+                            Text(stringResource(R.string.customize_reset))
+                        }
                     }
                 }
                 Text(
-                    text = stringResource(R.string.customize_subtitle),
+                    text = stringResource(
+                        if (state.reorderOnly) {
+                            R.string.customize_subtitle_local
+                        } else {
+                            R.string.customize_subtitle
+                        },
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 24.dp),
@@ -133,10 +144,16 @@ fun TrackerCustomizeSheet(
                         canMoveDown = index < section.rows.lastIndex,
                         onMoveUp = { onMove(section.section, row.propertyId, -1) },
                         onMoveDown = { onMove(section.section, row.propertyId, 1) },
-                        onHide = { onSetHidden(row.propertyId, true) },
+                        onHide = if (state.reorderOnly) {
+                            null
+                        } else {
+                            { onSetHidden(row.propertyId, true) }
+                        },
                         // Conditions only — see CustomizeRowItem's `onSetPinned` KDoc for
                         // why the other three sections do not get this control.
-                        onSetPinned = if (section.section == CustomizeSection.CONDITIONS) {
+                        onSetPinned = if (
+                            section.section == CustomizeSection.CONDITIONS && !state.reorderOnly
+                        ) {
                             { pinned -> onSetPinned(row.propertyId, pinned) }
                         } else {
                             null
@@ -152,54 +169,61 @@ fun TrackerCustomizeSheet(
                 }
             }
 
-            item("items-header") { SheetHeader(stringResource(R.string.customize_items)) }
-            item("items-search") {
-                OutlinedTextField(
-                    value = itemQuery,
-                    onValueChange = { itemQuery = it },
-                    singleLine = true,
-                    label = { Text(stringResource(R.string.customize_items_search)) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 4.dp),
-                )
-            }
+            // The item picker and the accent picker are both absent in reorder-only mode —
+            // see TrackerCustomizeState.reorderOnly. A local character's items are all
+            // already on the tracker, so the picker would list rows that are all already
+            // pinned behind a checkbox that does nothing, and the accent has nowhere
+            // account-keyed to be stored.
+            if (!state.reorderOnly) {
+                item("items-header") { SheetHeader(stringResource(R.string.customize_items)) }
+                item("items-search") {
+                    OutlinedTextField(
+                        value = itemQuery,
+                        onValueChange = { itemQuery = it },
+                        singleLine = true,
+                        label = { Text(stringResource(R.string.customize_items_search)) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 4.dp),
+                    )
+                }
 
-            val matches = state.items.filter { it.name.contains(itemQuery, ignoreCase = true) }
-            if (matches.isEmpty()) {
-                item("items-empty") {
-                    Text(
-                        text = stringResource(R.string.customize_items_none),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
-                    )
-                }
-            } else {
-                items(matches.take(MAX_PICKER_ROWS), key = { "pick-${it.propertyId}" }) { item ->
-                    ItemPickerRow(
-                        item = item,
-                        onTogglePin = { onSetPinned(item.propertyId, !item.pinned) },
-                    )
-                }
-                if (matches.size > MAX_PICKER_ROWS) {
-                    item("items-more") {
+                val matches = state.items.filter { it.name.contains(itemQuery, ignoreCase = true) }
+                if (matches.isEmpty()) {
+                    item("items-empty") {
                         Text(
-                            text = stringResource(
-                                R.string.customize_items_more,
-                                matches.size - MAX_PICKER_ROWS,
-                            ),
-                            style = MaterialTheme.typography.bodySmall,
+                            text = stringResource(R.string.customize_items_none),
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
                         )
                     }
+                } else {
+                    items(matches.take(MAX_PICKER_ROWS), key = { "pick-${it.propertyId}" }) { item ->
+                        ItemPickerRow(
+                            item = item,
+                            onTogglePin = { onSetPinned(item.propertyId, !item.pinned) },
+                        )
+                    }
+                    if (matches.size > MAX_PICKER_ROWS) {
+                        item("items-more") {
+                            Text(
+                                text = stringResource(
+                                    R.string.customize_items_more,
+                                    matches.size - MAX_PICKER_ROWS,
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+                            )
+                        }
+                    }
                 }
-            }
 
-            item("accent-header") { SheetHeader(stringResource(R.string.customize_accent)) }
-            item("accent") {
-                AccentPicker(selected = state.accentColor, onChosen = onAccentChosen)
+                item("accent-header") { SheetHeader(stringResource(R.string.customize_accent)) }
+                item("accent") {
+                    AccentPicker(selected = state.accentColor, onChosen = onAccentChosen)
+                }
             }
         }
     }
@@ -241,7 +265,8 @@ private fun CustomizeRowItem(
     canMoveDown: Boolean,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
-    onHide: () -> Unit,
+    /** `null` in reorder-only mode — see [TrackerCustomizeState.reorderOnly]. */
+    onHide: (() -> Unit)?,
     modifier: Modifier = Modifier,
     onSetPinned: ((Boolean) -> Unit)? = null,
 ) {
@@ -316,11 +341,13 @@ private fun CustomizeRowItem(
                 contentDescription = stringResource(R.string.customize_move_down, row.name),
             )
         }
-        IconButton(onClick = onHide, modifier = Modifier.size(48.dp)) {
-            Icon(
-                Icons.Filled.Clear,
-                contentDescription = stringResource(R.string.customize_hide, row.name),
-            )
+        onHide?.let { hide ->
+            IconButton(onClick = hide, modifier = Modifier.size(48.dp)) {
+                Icon(
+                    Icons.Filled.Clear,
+                    contentDescription = stringResource(R.string.customize_hide, row.name),
+                )
+            }
         }
     }
 }

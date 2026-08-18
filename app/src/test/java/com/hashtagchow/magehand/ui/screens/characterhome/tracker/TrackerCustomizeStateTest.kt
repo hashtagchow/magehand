@@ -40,6 +40,76 @@ class TrackerCustomizeStateTest {
         ),
     )
 
+    // --- FR-6: the sheet's CONDITIONS section (09 decision 9) ---------------
+
+    @Test
+    fun `with toggles off, the sheet has no conditions section`() {
+        val state = toCustomizeState(
+            board,
+            overrides = emptyList(),
+            accentColor = null,
+            showToggles = false,
+        )
+
+        assertTrue(state.sections.none { it.section == CustomizeSection.CONDITIONS })
+        // The other three are untouched — the gate is a filter on one group, not a rebuild.
+        assertEquals(
+            listOf(CustomizeSection.SPELL_SLOTS, CustomizeSection.RESOURCES),
+            state.sections.map { it.section },
+        )
+    }
+
+    @Test
+    fun `with toggles off, a hidden condition does not resurface under Hidden`() {
+        // The half that is easy to miss: filtering only the *visible* rows would leave the
+        // condition in the hidden list, offering to un-hide a row the tracker will not draw.
+        val state = toCustomizeState(
+            board,
+            overrides = listOf(TrackerOverride("t1", hidden = true)),
+            accentColor = null,
+            showToggles = false,
+        )
+
+        assertFalse(state.hasHiddenRows)
+        assertTrue(state.hidden.none { it.propertyId == "t1" })
+    }
+
+    @Test
+    fun `turning toggles back on restores the arrangement the user had`() {
+        // 09 decision 9: "when true: exactly the shipped FR-1/2 behavior". Nothing is
+        // deleted by the switch — the override survives in tracker_prefs.
+        val overrides = listOf(TrackerOverride("t1", hidden = true), TrackerOverride("t2", pinned = true))
+        val off = toCustomizeState(board, overrides, accentColor = null, showToggles = false)
+        val on = toCustomizeState(board, overrides, accentColor = null, showToggles = true)
+
+        assertTrue(off.hidden.isEmpty())
+        assertEquals(listOf("Load Wizard Spells"), on.hidden.map { it.name })
+        assertEquals(
+            listOf("Bless"),
+            on.sections.single { it.section == CustomizeSection.CONDITIONS }.rows.map { it.name },
+        )
+    }
+
+    // --- 09 decision 8: reorder-only, for a local character -----------------
+
+    @Test
+    fun `the sheet is not reorder-only by default`() {
+        assertFalse(toCustomizeState(board, emptyList(), accentColor = null).reorderOnly)
+    }
+
+    @Test
+    fun `reorder-only carries through to the state the sheet renders`() {
+        val state = toCustomizeState(board, emptyList(), accentColor = null, reorderOnly = true)
+
+        assertTrue(state.reorderOnly)
+        // And it changes nothing about *which* rows there are: it is a statement about the
+        // controls, not about the content. Reordering still has a full list to reorder.
+        assertEquals(
+            toCustomizeState(board, emptyList(), accentColor = null).sections,
+            state.sections,
+        )
+    }
+
     // --- state build --------------------------------------------------------
 
     @Test

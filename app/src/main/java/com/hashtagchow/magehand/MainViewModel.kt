@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.stateIn
 import com.hashtagchow.magehand.core.data.account.AccountRepository
 import com.hashtagchow.magehand.core.data.characters.CharacterCache
+import com.hashtagchow.magehand.core.data.local.LocalCharacterRepository
 import javax.inject.Inject
 
 /**
@@ -41,6 +42,7 @@ data class StartDestination(
 class MainViewModel @Inject constructor(
     accountRepository: AccountRepository,
     characterCache: CharacterCache,
+    localCharacterRepository: LocalCharacterRepository,
 ) : ViewModel() {
 
     /**
@@ -59,13 +61,22 @@ class MainViewModel @Inject constructor(
     val startDestination: StateFlow<StartDestination> = flow {
         val account = accountRepository.activeAccount.first()
         emit(
-            if (account == null) {
-                StartDestination(StartState.LOGIN)
-            } else {
-                StartDestination(
+            when {
+                account != null -> StartDestination(
                     state = StartState.MAIN,
                     initialCreatureId = characterCache.lastOpenedCreatureId(account.id),
                 )
+
+                // FR-5 (docs/design/09-local-characters.md decision 3). Without this, a
+                // player who created a local character while signed out would be sent to the
+                // login screen on every cold start, with their character reachable only by
+                // pressing "continue without an account" again — the app would look like it
+                // had lost it. No `initialCreatureId`: 04's "open the last-used character"
+                // reads `characters.lastOpenedAt`, which is account-keyed and has no local
+                // equivalent (a local `lastOpenedAt` is a schema change, and 09 makes none).
+                localCharacterRepository.count() > 0 -> StartDestination(StartState.MAIN)
+
+                else -> StartDestination(StartState.LOGIN)
             },
         )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, StartDestination())

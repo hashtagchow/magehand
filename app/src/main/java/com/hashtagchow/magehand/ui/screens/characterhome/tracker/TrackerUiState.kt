@@ -294,8 +294,42 @@ data class TrackerUiState(
     /**
      * The concentration source's toggle id, when the banner's source happens to be one of
      * the discovered flippable toggles. `null` disables the ✕ — see [toTrackerUiState].
+     *
+     * Resolved from the **board**, not from [conditions]. 09 decision 9 says FR-6's switch
+     * leaves the concentration banner alone ("property-driven and unaffected"), and the ✕
+     * honours that: it issues `flipToggle(propertyId)`, a write against a property, which does
+     * not care whether a chip for that property is currently being drawn. Resolving it from
+     * the filtered chip list made "hide the conditions section" silently also mean "you can no
+     * longer drop concentration" — a banner still saying *Concentrating: Web* with a dead ✕
+     * beside it, and no way to stop concentrating short of the Settings screen.
+     *
+     * One thing genuinely is lost with the section hidden, and it is the smaller half: a
+     * failed flip's rollback **shake** has no chip to play on, because none is composed. The
+     * snackbar still says the write did not save, which is the half carrying the meaning —
+     * `shakeIsHiddenByExpander` documents the same trade for the collapsed drawer, where it
+     * could be bought back by auto-expanding. Here it cannot: there is no section to expand.
      */
     val concentrationToggleId: String? = null,
+    /**
+     * Whether this character *has* a connection worth reporting at all
+     * (docs/design/09-local-characters.md decision 8: "no connection dot for local
+     * characters" — "connection status is meaningless locally and must not render").
+     *
+     * ### Why this is a field and not "the tone happens to be LIVE"
+     *
+     * `LocalOpenCharacter.connectionState` is a constant `LIVE`, so `showConnectionIndicator`
+     * would already be false today by arithmetic. That is exactly the kind of guarantee that
+     * evaporates: it holds only while nothing else can move the tone, and the whole point of
+     * `ConnectionTone` is that things move it. A future "local save failed" state, or a
+     * refactor that seeds the flow from a shared default, would put a red dot on a character
+     * that has nothing to be disconnected from — and no test would notice, because no test
+     * would be asserting about the dot.
+     *
+     * So the suppression is stated rather than derived, one boolean the local view model sets
+     * and `TrackerUiStateTest` pins in both directions. Belt and braces is the correct posture
+     * for a rule whose failure mode is invisible.
+     */
+    val hasConnection: Boolean = true,
 ) {
     /** Nothing discovered yet — a cold open with no snapshot and no live sub. */
     val isEmpty: Boolean
@@ -338,9 +372,14 @@ data class TrackerUiState(
      *
      * It lives here rather than on [ConnectionStatus] because it needs both halves, and
      * only this class knows whether there are rows yet.
+     *
+     * [hasConnection] gates the whole rule rather than joining it: a character with no
+     * connection has no connection *state*, so neither half of the question applies.
      */
     val showConnectionIndicator: Boolean
-        get() = status.isWorthMentioning && (!isLoading || status.isTerminalUntilActedOn)
+        get() = hasConnection &&
+            status.isWorthMentioning &&
+            (!isLoading || status.isTerminalUntilActedOn)
 }
 
 /**
@@ -348,6 +387,19 @@ data class TrackerUiState(
  *
  * @param zone injected so the formatted `HH:MM` is deterministic in tests. Production
  *   passes the device zone.
+ * @param showToggles FR-6's `show_toggles` (docs/design/09-local-characters.md decision 9).
+ *   **False empties both condition lists**, which is what makes the section, its header and
+ *   its inactive drawer *absent* from the tracker rather than merely collapsed: the screen
+ *   already renders the whole group only `if (conditions.isNotEmpty() || inactive…)`, so the
+ *   gate reuses the rule the screen has always had for a character with no toggles. Doing it
+ *   here rather than in the composable is what lets `TrackerUiStateTest` pin FR-6 in both
+ *   directions without a device — and what stops a second screen from re-deriving it.
+ *
+ *   It **does not** reach [TrackerUiState.concentrationToggleId], which is resolved from the
+ *   board rather than from these lists — 09 decision 9: *"the concentration banner is
+ *   property-driven and unaffected"*.
+ * @param hasConnection false for a character with no server (09 decision 8). See
+ *   [TrackerUiState.hasConnection].
  */
 fun toTrackerUiState(
     creatureId: String,
@@ -360,10 +412,13 @@ fun toTrackerUiState(
     canUndo: Boolean = false,
     history: List<TrackerWrite> = emptyList(),
     zone: ZoneId = ZoneId.systemDefault(),
+    showToggles: Boolean = true,
+    hasConnection: Boolean = true,
 ): TrackerUiState {
     // The one place the board's toggles are split, using the rule itself rather than a
     // re-statement of it — `partition` keeps both halves in the board's order.
-    val (shown, inactive) = board.activeToggles.partition { it.shownByDefault }
+    val toggles = if (showToggles) board.activeToggles else emptyList()
+    val (shown, inactive) = toggles.partition { it.shownByDefault }
     val conditions = shown.map { it.toChip() }
     // Only the newest still-reversible entry gets an UNDO button; see [HistoryRowState].
     val topOfStack = history.firstOrNull { it.undoable }?.id
@@ -386,11 +441,20 @@ fun toTrackerUiState(
         canWrite = canWrite,
         canUndo = canUndo && canWrite,
         history = history.map { it.toHistoryRow(canUndo = canWrite && it.id == topOfStack, zone = zone) },
-        // 03 §5 lets the concentration banner come from a `buff` as well as a `toggle`, and
-        // `flipToggle` rejects anything that is not a toggle. So the ✕ is live only when the
-        // banner's source is also on the chip row — i.e. when it *is* a flippable toggle.
-        concentrationToggleId = board.concentratingOn
-            ?.let { name -> conditions.firstOrNull { it.name == name && it.enabled && it.canFlip }?.propertyId },
+        // Resolved from `board.activeToggles`, deliberately **not** from `conditions` — the
+        // banner is property-driven (09 decision 9), so what the chip row happens to be
+        // drawing must not arm or disarm its ✕. See [TrackerUiState.concentrationToggleId].
+        //
+        // The narrowing that *is* real is WP7's and it is unchanged: 03 §5 lets the banner
+        // come from a `buff` as well as a `toggle`, and `flipToggle` rejects anything that is
+        // not a toggle — so the ✕ is live only when the source *is* a flippable, switched-on
+        // toggle. That is what these three clauses say, against the board.
+        concentrationToggleId = board.concentratingOn?.let { name ->
+            board.activeToggles
+                .firstOrNull { it.name == name && it.enabled && it.flippable }
+                ?.propertyId
+        },
+        hasConnection = hasConnection,
     )
 }
 

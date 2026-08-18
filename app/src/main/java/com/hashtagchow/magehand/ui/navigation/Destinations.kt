@@ -55,6 +55,29 @@ data object CharacterCreator : Destination
 @Serializable
 data object Settings : Destination
 
+/**
+ * A local character's tracker (docs/design/09-local-characters.md decisions 5–8).
+ *
+ * A separate destination from [CharacterHome] rather than a flag on it, for the reason
+ * `LocalCharacterHomeViewModel`'s KDoc gives: the two screens share the tracker and nothing
+ * else, and a single route would mean one nav entry whose view model builds the DDP object
+ * graph for a character that has no account. `characterId` is an app-minted UUID, never a
+ * DiceCloud `creatureId` — hence the different parameter name, so the two cannot be passed to
+ * each other by mistake.
+ */
+@Serializable
+data class LocalCharacterHome(val characterId: String) : Destination
+
+/**
+ * The local character creation/edit form (09 decision 4).
+ *
+ * One destination for both jobs, because there is one form: `null` is "create", an id is
+ * "edit that one". Named *Editor* rather than *Form* to leave the name `LocalCharacterForm`
+ * to `:core:data`'s type, which this screen fills in.
+ */
+@Serializable
+data class LocalCharacterEditor(val characterId: String? = null) : Destination
+
 /** The tabs inside [CharacterHome]. Tab state is local, not a nav destination. */
 enum class CharacterHomeTab(val titleResId: Int) {
     Tracker(com.hashtagchow.magehand.R.string.tab_tracker),

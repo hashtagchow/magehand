@@ -11,11 +11,14 @@ import androidx.room.migration.Migration
  * |---|---|---|
  * | 1 | WP3 | `accounts` |
  * | 2 | WP4 | + `characters`, `snapshots`, `tracker_prefs`, `theme_prefs` |
+ * | 3 | FR-5 | + `local_characters`, `local_tracker_rows` |
  *
- * Version 1's exported JSON under `core/data/schemas/` is **immutable** — it is the
- * input to [MIGRATION_1_2] and to `MageHandDatabaseMigrationTest`. Version 2 is purely
- * additive: `accounts` is untouched, so no account or token binding can be lost on
- * upgrade.
+ * Every **shipped** version's exported JSON under `core/data/schemas/` is **immutable** —
+ * each one is the input to the migration that leaves it and to
+ * `MageHandDatabaseMigrationTest`. Both migrations so far are purely additive: no existing
+ * table is touched by either, so no account or token binding can be lost on upgrade, and
+ * (docs/design/09-local-characters.md decision 10) sign-out cannot reach the local tables
+ * because they carry no `accountId` to key on.
  *
  * (Version 1 replaced WP1's throwaway `ScaffoldDatabase` — see
  * docs/verification/WP1.md deviation #3 and docs/verification/WP3.md §4.)
@@ -27,8 +30,10 @@ import androidx.room.migration.Migration
         SnapshotEntity::class,
         TrackerPrefEntity::class,
         ThemePrefEntity::class,
+        LocalCharacterEntity::class,
+        LocalTrackerRowEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class MageHandDatabase : RoomDatabase() {
@@ -37,12 +42,13 @@ abstract class MageHandDatabase : RoomDatabase() {
     abstract fun snapshotDao(): SnapshotDao
     abstract fun trackerPrefDao(): TrackerPrefDao
     abstract fun themePrefDao(): ThemePrefDao
+    abstract fun localCharacterDao(): LocalCharacterDao
 
     companion object {
         /** On-disk file name; referenced by the Hilt provider and by the migration test. */
         const val NAME: String = "magehand.db"
 
         /** Every migration, in order. Hand this to `RoomDatabase.Builder.addMigrations`. */
-        val MIGRATIONS: Array<Migration> get() = arrayOf(MIGRATION_1_2)
+        val MIGRATIONS: Array<Migration> get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
     }
 }

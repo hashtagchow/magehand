@@ -10,28 +10,49 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.account.AccountRepository
+import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.model.Account
 import javax.inject.Inject
 
 data class SettingsUiState(
     val accounts: List<Account> = emptyList(),
     val activeAccountId: String? = null,
+    /**
+     * FR-6's switch (docs/design/09-local-characters.md decision 9).
+     *
+     * Seeded from [AppSettingsStore.DEFAULT_SHOW_TOGGLES] rather than from a literal here, so
+     * the switch cannot render "on" for the frame before the first DataStore read lands and
+     * then flick off under the user's thumb.
+     */
+    val showToggles: Boolean = AppSettingsStore.DEFAULT_SHOW_TOGGLES,
 )
 
 /**
  * Screen 6 (docs/design/04-screens-ux.md §6) — WP5 ships the account switcher and
- * sign-out. Per-character accent colour and portrait override are WP8.
+ * sign-out. Per-character accent colour and portrait override are WP8. FR-6 adds the
+ * app-level "Show toggles on tracker" switch.
  */
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val accountRepository: AccountRepository,
+    private val appSettingsStore: AppSettingsStore,
 ) : ViewModel() {
 
     val uiState: StateFlow<SettingsUiState> = combine(
         accountRepository.accounts,
         accountRepository.activeAccountId,
-    ) { accounts, activeId -> SettingsUiState(accounts, activeId) }
+        appSettingsStore.showToggles,
+    ) { accounts, activeId, showToggles -> SettingsUiState(accounts, activeId, showToggles) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUiState())
+
+    /**
+     * FR-6. Writes straight through and lets the flow above bring the new value back, rather
+     * than holding a second copy in the UI state: the switch then shows what is *stored*,
+     * which is what every tracker in the app is reading.
+     */
+    fun setShowToggles(value: Boolean) {
+        viewModelScope.launch { appSettingsStore.setShowToggles(value) }
+    }
 
     fun switchTo(accountId: String) {
         viewModelScope.launch { accountRepository.setActiveAccount(accountId) }

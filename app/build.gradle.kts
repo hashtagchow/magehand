@@ -60,8 +60,8 @@ android {
         // 3 shipped as 1.0.1. Both are live on Play, so both codes are spent for good —
         // a bump is part of preparing a release, not a step to remember at upload time.
         // 4 / 1.0.2 carries the WP8 pre-release review fixes.
-        versionCode = 5
-        versionName = "1.0.3"
+        versionCode = 6
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

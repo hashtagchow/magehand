@@ -27,6 +27,7 @@ import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
 import com.hashtagchow.magehand.core.data.characters.CharacterListState
 import com.hashtagchow.magehand.core.data.connection.AccountConnection
 import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
+import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.ConditionToggle
@@ -75,12 +76,21 @@ class CharacterHomeViewModelTest {
             ),
             connection = ConnectionState.LIVE,
         ),
+        /**
+         * FR-6's switch. **True by default here, false by default in production** — and that
+         * asymmetry is deliberate: every assertion in this class predates FR-6 and is about
+         * the shipped FR-1/2 behaviour, which decision 9 defines as "toggles on". A fake that
+         * defaulted to the production value would have silently rewritten what those tests
+         * mean. The production default is pinned separately, in `LocalCharacterHomePostureTest`.
+         */
+        showToggles: Boolean = true,
     ): Pair<CharacterHomeViewModel, FakeOpenCharacterFactory> {
         val factory = FakeOpenCharacterFactory(character)
         val vm = CharacterHomeViewModel(
             savedStateHandle = SavedStateHandle(mapOf("creatureId" to creatureId)),
             characterListRepository = FakeCharacterListRepository(listState),
             sheetSessionFactory = SheetSessionFactory(StubAccountRepository, StubTokenStore),
+            appSettingsStore = FakeAppSettingsStore(showToggles),
             openCharacterFactory = factory,
             connectionManager = connectionManager,
         )
@@ -545,6 +555,12 @@ private object StubAccountRepository : AccountRepository {
     override suspend fun setActiveAccount(accountId: String) = Unit
     override suspend fun signOut(accountId: String) = Unit
     override suspend fun tokenFor(accountId: String): String? = null
+}
+
+/** FR-6's store, as a constant. Nothing in this class flips it mid-test. */
+private class FakeAppSettingsStore(showToggles: Boolean) : AppSettingsStore {
+    override val showToggles: Flow<Boolean> = flowOf(showToggles)
+    override suspend fun setShowToggles(value: Boolean) = Unit
 }
 
 private object StubTokenStore : TokenStore {

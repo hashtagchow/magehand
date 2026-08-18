@@ -71,6 +71,9 @@ class TrackerUiStateTest {
         lastSyncedAt: Long? = null,
         isShowingSnapshot: Boolean = false,
         accent: String? = null,
+        /** FR-6. True here so every pre-FR-6 assertion keeps asserting FR-1/2's behaviour. */
+        showToggles: Boolean = true,
+        hasConnection: Boolean = true,
     ) = toTrackerUiState(
         creatureId = "FakeCreature23456",
         board = board,
@@ -79,6 +82,8 @@ class TrackerUiStateTest {
         isShowingSnapshot = isShowingSnapshot,
         accentColor = accent,
         zone = utc,
+        showToggles = showToggles,
+        hasConnection = hasConnection,
     )
 
     // --- board → UI ---------------------------------------------------------
@@ -386,5 +391,130 @@ class TrackerUiStateTest {
         )
         assertFalse(state.isEmpty)
         assertFalse(state.isLoading)
+    }
+
+    // --- FR-6: the toggles switch (09 decision 9) ---------------------------
+
+    @Test
+    fun `with toggles off, the conditions section is absent from the tracker entirely`() {
+        val state = map(showToggles = false)
+
+        // Both lists, not just the visible one: the screen renders the header when *either*
+        // is non-empty, so leaving the inactive drawer populated would keep the section on
+        // screen with nothing but "1 inactive" in it.
+        assertTrue(state.conditions.isEmpty())
+        assertTrue(state.inactiveConditions.isEmpty())
+    }
+
+    @Test
+    fun `with toggles on, the conditions section is exactly what FR-1 and FR-2 shipped`() {
+        val on = map(showToggles = true)
+
+        assertEquals(listOf("Load Wizard Spells"), on.conditions.map { it.name })
+        assertEquals(listOf("Racial ASI Disabler"), on.inactiveConditions.map { it.name })
+    }
+
+    @Test
+    fun `toggles off hides the conditions but touches nothing else on the board`() {
+        val off = map(showToggles = false)
+        val on = map(showToggles = true)
+
+        // The gate is a filter on one board field, and this is what says so: everything the
+        // player actually plays with is byte-identical with the switch either way.
+        assertEquals(on.hp, off.hp)
+        assertEquals(on.slots, off.slots)
+        assertEquals(on.resources, off.resources)
+        assertEquals(on.consumables, off.consumables)
+        assertEquals(on.defenses, off.defenses)
+    }
+
+    @Test
+    fun `a board of nothing but toggles is empty once they are hidden`() {
+        val board = TrackerBoard(
+            activeToggles = listOf(ConditionToggle("tog1", "Bless", enabled = true)),
+        )
+
+        assertFalse(map(board = board, showToggles = true).isEmpty)
+        assertTrue(map(board = board, showToggles = false).isEmpty)
+    }
+
+    @Test
+    fun `the concentration cross survives the toggles switch, in both positions`() {
+        val board = sabriel.copy(
+            activeToggles = listOf(ConditionToggle("tog3", "Web", enabled = true, flippable = true)),
+            concentratingOn = "Web",
+        )
+
+        // 09 decision 9: "the concentration banner is property-driven and unaffected". Both
+        // halves of the banner, not just its text — the ✕ issues `flipToggle(propertyId)`, a
+        // write against a *property*, and whether a chip for that property is being drawn is
+        // not one of its inputs.
+        //
+        // This test previously pinned the opposite, and what it pinned was a trap: with the
+        // switch off the banner still read "Concentrating: Web" while its ✕ was inert, so a
+        // player who had turned toggles off could not drop concentration from the tracker at
+        // all. (Architect ruling, 2026-08-18: the design stands.)
+        assertEquals("Web", map(board = board, showToggles = false).concentratingOn)
+        assertEquals("tog3", map(board = board, showToggles = false).concentrationToggleId)
+        assertEquals("tog3", map(board = board, showToggles = true).concentrationToggleId)
+
+        // …and the chip row really is empty in that state, which is what makes the point:
+        // the ✕ is armed against something the conditions section is not showing.
+        assertTrue(map(board = board, showToggles = false).conditions.isEmpty())
+    }
+
+    @Test
+    fun `the switch cannot arm a cross the board itself leaves dead`() {
+        // The narrowing that is real and survives: WP7's. A banner driven by a `buff`, or by
+        // a computed toggle `flipToggle` would refuse, has no ✕ either way — hiding the chips
+        // is not what disarms it, and un-hiding them is not what arms it.
+        val buff = sabriel.copy(activeToggles = emptyList(), concentratingOn = "Bless")
+        val computed = sabriel.copy(
+            activeToggles = listOf(ConditionToggle("tog4", "Web", enabled = true, flippable = false)),
+            concentratingOn = "Web",
+        )
+
+        listOf(true, false).forEach { showToggles ->
+            assertNull(map(board = buff, showToggles = showToggles).concentrationToggleId)
+            assertNull(map(board = computed, showToggles = showToggles).concentrationToggleId)
+        }
+    }
+
+    // --- 09 decision 8: a local character never shows a connection dot -------
+
+    @Test
+    fun `a character with no connection never floats the dot, whatever the tone says`() {
+        // Every tone, including the two that are terminal-until-acted-on and therefore
+        // escape the loading suppression. The point is that none of them can reach the dot.
+        ConnectionState.entries.forEach { connection ->
+            val state = map(connection = connection, hasConnection = false)
+            assertFalse(
+                "a local character showed the connection dot for $connection",
+                state.showConnectionIndicator,
+            )
+        }
+    }
+
+    @Test
+    fun `an empty local board still shows no dot, where a server character would`() {
+        // The trap this pins: a cold-open local character is `isLoading == false` only
+        // because its tone is LIVE. If anything ever moved that tone, `isTerminalUntilActedOn`
+        // would put a permanent red mark on a character with no server.
+        val empty = TrackerBoard.EMPTY
+
+        assertTrue(
+            map(board = empty, connection = ConnectionState.OFFLINE).showConnectionIndicator,
+        )
+        assertFalse(
+            map(board = empty, connection = ConnectionState.OFFLINE, hasConnection = false)
+                .showConnectionIndicator,
+        )
+    }
+
+    @Test
+    fun `a server character is unaffected by the local suppression`() {
+        // hasConnection defaults to true, so every existing caller keeps the old rule.
+        assertTrue(map(connection = ConnectionState.OFFLINE).showConnectionIndicator)
+        assertFalse(map(connection = ConnectionState.LIVE).showConnectionIndicator)
     }
 }

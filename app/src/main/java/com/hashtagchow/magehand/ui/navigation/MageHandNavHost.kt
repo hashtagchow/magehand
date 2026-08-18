@@ -11,6 +11,8 @@ import androidx.navigation.navigation
 import com.hashtagchow.magehand.ui.screens.characterhome.CharacterCreatorScreen
 import com.hashtagchow.magehand.ui.screens.characterhome.CharacterHomeScreen
 import com.hashtagchow.magehand.ui.screens.characterlist.CharacterListScreen
+import com.hashtagchow.magehand.ui.screens.local.LocalCharacterEditorScreen
+import com.hashtagchow.magehand.ui.screens.local.LocalCharacterHomeScreen
 import com.hashtagchow.magehand.ui.screens.login.CredentialsScreen
 import com.hashtagchow.magehand.ui.screens.settings.SettingsScreen
 
@@ -52,6 +54,17 @@ fun MageHandNavHost(
                             popUpTo(LoginGraph) { inclusive = true }
                         }
                     },
+                    // FR-5's whole premise is "use the app without a DiceCloud login", and
+                    // this is the only door to it on a fresh install: without it a signed-out
+                    // user cannot reach the character list, and 09 decision 3's "the list
+                    // screen must render with zero accounts" would be unreachable code.
+                    // Same navigation as a successful sign-in, because the destination is
+                    // the same place — the difference is only how you got there.
+                    onContinueWithoutAccount = {
+                        navController.navigate(MainGraph) {
+                            popUpTo(LoginGraph) { inclusive = true }
+                        }
+                    },
                 )
             }
         }
@@ -65,6 +78,10 @@ fun MageHandNavHost(
                     },
                     onSettingsClick = { navController.navigate(Settings) },
                     onNewCharacterClick = { navController.navigate(CharacterCreator) },
+                    onLocalCharacterClick = { characterId ->
+                        navController.navigate(LocalCharacterHome(characterId))
+                    },
+                    onNewLocalCharacterClick = { navController.navigate(LocalCharacterEditor()) },
                 )
             }
 
@@ -79,6 +96,33 @@ fun MageHandNavHost(
 
             composable<CharacterCreator> {
                 CharacterCreatorScreen(onClose = { navController.popBackStack() })
+            }
+
+            // ---- FR-5: local characters (docs/design/09-local-characters.md) ----
+            composable<LocalCharacterHome> {
+                // characterId reaches the ViewModel through SavedStateHandle, exactly as
+                // CharacterHome's creatureId does.
+                LocalCharacterHomeScreen(
+                    onBack = { navController.popBackStack() },
+                    onEdit = { characterId ->
+                        navController.navigate(LocalCharacterEditor(characterId))
+                    },
+                )
+            }
+
+            composable<LocalCharacterEditor> {
+                LocalCharacterEditorScreen(
+                    onBack = { navController.popBackStack() },
+                    // Both jobs pop: a create lands back on the list with the new character
+                    // in "On this device", and an edit lands back on the tracker it came
+                    // from. One rule, and neither leaves a form on the back stack that a
+                    // Back press would re-enter after it has already been saved.
+                    onSaved = { navController.popBackStack() },
+                    // Delete cannot pop: the screen underneath an edit is the deleted
+                    // character's own tracker, which would render an empty board with its
+                    // name gone. Back out to the list instead.
+                    onDeleted = { navController.popBackStack(CharacterList, inclusive = false) },
+                )
             }
 
             composable<Settings> {

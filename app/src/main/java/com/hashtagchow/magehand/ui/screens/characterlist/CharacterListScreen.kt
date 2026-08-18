@@ -19,6 +19,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -31,10 +33,14 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -58,10 +64,13 @@ fun CharacterListScreen(
     onCharacterClick: (String) -> Unit,
     onSettingsClick: () -> Unit,
     onNewCharacterClick: () -> Unit,
+    onLocalCharacterClick: (String) -> Unit,
+    onNewLocalCharacterClick: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: CharacterListViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    var creatorMenuOpen by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
         modifier = modifier,
@@ -92,22 +101,61 @@ fun CharacterListScreen(
             )
         },
         floatingActionButton = {
-            // 04 §2: the FAB opens the PWA's own creator in the Sheet tab — a native
-            // character creator is explicitly out of v1.
-            FloatingActionButton(onClick = onNewCharacterClick) {
-                Icon(
-                    imageVector = Icons.Filled.Add,
-                    contentDescription = stringResource(R.string.action_new_character),
-                )
+            // 04 §2's FAB opened the PWA's own creator, full stop. FR-5 gives it a second
+            // possible meaning, so it now asks which — but only when both answers exist.
+            // Signed out there is no DiceCloud creator to offer, and a menu with one item
+            // is a tap the user pays for nothing (09 decision 3: the signed-out list is
+            // "local + the create affordance", not local + a submenu).
+            //
+            // …and until the account has resolved, *neither* answer is known, so the button
+            // is absent rather than guessing — see CharacterListUiState.showsCreateAffordance.
+            Box {
+                if (uiState.showsCreateAffordance) FloatingActionButton(
+                    onClick = {
+                        if (uiState.hasAccount == true) {
+                            creatorMenuOpen = true
+                        } else {
+                            onNewLocalCharacterClick()
+                        }
+                    },
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Add,
+                        contentDescription = stringResource(
+                            if (uiState.hasAccount == true) {
+                                R.string.action_new_character
+                            } else {
+                                R.string.action_new_local_character
+                            },
+                        ),
+                    )
+                }
+                DropdownMenu(
+                    expanded = creatorMenuOpen,
+                    onDismissRequest = { creatorMenuOpen = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.action_new_dicecloud_character)) },
+                        onClick = { creatorMenuOpen = false; onNewCharacterClick() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.action_new_local_character)) },
+                        onClick = { creatorMenuOpen = false; onNewLocalCharacterClick() },
+                    )
+                }
             }
         },
     ) { innerPadding ->
         Column(Modifier.padding(innerPadding)) {
-            ConnectionStrip(state = uiState.connection, error = uiState.error)
+            // Absent, not "Connecting…", when there is no account — see
+            // CharacterListUiState.showsConnection.
+            if (uiState.showsConnection) {
+                ConnectionStrip(state = uiState.connection, error = uiState.error)
+            }
 
             PullToRefreshBox(
                 isRefreshing = uiState.isRefreshing,
-                onRefresh = viewModel::refresh,
+                onRefresh = { if (uiState.canRefresh) viewModel.refresh() },
                 modifier = Modifier.fillMaxSize(),
             ) {
                 when {
@@ -121,7 +169,13 @@ fun CharacterListScreen(
                             style = MaterialTheme.typography.bodyLarge,
                         )
                         Text(
-                            text = stringResource(R.string.character_list_empty_hint),
+                            text = stringResource(
+                                if (uiState.hasAccount == true) {
+                                    R.string.character_list_empty_hint
+                                } else {
+                                    R.string.character_list_empty_hint_local
+                                },
+                            ),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -138,7 +192,108 @@ fun CharacterListScreen(
                                 onClick = { onCharacterClick(character.creatureId) },
                             )
                         }
+
+                        // 09 decision 3: "below the signed-in account's characters (or alone
+                        // when signed out)". The header carries the section on its own when
+                        // there are no account cards above it, which is why it is not
+                        // conditional on there being any.
+                        if (uiState.localCharacters.isNotEmpty()) {
+                            item(key = "local-header") {
+                                SectionHeader(stringResource(R.string.character_list_on_this_device))
+                            }
+                            items(uiState.localCharacters, key = { "local-${it.id}" }) { character ->
+                                LocalCharacterCard(
+                                    character = character,
+                                    onClick = { onLocalCharacterClick(character.id) },
+                                )
+                            }
+                        }
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The "On this device" heading.
+ *
+ * A plain label rather than a card: it is a divider with a name, and giving it the same
+ * elevation as the rows underneath would make it look like a character called "On this
+ * device".
+ */
+@Composable
+private fun SectionHeader(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier.padding(top = 16.dp, bottom = 4.dp),
+    )
+}
+
+/**
+ * A local character's card (09 decision 3).
+ *
+ * Deliberately the same shape as [CharacterCard] — monogram, name, subtitle in the same two
+ * styles — and deliberately not the same function. What it drops is everything that belongs
+ * to a DiceCloud character: there is no portrait to load (the form has no picture field), and
+ * no owner badge, because "not mine" cannot happen for a character that exists only here.
+ * Sharing the composable would have meant three `null` arguments and two `if`s inside it, to
+ * express that this row is simpler.
+ */
+@Composable
+private fun LocalCharacterCard(
+    character: LocalCharacterCardState,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        onClick = onClick,
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("list:local:${character.id}"),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 72.dp)
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.secondaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = character.monogram,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 12.dp),
+            ) {
+                Text(
+                    text = character.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (character.subtitle.isNotEmpty()) {
+                    Text(
+                        text = character.subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }

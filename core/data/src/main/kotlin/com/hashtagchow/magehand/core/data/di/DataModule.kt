@@ -1,7 +1,9 @@
 package com.hashtagchow.magehand.core.data.di
 
 import android.content.Context
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStoreFile
 import androidx.room.Room
 import dagger.Module
@@ -34,13 +36,18 @@ import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
 import com.hashtagchow.magehand.core.data.connection.DefaultDdpConnectionManager
 import com.hashtagchow.magehand.core.data.db.AccountDao
 import com.hashtagchow.magehand.core.data.db.CharacterDao
+import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
 import com.hashtagchow.magehand.core.data.db.SnapshotDao
 import com.hashtagchow.magehand.core.data.db.ThemePrefDao
 import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
+import com.hashtagchow.magehand.core.data.local.LocalCharacterRepository
+import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
 import com.hashtagchow.magehand.core.ddp.OkHttpDdpSocketFactory
 import com.hashtagchow.magehand.core.data.session.DefaultOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
+import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.DataStoreAppSettingsStore
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
 import java.util.concurrent.TimeUnit
 import javax.inject.Singleton
@@ -128,12 +135,19 @@ object DataModule {
     @Provides
     @Singleton
     fun provideActiveAccountStore(@ApplicationContext context: Context): ActiveAccountStore =
-        DataStoreActiveAccountStore(
-            // @Singleton is what guarantees the "one DataStore per file" rule.
-            PreferenceDataStoreFactory.create {
-                context.preferencesDataStoreFile(DataStoreActiveAccountStore.PREFS_NAME)
-            },
-        )
+        DataStoreActiveAccountStore(preferences(context))
+
+    /**
+     * FR-6's `show_toggles` (docs/design/09-local-characters.md decision 9).
+     *
+     * Shares [preferences] with the active-account store rather than opening a second file:
+     * one more `.preferences_pb` for one boolean would be a second thing to migrate, back up
+     * and reason about, and DataStore's own contract is per-*file*, not per-key.
+     */
+    @Provides
+    @Singleton
+    fun provideAppSettingsStore(@ApplicationContext context: Context): AppSettingsStore =
+        DataStoreAppSettingsStore(preferences(context))
 
     /**
      * The snapshot store, character cache and two pref DAOs are here for
@@ -236,6 +250,32 @@ object DataModule {
         characterCache = characterCache,
     )
 
+    // ---- FR-5: local characters (docs/design/09-local-characters.md) ----------
+
+    @Provides
+    fun provideLocalCharacterDao(database: MageHandDatabase): LocalCharacterDao =
+        database.localCharacterDao()
+
+    /**
+     * The on-device list and the creation form's save path.
+     *
+     * `@Singleton` because it is stateless apart from the DAO and the two injected seams, and
+     * one instance keeps the `now`/`newId` overrides in one place rather than letting a second
+     * construction site quietly pick the defaults.
+     */
+    @Provides
+    @Singleton
+    fun provideLocalCharacterRepository(dao: LocalCharacterDao): LocalCharacterRepository =
+        LocalCharacterRepository(dao)
+
+    /**
+     * Not `@Singleton`, for the same reason [provideOpenCharacterFactory] is not: each open
+     * hands back an object whose lifetime is one character screen.
+     */
+    @Provides
+    fun provideLocalOpenCharacterFactory(dao: LocalCharacterDao): LocalOpenCharacterFactory =
+        LocalOpenCharacterFactory(dao)
+
     /**
      * Application-lifetime scopes are created here rather than bound, for the same
      * classpath reason as [newHttpClient]: `CoroutineScope` is a
@@ -245,6 +285,29 @@ object DataModule {
      */
     private fun newAppScope(name: String): CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineName(name))
+
+    /**
+     * **The process's one preferences DataStore**, for the same reason [baseHttpClient] is
+     * the process's one OkHttp client — and here it is a correctness rule rather than a
+     * resource one: DataStore throws if a second instance is created over a file that
+     * already has one, because two instances cannot see each other's writes.
+     *
+     * `@Singleton` on a `@Provides` used to carry that guarantee while `ActiveAccountStore`
+     * was the only consumer. It stopped carrying it the moment a second consumer existed:
+     * two `@Singleton` bindings are two singletons, each of which would have built its own
+     * DataStore over `magehand_prefs`. Memoizing here — not binding `DataStore<Preferences>`,
+     * which the module KDoc explains would drag a `datastore-preferences` type onto `:app`'s
+     * Hilt classpath — is what makes "one per file" true again.
+     */
+    @Volatile
+    private var preferences: DataStore<Preferences>? = null
+
+    private fun preferences(context: Context): DataStore<Preferences> =
+        preferences ?: synchronized(this) {
+            preferences ?: PreferenceDataStoreFactory.create {
+                context.preferencesDataStoreFile(DataStoreActiveAccountStore.PREFS_NAME)
+            }.also { preferences = it }
+        }
 
     /**
      * **The process's one OkHttp client.**

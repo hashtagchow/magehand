@@ -8,6 +8,8 @@
     <string name="title_character_home">Character</string>
     <string name="title_new_character">New character</string>
     <string name="title_settings">Settings</string>
+    <string name="title_new_local_character">New local character</string>
+    <string name="title_edit_local_character">Edit character</string>
 
     <!-- Character home tabs -->
     <string name="tab_tracker">Tracker</string>
@@ -52,6 +54,9 @@
     <!-- Screen 5: tracker customize sheet -->
     <string name="customize_title">Customize tracker</string>
     <string name="customize_subtitle">Reorder, hide and pin rows for this character. Saved on this device only — nothing is sent to DiceCloud.</string>
+    <!-- Reorder-only mode: a local character's rows are all there because the player added
+         them, so hiding and pinning have nothing to say. Add and remove happen on the form. -->
+    <string name="customize_subtitle_local">Reorder this character\'s rows. Add or remove rows by editing the character.</string>
     <string name="customize_reset">Reset</string>
     <string name="customize_hidden">Hidden</string>
     <string name="customize_items">Pin an item</string>
@@ -85,10 +90,13 @@
     <string name="credentials_username_label">Username or email</string>
     <string name="credentials_password_label">Password</string>
     <string name="credentials_token_note">Your password is sent once to sign you in and is never stored. The sign-in token it returns is kept encrypted on this device.</string>
+    <string name="credentials_local_note">Characters you make on this device stay on it. You can sign in later from Settings without losing them.</string>
 
     <!-- Screen 2: character list -->
     <string name="character_list_empty">No characters yet</string>
     <string name="character_list_empty_hint">Tap + to create one in DiceCloud.</string>
+    <string name="character_list_empty_hint_local">Tap + to make one on this device.</string>
+    <string name="character_list_on_this_device">On this device</string>
     <string name="character_badge_shared">Shared</string>
 
     <!-- Connection state: the character list's chip, which is still a persistent strip. -->
@@ -124,6 +132,49 @@
     <string name="settings_signout_note">Signing out removes the token from this device only. DiceCloud has no \"log out everywhere\" API — do that on the website if you need it.</string>
     <string name="signout_dialog_title">Sign out?</string>
     <string name="signout_dialog_body">The sign-in token is deleted from this device. Your characters stay on the server.</string>
+    <!-- FR-6 (docs/design/09-local-characters.md decision 9). The note says what a toggle
+         *is* rather than what the switch does, because "show toggles" means nothing until you
+         know that most of them are the sheet's own plumbing. -->
+    <string name="settings_tracker">Tracker</string>
+    <string name="settings_show_toggles">Show toggles on tracker</string>
+    <string name="settings_show_toggles_note">Most sheets\' toggles are build machinery — hidden unless you use them.</string>
+
+    <!-- FR-5: local characters (docs/design/09-local-characters.md) -->
+    <string name="local_field_name">Name</string>
+    <string name="local_field_level">Level</string>
+    <string name="local_field_optional">Optional</string>
+    <string name="local_field_max_hp">Max HP</string>
+    <string name="local_field_armor_class">AC</string>
+    <string name="local_field_row_label">Label</string>
+    <string name="local_field_total">Total</string>
+    <string name="local_field_quantity">Quantity</string>
+    <string name="local_field_reset">Resets on</string>
+    <string name="local_section_abilities">Ability scores</string>
+    <string name="local_section_combat">Combat</string>
+    <string name="local_section_rows">Tracker rows</string>
+    <string name="local_rows_note">Spell slots, resources and items you want on the tracker.</string>
+    <string name="local_kind_slot">Slot</string>
+    <string name="local_kind_resource">Resource</string>
+    <string name="local_kind_item">Item</string>
+    <string name="local_add_slot">Add slot</string>
+    <string name="local_add_resource">Add resource</string>
+    <string name="local_add_item">Add item</string>
+    <string name="local_reset_none">Never</string>
+    <string name="local_reset_short">Short rest</string>
+    <string name="local_reset_long">Long rest</string>
+    <!-- Validation. Every range is filled in from LocalCharacterForm's own constants, so
+         these sentences cannot go stale when a bound moves. -->
+    <string name="local_error_name">Give your character a name.</string>
+    <string name="local_error_level">Level must be %1$d–%2$d, or blank.</string>
+    <string name="local_error_ability">Must be %1$d–%2$d.</string>
+    <string name="local_error_max_hp">Must be at least %1$d.</string>
+    <string name="local_error_armor_class">Must be %1$d–%2$d.</string>
+    <string name="local_error_row_label">Give this row a label.</string>
+    <string name="local_error_row_total">Must be %1$d–%2$d.</string>
+    <string name="local_error_row_quantity">Must be %1$d–%2$d.</string>
+    <string name="local_delete_title">Delete this character?</string>
+    <string name="local_delete_body">%1$s and everything on their tracker will be removed from this device.</string>
+    <string name="local_delete_not_undoable">This cannot be undone — local characters are not backed up anywhere.</string>
 
     <!-- Actions -->
     <string name="action_settings">Settings</string>
@@ -136,4 +187,11 @@
     <string name="action_sign_out">Sign out</string>
     <string name="action_add_account">Add another account</string>
     <string name="action_new_character">New character</string>
+    <string name="action_new_dicecloud_character">New character in DiceCloud</string>
+    <string name="action_new_local_character">New character on this device</string>
+    <string name="action_continue_without_account">Continue without an account</string>
+    <string name="action_edit_character">Edit character</string>
+    <string name="action_save">Save</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_remove">Remove</string>
 </resources>

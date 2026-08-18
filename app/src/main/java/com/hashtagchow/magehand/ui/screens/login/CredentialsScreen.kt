@@ -14,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -55,6 +56,7 @@ import com.hashtagchow.magehand.R
 @Composable
 fun CredentialsScreen(
     onSignedIn: () -> Unit,
+    onContinueWithoutAccount: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: CredentialsViewModel = hiltViewModel(),
 ) {
@@ -218,6 +220,26 @@ fun CredentialsScreen(
 
             Text(
                 text = stringResource(R.string.credentials_token_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+            // FR-5 (docs/design/09-local-characters.md decision 3). Below the sign-in button
+            // and styled as the lesser affordance, because signing in is still what most
+            // people opened this screen to do — but present, because for the rest of them
+            // this is the only way in. Signing in later is a Settings tap away, and 09
+            // decision 10 guarantees the local characters survive it either way.
+            TextButton(
+                onClick = onContinueWithoutAccount,
+                enabled = !uiState.isSubmitting,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.action_continue_without_account))
+            }
+            Text(
+                text = stringResource(R.string.credentials_local_note),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
