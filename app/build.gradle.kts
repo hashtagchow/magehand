@@ -57,8 +57,11 @@ android {
         // versionCode 2 leaves 1 spent on the WP1..WP7 debug sideloads, so a device
         // that has one installed will accept this as an update. 2 shipped to Play as
         // 1.0.0 (first published release); Play rejects any reused versionCode.
-        versionCode = 3
-        versionName = "1.0.1"
+        // 3 shipped as 1.0.1. Both are live on Play, so both codes are spent for good —
+        // a bump is part of preparing a release, not a step to remember at upload time.
+        // 4 / 1.0.2 carries the WP8 pre-release review fixes.
+        versionCode = 4
+        versionName = "1.0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

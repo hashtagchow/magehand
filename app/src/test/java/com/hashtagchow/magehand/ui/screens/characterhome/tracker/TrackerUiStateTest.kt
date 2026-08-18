@@ -7,6 +7,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.DamageDefense
+import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
@@ -14,9 +16,12 @@ import com.hashtagchow.magehand.core.model.TrackerKind
 import java.time.ZoneId
 
 /**
- * Board → UI mapping and status-strip derivation (WP6 acceptance).
+ * Board → UI mapping and connection derivation (WP6 acceptance).
  *
- * The numbers here are Sabriel's, from `docs/fixtures/sabriel-2026-08-17.json` as WP4
+ * The *presentation* half — dot vs no dot, and what the details sheet says — lives in
+ * `ConnectionStatusTest`.
+ *
+ * The numbers here are the live capture's (see `Fixtures.kt`), as WP4
  * asserted them: 1st-level slots 3/4, 2nd-level 1/2, HP 17/17, "Heroic Inspiration" 0/1,
  * "Gold piece" ×109. Using the real sheet's shape rather than invented numbers is what
  * makes this test and the emulator parity probe assert the same thing from two ends.
@@ -155,12 +160,64 @@ class TrackerUiStateTest {
         assertEquals(109, consumables.single().quantity)
     }
 
+    // --- toggle visibility (active buffs only) ------------------------------
+
     @Test
-    fun `condition chips keep their on-off state`() {
+    fun `only the toggles that are on are chips by default`() {
+        // The default view is "what is running on me right now". "Racial ASI Disabler" is
+        // off, so it is not in the way of that question.
         assertEquals(
-            listOf("Load Wizard Spells" to true, "Racial ASI Disabler" to false),
+            listOf("Load Wizard Spells" to true),
             map().conditions.map { it.name to it.enabled },
         )
+    }
+
+    @Test
+    fun `the toggles that are off are counted behind the expander, not dropped`() {
+        // Turning a buff *on* is a tap on an off chip, so "hidden by default" has to mean
+        // one tap away, not gone.
+        assertEquals(listOf("Racial ASI Disabler"), map().inactiveConditions.map { it.name })
+        assertTrue(map().inactiveConditions.none { it.enabled })
+    }
+
+    @Test
+    fun `a pinned toggle stays a chip while it is off`() {
+        // The user override in the "always show" direction. `pinned` reaches the row from
+        // `tracker_prefs` via TrackerEngine; here it is already on the board.
+        val board = sabriel.copy(
+            activeToggles = listOf(
+                ConditionToggle("tog2", "Racial ASI Disabler", enabled = false, pinned = true),
+            ),
+        )
+        assertEquals(listOf("Racial ASI Disabler"), map(board).conditions.map { it.name })
+        assertTrue(map(board).inactiveConditions.isEmpty())
+    }
+
+    @Test
+    fun `a hidden toggle is absent from both lists even when it is on`() {
+        // Hiding is enforced upstream: TrackerEngine's override layer never puts a hidden
+        // row on the board, so an on-and-hidden toggle cannot arrive here at all. This
+        // pins the consequence — the expander is not a back door into hidden rows.
+        val board = sabriel.copy(
+            activeToggles = listOf(ConditionToggle("tog1", "Load Wizard Spells", enabled = true)),
+        )
+        val hiddenByEngine = board.copy(activeToggles = emptyList())
+        assertTrue(map(hiddenByEngine).conditions.isEmpty())
+        assertTrue(map(hiddenByEngine).inactiveConditions.isEmpty())
+    }
+
+    @Test
+    fun `a board of nothing but off toggles is not an empty board`() {
+        // Otherwise the screen would render "Nothing to track yet" over an expander holding
+        // every buff the character could raise.
+        val board = TrackerBoard(
+            activeToggles = listOf(ConditionToggle("tog2", "Rage", enabled = false)),
+        )
+        val state = map(board)
+        assertTrue(state.conditions.isEmpty())
+        assertEquals(1, state.inactiveConditions.size)
+        assertFalse(state.isEmpty)
+        assertFalse(state.isLoading)
     }
 
     @Test
@@ -199,7 +256,7 @@ class TrackerUiStateTest {
         assertFalse(map(connection = ConnectionState.CONNECTING).isLoading)
     }
 
-    // --- status strip -------------------------------------------------------
+    // --- connection status ---------------------------------------------------
 
     @Test
     fun `every connection state maps to exactly one tone, and back`() {
@@ -232,7 +289,7 @@ class TrackerUiStateTest {
 
     @Test
     fun `the snapshot banner is independent of the connection tone`() {
-        // The case the two-line strip exists for: reconnecting *and* showing stale data.
+        // The case the details sheet exists for: reconnecting *and* showing stale data.
         val state = map(connection = ConnectionState.CONNECTING, isShowingSnapshot = true)
         assertEquals(ConnectionTone.RECONNECTING, state.status.tone)
         assertTrue(state.status.showingSnapshot)
@@ -246,5 +303,88 @@ class TrackerUiStateTest {
     @Test
     fun `the accent colour is carried through untouched`() {
         assertEquals("#7E57C2", map(accent = "#7E57C2").accentColor)
+    }
+
+    // --- Defenses -----------------------------------------------------------
+
+    private fun defense(id: String, kind: DefenseKind, vararg types: String) =
+        DamageDefense(propertyId = id, kind = kind, damageTypes = types.toList(), name = id)
+
+    @Test
+    fun `a character with no defenses gets no defenses section`() {
+        // The section is absent, not empty — the whole reason the screen checks isNotEmpty.
+        assertTrue(map().defenses.isEmpty())
+    }
+
+    @Test
+    fun `defenses render display-cased, alphabetical and one row per kind`() {
+        val state = map(
+            board = sabriel.copy(
+                defenses = listOf(
+                    defense("d1", DefenseKind.RESISTANT, "radiant", "necrotic"),
+                    defense("d2", DefenseKind.IMMUNE, "poison"),
+                ),
+            ),
+        )
+        // Row order is the board's order, untouched — sorting defenses is the engine's
+        // job, and this list is deliberately handed over in the "wrong" one to prove the
+        // mapper does not quietly re-sort behind it.
+        assertEquals(listOf(DefenseKind.RESISTANT, DefenseKind.IMMUNE), state.defenses.map { it.kind })
+        assertEquals("Necrotic, Radiant", state.defenses.first().text)
+        assertEquals("Resistant", state.defenses.first().label)
+        assertEquals("Immune", state.defenses.last().label)
+        assertEquals("Poison", state.defenses.last().text)
+    }
+
+    @Test
+    fun `two features granting the same kind merge into one row`() {
+        // Three sources of fire resistance are one fact at the table, not three lines.
+        val state = map(
+            board = sabriel.copy(
+                defenses = listOf(
+                    defense("d1", DefenseKind.RESISTANT, "fire"),
+                    defense("d2", DefenseKind.RESISTANT, "poison"),
+                ),
+            ),
+        )
+        val row = state.defenses.single()
+        assertEquals(DefenseKind.RESISTANT, row.kind)
+        assertEquals("Fire, Poison", row.text)
+    }
+
+    @Test
+    fun `the same damage type from two features is printed once, whatever its casing`() {
+        // The wire strings are whatever the sheet's author typed.
+        val state = map(
+            board = sabriel.copy(
+                defenses = listOf(
+                    defense("d1", DefenseKind.RESISTANT, "Fire"),
+                    defense("d2", DefenseKind.RESISTANT, "fire", "cold"),
+                ),
+            ),
+        )
+        assertEquals("Cold, Fire", state.defenses.single().text)
+    }
+
+    @Test
+    fun `every defense kind has a label`() {
+        assertEquals(
+            listOf("Immune", "Resistant", "Vulnerable"),
+            DefenseKind.entries.map { it.label() },
+        )
+    }
+
+    @Test
+    fun `a board carrying only defenses is neither empty nor loading`() {
+        // Otherwise the tab would render its "nothing to track" state over a character
+        // whose only tracker content is the reference section.
+        // CONNECTING, so isLoading would fire if isEmpty were still true — the assertion
+        // is worthless against the LIVE default.
+        val state = map(
+            board = TrackerBoard(defenses = listOf(defense("d1", DefenseKind.IMMUNE, "poison"))),
+            connection = ConnectionState.CONNECTING,
+        )
+        assertFalse(state.isEmpty)
+        assertFalse(state.isLoading)
     }
 }

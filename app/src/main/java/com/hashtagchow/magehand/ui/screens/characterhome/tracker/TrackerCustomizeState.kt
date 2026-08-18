@@ -14,6 +14,14 @@ import com.hashtagchow.magehand.core.model.TrackerOverride
  * The state is built from `OpenCharacter.boardIgnoringHidden`, not from the rendered
  * board: a hidden row is filtered out by `TrackerEngine`, so the rendered board cannot
  * tell you what there is to un-hide.
+ *
+ * This sheet is deliberately the *complete* list, and it stayed complete when the tracker
+ * started hiding switched-off toggles by default
+ * ([com.hashtagchow.magehand.core.model.ConditionToggle.shownByDefault]): the two controls
+ * here are how a user overrides that default in either direction — pin a condition and it
+ * stays on the tracker while it is off, hide one and it never appears however it is
+ * switched. Their meaning is unchanged; the `On` / `Off` detail is what makes the first of
+ * those findable.
  */
 
 /** The tracker's row groups, in the order 04 §3 lays them out. */

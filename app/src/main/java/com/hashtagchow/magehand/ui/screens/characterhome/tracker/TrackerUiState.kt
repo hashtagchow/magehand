@@ -1,7 +1,11 @@
 package com.hashtagchow.magehand.ui.screens.characterhome.tracker
 
+import androidx.annotation.StringRes
+import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.DamageDefense
+import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
@@ -18,11 +22,11 @@ import java.time.format.DateTimeFormatter
  *
  * Everything here is derived from a [TrackerBoard] plus four session signals by
  * [toTrackerUiState], which is a pure function on purpose: the board → UI mapping and the
- * status-strip derivation are the two things most likely to go quietly wrong, and both are
+ * connection derivation are the two things most likely to go quietly wrong, and both are
  * unit-tested in `TrackerUiStateTest` without a device, a Compose runtime or a clock.
  */
 
-/** The status strip's connection chip. 04 §3 names three; 06 adds the fourth. */
+/** The connection, as the tracker talks about it. 04 §3 names three; 06 adds the fourth. */
 enum class ConnectionTone {
     /** DDP connected, logged in **and** the `singleCharacter` sub ready. */
     LIVE,
@@ -38,8 +42,22 @@ enum class ConnectionTone {
 }
 
 /**
- * 04 §3's "connection state chip (Live / Reconnecting / Offline — cached HH:MM)" plus
- * 06's snapshot-fallback banner.
+ * The connection, and **how the tracker is allowed to mention it**.
+ *
+ * ### Why this is no longer a strip
+ *
+ * 04 §3 specified a permanent "connection state chip (Live / Reconnecting / Offline —
+ * cached HH:MM)" across the top of the tab. In practice it was a band of chrome that said
+ * "Live" for ~100% of a session at the table — it spent its whole life reporting the
+ * absence of a problem, while costing a row of vertical space on the one screen where
+ * vertical space is pips. The rule now is *quiet when healthy*: nothing renders at all
+ * while [isLive], and everything the strip used to say moves into a details sheet behind
+ * a dot that only exists when there is something to say. This class is where that rule
+ * lives — not in the composable — so `TrackerUiStateTest` can pin it without a device.
+ *
+ * The read-only consequence of being offline is unchanged; only its presentation moved.
+ * It is still stated in the list itself (`ReadOnlyNote`, driven by
+ * [TrackerUiState.canWrite]) *and* restated in the sheet — see [warnsWritesDisabled].
  *
  * @param syncedAt `"HH:MM"` of the cached snapshot, or `null` when nothing has ever
  *   synced for this character. Formatted here rather than in the composable so the
@@ -48,11 +66,88 @@ enum class ConnectionTone {
  *   live mirror. Independent of [tone]: a screen can be `RECONNECTING` and still be
  *   showing a snapshot, and that is exactly when the user most needs to be told.
  */
-data class StatusStripState(
+data class ConnectionStatus(
     val tone: ConnectionTone = ConnectionTone.RECONNECTING,
     val syncedAt: String? = null,
     val showingSnapshot: Boolean = false,
-)
+) {
+    val isLive: Boolean get() = tone == ConnectionTone.LIVE
+
+    /**
+     * Whether the connection is in a state worth *mentioning*. Necessary for the dot but
+     * not sufficient — the board also has to be on screen for "not live" to mean anything
+     * to the user. [TrackerUiState.showConnectionIndicator] is the whole rule.
+     */
+    val isWorthMentioning: Boolean get() = !isLive
+
+    /**
+     * Whether this state is one that **waiting cannot fix** — the token was rejected, or
+     * there is no network and the retries have stopped for now. The user has to do
+     * something (sign in, turn the network on) or nothing will change.
+     *
+     * The opposite — `RECONNECTING` — is genuinely transient: a redial is already in
+     * flight and the most likely next event is that it succeeds.
+     *
+     * This is not [canRetry] restated. `canRetry` asks "would pressing the button do
+     * anything?", and `OFFLINE` answers yes to that *and* yes to this: a restart is worth
+     * offering, but nothing happens on its own while the network is down.
+     * [TrackerUiState.showConnectionIndicator] is the only consumer.
+     */
+    val isTerminalUntilActedOn: Boolean
+        get() = tone == ConnectionTone.OFFLINE || tone == ConnectionTone.SIGNED_OUT
+
+    /** Two or three words for the sheet's heading — never a sentence. */
+    @get:StringRes
+    val stateLabelRes: Int
+        get() = when (tone) {
+            ConnectionTone.LIVE -> R.string.connection_state_live
+            ConnectionTone.RECONNECTING -> R.string.connection_state_reconnecting
+            ConnectionTone.OFFLINE -> R.string.connection_state_offline
+            ConnectionTone.SIGNED_OUT -> R.string.connection_state_signed_out
+        }
+
+    /** One sentence saying what is actually wrong and whether waiting will fix it. */
+    @get:StringRes
+    val explanationRes: Int
+        get() = when (tone) {
+            ConnectionTone.LIVE -> R.string.connection_details_live
+            ConnectionTone.RECONNECTING -> R.string.connection_details_reconnecting
+            ConnectionTone.OFFLINE -> R.string.connection_details_offline
+            ConnectionTone.SIGNED_OUT -> R.string.connection_details_signed_out
+        }
+
+    /**
+     * The dot's `contentDescription`. A bare "red dot" would be useless to TalkBack, so
+     * each state names itself *and* says the dot is tappable — it is the only route to
+     * the details, and nothing else on screen mentions the connection any more.
+     */
+    @get:StringRes
+    val indicatorDescriptionRes: Int
+        get() = when (tone) {
+            ConnectionTone.LIVE -> R.string.connection_indicator_live
+            ConnectionTone.RECONNECTING -> R.string.connection_indicator_reconnecting
+            ConnectionTone.OFFLINE -> R.string.connection_indicator_offline
+            ConnectionTone.SIGNED_OUT -> R.string.connection_indicator_signed_out
+        }
+
+    /**
+     * Whether the sheet offers "Try reconnecting" — i.e. whether
+     * `DdpConnectionManager.restart()` could plausibly help.
+     *
+     * `SIGNED_OUT` is excluded on purpose: the resume token was *rejected*, so a restart
+     * would redial, re-present the same dead token and land back here. Offering a button
+     * that cannot work is worse than offering none, so that state gets the "sign in
+     * again" sentence instead. `LIVE` is excluded because there is nothing to fix.
+     */
+    val canRetry: Boolean
+        get() = tone == ConnectionTone.RECONNECTING || tone == ConnectionTone.OFFLINE
+
+    /**
+     * Whether the sheet repeats "writes are unavailable". Same condition as the queue's
+     * own LIVE-only rule, so the two cannot drift into disagreeing.
+     */
+    val warnsWritesDisabled: Boolean get() = !isLive
+}
 
 /** 04 §3's HP block. The steppers and the number pad render disabled in WP6. */
 data class HpState(
@@ -124,6 +219,28 @@ data class ConditionChipState(
 )
 
 /**
+ * One line of the read-only Defenses section — *"Resistant · Fire, Poison"*.
+ *
+ * One row per [DefenseKind], **not** one per discovered property: a character with three
+ * separate features granting fire resistance has one fact to read at the table, not three
+ * lines saying the same thing. The merge and the de-duplication happen in [toDefenseRows].
+ *
+ * There is no `propertyId` here for the same reason there is no callback: nothing about
+ * this row is addressable. It is the only part of the tracker that is purely reference.
+ */
+data class DefenseRowState(
+    val kind: DefenseKind,
+    /** Display-cased damage types, de-duplicated and alphabetical. Never empty. */
+    val types: List<String>,
+) {
+    /** `"Immune"` / `"Resistant"` / `"Vulnerable"`. */
+    val label: String get() = kind.label()
+
+    /** `"Fire, Poison"` — the whole right-hand side of the row. */
+    val text: String get() = types.joinToString(", ")
+}
+
+/**
  * One row of the undo-history sheet (04 §3), already turned into display text.
  *
  * @param canUndo true on the **single** newest reversible entry. Undo is a stack, not a
@@ -141,14 +258,30 @@ data class HistoryRowState(
 
 data class TrackerUiState(
     val creatureId: String = "",
-    val status: StatusStripState = StatusStripState(),
+    val status: ConnectionStatus = ConnectionStatus(),
     /** 04 §3: `Concentrating: Bless ✕`. */
     val concentratingOn: String? = null,
     val hp: HpState? = null,
+    /**
+     * The Defenses section, or empty when the character has none — in which case the
+     * section is *absent*, not empty. Sits between HP and the spell slots: it is combat
+     * reference, so it belongs next to the other combat reference, and it is read-only, so
+     * it costs nothing to scroll past.
+     */
+    val defenses: List<DefenseRowState> = emptyList(),
     val slots: List<PipRowState> = emptyList(),
     val resources: List<PipRowState> = emptyList(),
     val consumables: List<ConsumableState> = emptyList(),
     val conditions: List<ConditionChipState> = emptyList(),
+    /**
+     * The switched-off toggles the conditions section files behind its "N inactive"
+     * expander ([ConditionToggle.shownByDefault]).
+     *
+     * A second list rather than a flag on [ConditionChipState] because the screen renders
+     * them as a separate, collapsed group — and because "how many are hidden right now" is
+     * the expander's own label, which a filter at the call site would have to recompute.
+     */
+    val inactiveConditions: List<ConditionChipState> = emptyList(),
     /** `"#RRGGBB"` from `theme_prefs`, or `null` for the app default (04 §6). */
     val accentColor: String? = null,
     /**
@@ -167,7 +300,8 @@ data class TrackerUiState(
     /** Nothing discovered yet — a cold open with no snapshot and no live sub. */
     val isEmpty: Boolean
         get() = hp == null && slots.isEmpty() && resources.isEmpty() &&
-            consumables.isEmpty() && conditions.isEmpty()
+            consumables.isEmpty() && conditions.isEmpty() && inactiveConditions.isEmpty() &&
+            defenses.isEmpty()
 
     /**
      * Distinguishes "this character genuinely has no tracker rows" from "we have not
@@ -176,6 +310,37 @@ data class TrackerUiState(
      */
     val isLoading: Boolean
         get() = isEmpty && status.tone != ConnectionTone.LIVE && !status.showingSnapshot
+
+    /**
+     * Whether the tracker floats its bottom-right connection dot.
+     *
+     * Two conditions, and the second one is the interesting half:
+     *
+     *  1. **The connection is worth mentioning** ([ConnectionStatus.isWorthMentioning]) —
+     *     anything but `LIVE`. Quiet when healthy: a working session shows nothing.
+     *  2. **The board is on screen, _or_ waiting will not fix this.** The dot's meaning is
+     *     *"what you are looking at is not live"*, and during a cold open the user is not
+     *     looking at sheet data at all — they are looking at a spinner that already says
+     *     what it is doing. Since `isLoading` implies non-`LIVE` by construction,
+     *     condition 1 alone would put a red mark on the screen for the first moments of
+     *     **every** cold open, which is the fastest way to teach someone that the red mark
+     *     means nothing.
+     *
+     * But `!isLoading` alone was too blunt, and the difference is
+     * [ConnectionStatus.isTerminalUntilActedOn]. Suppressing the dot while loading is
+     * right for `RECONNECTING`, because a redial is in flight and the spinner is telling
+     * the truth: waiting may well finish the job. It is wrong for `OFFLINE` and
+     * `SIGNED_OUT`, where nothing is coming. A character with no cached snapshot and a
+     * rejected token is `isLoading` forever — and with the old rule it showed an
+     * indefinite spinner, no dot, no route to the sheet, and therefore no way to find out
+     * that the app wanted the user to sign in again. A dot that is the only exit is worth
+     * more than the tidiness of a bare spinner.
+     *
+     * It lives here rather than on [ConnectionStatus] because it needs both halves, and
+     * only this class knows whether there are rows yet.
+     */
+    val showConnectionIndicator: Boolean
+        get() = status.isWorthMentioning && (!isLoading || status.isTerminalUntilActedOn)
 }
 
 /**
@@ -196,22 +361,27 @@ fun toTrackerUiState(
     history: List<TrackerWrite> = emptyList(),
     zone: ZoneId = ZoneId.systemDefault(),
 ): TrackerUiState {
-    val conditions = board.activeToggles.map { it.toChip() }
+    // The one place the board's toggles are split, using the rule itself rather than a
+    // re-statement of it — `partition` keeps both halves in the board's order.
+    val (shown, inactive) = board.activeToggles.partition { it.shownByDefault }
+    val conditions = shown.map { it.toChip() }
     // Only the newest still-reversible entry gets an UNDO button; see [HistoryRowState].
     val topOfStack = history.firstOrNull { it.undoable }?.id
     return TrackerUiState(
         creatureId = creatureId,
-        status = StatusStripState(
+        status = ConnectionStatus(
             tone = connection.toTone(),
             syncedAt = formatSyncedAt(lastSyncedAt, zone),
             showingSnapshot = isShowingSnapshot,
         ),
         concentratingOn = board.concentratingOn,
         hp = board.hp?.toHpState(tempHp = board.tempHp?.value ?: 0),
+        defenses = toDefenseRows(board.defenses),
         slots = board.slots.map { it.toPipRow() },
         resources = board.resources.map { it.toPipRow() },
         consumables = board.pinnedItems.map { it.toConsumable() },
         conditions = conditions,
+        inactiveConditions = inactive.map { it.toChip() },
         accentColor = accentColor,
         canWrite = canWrite,
         canUndo = canUndo && canWrite,
@@ -222,6 +392,49 @@ fun toTrackerUiState(
         concentrationToggleId = board.concentratingOn
             ?.let { name -> conditions.firstOrNull { it.name == name && it.enabled && it.canFlip }?.propertyId },
     )
+}
+
+/**
+ * Discovered defenses → the section's lines.
+ *
+ * Three decisions, all of which exist to make the section a *glance* rather than a list:
+ *
+ *  1. **Merged by kind.** Several properties can grant the same protection; the player
+ *     needs the union, once. The board's order decides which kinds appear first
+ *     (immunities → resistances → vulnerabilities, see `DefenseKind`), so this walks the
+ *     list in order rather than iterating the enum.
+ *  2. **De-duplicated case-insensitively**, because the wire strings are whatever the
+ *     sheet's author typed: `"Fire"` from one feature and `"fire"` from another are one
+ *     resistance, and printing both would look like a bug in the app rather than a
+ *     quirk of the sheet.
+ *  3. **Alphabetical within a line.** The server's `order` is the order features were
+ *     added to the character, which is meaningless to a reader scanning for one word.
+ *
+ * Display casing is a first-letter capitalization and nothing cleverer: the wire values
+ * are lowercase single words (`"radiant"`, `"necrotic"` on the live capture), and a
+ * homebrew type that arrives already capitalized survives unchanged.
+ */
+fun toDefenseRows(defenses: List<DamageDefense>): List<DefenseRowState> = defenses
+    .groupBy { it.kind }
+    .map { (kind, group) ->
+        DefenseRowState(
+            kind = kind,
+            types = group
+                .flatMap { it.damageTypes }
+                .distinctBy { it.lowercase() }
+                .map { it.replaceFirstChar(Char::uppercase) }
+                .sorted(),
+        )
+    }
+
+/**
+ * Display text for a defense kind. Same "not a string resource" reasoning as
+ * [ResetRule.label] — asserted in a JVM unit test, and v1 is English-only.
+ */
+fun DefenseKind.label(): String = when (this) {
+    DefenseKind.IMMUNE -> "Immune"
+    DefenseKind.RESISTANT -> "Resistant"
+    DefenseKind.VULNERABLE -> "Vulnerable"
 }
 
 /**

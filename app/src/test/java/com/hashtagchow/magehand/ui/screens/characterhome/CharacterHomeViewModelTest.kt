@@ -25,6 +25,8 @@ import com.hashtagchow.magehand.core.data.auth.StoredToken
 import com.hashtagchow.magehand.core.data.auth.TokenStore
 import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
 import com.hashtagchow.magehand.core.data.characters.CharacterListState
+import com.hashtagchow.magehand.core.data.connection.AccountConnection
+import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
 import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.ConditionToggle
@@ -80,9 +82,12 @@ class CharacterHomeViewModelTest {
             characterListRepository = FakeCharacterListRepository(listState),
             sheetSessionFactory = SheetSessionFactory(StubAccountRepository, StubTokenStore),
             openCharacterFactory = factory,
+            connectionManager = connectionManager,
         )
         return vm to factory
     }
+
+    private val connectionManager = RecordingConnectionManager()
 
     /** `stateIn(WhileSubscribed)` never runs without a collector. */
     private fun kotlinx.coroutines.test.TestScope.collecting(vm: CharacterHomeViewModel) {
@@ -125,14 +130,14 @@ class CharacterHomeViewModelTest {
     }
 
     @Test
-    fun `the status strip follows the session, not the character list`() = runTest(dispatcher) {
+    fun `the connection status follows the session, not the character list`() = runTest(dispatcher) {
         val character = FakeOpenCharacter(creatureId = creatureId)
         val (vm, _) = viewModel(character)
         collecting(vm)
         advanceUntilIdle()
 
         // The list can be LIVE while *this character's* subscription is not ready — that
-        // is the whole reason the tracker has its own strip.
+        // is the whole reason the tracker derives its own connection status.
         character.connectionState.value = ConnectionState.OFFLINE
         character.isShowingSnapshot.value = true
         character.lastSyncedAt.value = 1_786_991_520_000L
@@ -143,6 +148,24 @@ class CharacterHomeViewModelTest {
         assertTrue(status.showingSnapshot)
         assertEquals(ConnectionState.OFFLINE, vm.uiState.value.connection)
     }
+
+    /**
+     * The connection sheet's retry button, end to end: it may do exactly one thing, and
+     * that thing is the `restart()` that already existed. If this ever grows a second
+     * call the feature has invented reconnection machinery it was told not to.
+     */
+    @Test
+    fun `retrying the connection asks the existing manager to restart, and nothing else`() =
+        runTest(dispatcher) {
+            val (vm, _) = viewModel()
+            collecting(vm)
+            advanceUntilIdle()
+
+            assertEquals(0, connectionManager.restarts)
+            vm.reconnect()
+            advanceUntilIdle()
+            assertEquals(1, connectionManager.restarts)
+        }
 
     @Test
     fun `the character name comes from the list the user came from`() = runTest(dispatcher) {
@@ -470,6 +493,21 @@ private fun CharacterHomeViewModel.callOnCleared() {
         .getDeclaredMethod("onCleared")
         .apply { isAccessible = true }
     method.invoke(this)
+}
+
+/**
+ * Counts [restart] calls, which is the whole of what the connection sheet's retry button
+ * is allowed to do — see `CharacterHomeViewModel.reconnect`.
+ */
+private class RecordingConnectionManager : DdpConnectionManager {
+    var restarts = 0
+        private set
+
+    override val connection: StateFlow<AccountConnection?> = MutableStateFlow(null)
+
+    override fun restart() {
+        restarts++
+    }
 }
 
 private class FakeCharacterListRepository(state: CharacterListState) : CharacterListRepository {

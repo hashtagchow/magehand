@@ -46,9 +46,22 @@ data class OptimisticOverlay(
     fun valueFor(propertyId: String, serverValue: Int): Int =
         (valueAbsolutes[propertyId] ?: serverValue) + (valueDeltas[propertyId] ?: 0)
 
+    /**
+     * The board as the user should see it *right now* — server state with the unresolved
+     * predictions layered on top.
+     *
+     * `copy` rather than a field-by-field `TrackerBoard(...)` rebuild, and that is a
+     * correctness rule rather than a style preference: an overlay transforms exactly the
+     * countable rows and the toggles, and a constructor call silently defaults **every**
+     * field it forgets. That is not hypothetical — the constructor form dropped
+     * [TrackerBoard.defenses] the day that field was added, so the tracker's Defenses
+     * section vanished for as long as any write was in flight and came back when it
+     * resolved. `copy` carries every future field by construction, so a new board field is
+     * pass-through until someone deliberately teaches the overlay to change it.
+     */
     fun applyTo(board: TrackerBoard): TrackerBoard {
         if (isEmpty) return board
-        return TrackerBoard(
+        return board.copy(
             hp = board.hp?.let(::apply),
             tempHp = board.tempHp?.let(::apply),
             slots = board.slots.map(::apply),
@@ -56,7 +69,6 @@ data class OptimisticOverlay(
             pinnedItems = board.pinnedItems.map(::apply),
             allItems = board.allItems.map(::apply),
             activeToggles = board.activeToggles.map(::apply),
-            concentratingOn = board.concentratingOn,
         )
     }
 

@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
+import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -107,6 +108,7 @@ class CharacterHomeViewModel @Inject constructor(
     characterListRepository: CharacterListRepository,
     sheetSessionFactory: SheetSessionFactory,
     private val openCharacterFactory: OpenCharacterFactory,
+    private val connectionManager: DdpConnectionManager,
 ) : ViewModel() {
 
     /** Type-safe nav routes store each component under its property name. */
@@ -271,6 +273,22 @@ class CharacterHomeViewModel @Inject constructor(
     fun undoLastWrite() {
         val character = open.value ?: return
         viewModelScope.launch { character.undoLastWrite() }
+    }
+
+    /**
+     * The connection sheet's "Try reconnecting".
+     *
+     * Deliberately the *existing* `DdpConnectionManager.restart()` — the same call the
+     * token-refresh path already makes — and nothing else. There is no second reconnect
+     * path in this app and this feature does not add one: the backoff loop inside
+     * `DdpClient` owns retrying, and this only asks it to stop waiting out the current
+     * delay. That is also why the sheet says so in as many words: a button that looked
+     * like the only thing keeping the socket alive would be a lie.
+     *
+     * Not offered while `SIGNED_OUT` — see [com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConnectionStatus.canRetry].
+     */
+    fun reconnect() {
+        connectionManager.restart()
     }
 
     /**

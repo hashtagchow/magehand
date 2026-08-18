@@ -168,6 +168,20 @@ private fun numberOf(element: JsonElement?): Int? = when (element) {
     else -> null
 }
 
+/**
+ * The fractional twin of [number], for the one field where truncating to `Int` would
+ * invert the meaning: `damageMultiplier.value` is `0.5` for a resistance, and
+ * [number] would read that back as `0` — *immune*. Unwraps the same `_calculation`
+ * wrapper and tolerates the same stringified numbers.
+ */
+internal fun JsonObject.decimal(key: String): Double? = decimalOf(this[key])
+
+private fun decimalOf(element: JsonElement?): Double? = when (element) {
+    is JsonPrimitive -> element.content.toDoubleOrNull()
+    is JsonObject -> decimalOf(element["value"])
+    else -> null
+}
+
 internal fun JsonObject.strings(key: String): List<String> =
     (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }
         ?: emptyList()

@@ -27,6 +27,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -42,6 +44,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -53,6 +56,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -90,6 +94,15 @@ data class TrackerActions(
 
     /** A condition chip, or the concentration banner's ✕ (the same `flipToggle` write). */
     val onToggle: (propertyId: String) -> Unit = {},
+
+    /**
+     * The bottom-right not-live dot was tapped: open the connection details sheet.
+     *
+     * Hoisted like the history and customize sheets rather than owned by [TrackerTab],
+     * because the sheet's retry action is a ViewModel call and the screen is where the
+     * ViewModel is.
+     */
+    val onConnectionDetails: () -> Unit = {},
 )
 
 /**
@@ -106,8 +119,18 @@ data class ShakeSignal(val propertyId: String?, val token: Long)
  *
  * ### Layout, top→bottom, exactly as 04 §3 orders it
  *
- * status strip · concentration banner · HP block · spell slots · resources ·
- * consumables · condition chips.
+ * concentration banner · HP block · defenses · spell slots · resources · consumables ·
+ * condition chips (the active ones, then an "N inactive" expander — see
+ * [InactiveConditions]).
+ *
+ * Defenses are the one addition to 04 §3's order. They are read-only reference rather than
+ * a tracked resource, and they sit directly under HP because that is the question they
+ * answer — "how much of that hit actually lands?" — asked at the same moment.
+ *
+ * 04 §3's permanent connection strip used to sit above all of that. It is gone: the tab
+ * now says nothing at all about the connection while it is healthy, and floats a single
+ * [ConnectionDot] over the bottom-right corner when it is not. The strip's whole content
+ * moved into `TrackerConnectionSheet`, one tap away. See [ConnectionStatus] for why.
  *
  * ### What a tap can and cannot do
  *
@@ -142,13 +165,38 @@ fun TrackerTab(
     actions: TrackerActions = TrackerActions(),
     shake: ShakeSignal? = null,
 ) {
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
             .semantics { testTagsAsResourceId = true },
     ) {
-        StatusStrip(state.status)
+        TrackerContent(state = state, actions = actions, shake = shake)
 
+        // Quiet when healthy, and quiet over the spinner while a redial is in flight —
+        // but never over a spinner that is never going to end (offline / signed out),
+        // where the dot is the only route to the explanation. The whole rule, and why,
+        // is TrackerUiState.showConnectionIndicator.
+        if (state.showConnectionIndicator) {
+            ConnectionDot(
+                status = state.status,
+                onClick = actions.onConnectionDetails,
+                modifier = Modifier.align(Alignment.BottomEnd),
+            )
+        }
+    }
+}
+
+/**
+ * The tab's actual content, extracted only so [TrackerTab]'s root can be the [Box] that
+ * the connection dot floats in. Everything about this function is what the tab always was.
+ */
+@Composable
+private fun TrackerContent(
+    state: TrackerUiState,
+    actions: TrackerActions,
+    shake: ShakeSignal?,
+) {
+    Column(Modifier.fillMaxSize()) {
         state.concentratingOn?.let { name ->
             ConcentrationBanner(
                 name = name,
@@ -171,7 +219,15 @@ fun TrackerTab(
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 32.dp),
+            // The extra bottom inset is the floating dot's footprint: without it the last
+            // row — which when disconnected is the read-only note — scrolls to rest
+            // *underneath* the very control that explains why it is there.
+            contentPadding = PaddingValues(
+                start = 16.dp,
+                end = 16.dp,
+                top = 12.dp,
+                bottom = if (state.showConnectionIndicator) 72.dp else 32.dp,
+            ),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             state.hp?.let { hp ->
@@ -184,6 +240,15 @@ fun TrackerTab(
                         modifier = Modifier.shakeOn(shake, hp.propertyId),
                     )
                 }
+            }
+
+            // Between HP and the slots: combat reference next to the other combat
+            // reference. Absent — header and all — for the many characters with none.
+            if (state.defenses.isNotEmpty()) {
+                item(key = "defenses-header") {
+                    SectionHeader(stringResource(R.string.tracker_section_defenses))
+                }
+                item(key = "defenses") { DefenseRows(rows = state.defenses) }
             }
 
             if (state.slots.isNotEmpty()) {
@@ -230,17 +295,29 @@ fun TrackerTab(
                 }
             }
 
-            if (state.conditions.isNotEmpty()) {
+            if (state.conditions.isNotEmpty() || state.inactiveConditions.isNotEmpty()) {
                 item(key = "conditions-header") {
                     SectionHeader(stringResource(R.string.tracker_section_conditions))
                 }
-                item(key = "conditions") {
-                    ConditionChips(
-                        chips = state.conditions,
-                        canWrite = state.canWrite,
-                        onToggle = actions.onToggle,
-                        shake = shake,
-                    )
+                if (state.conditions.isNotEmpty()) {
+                    item(key = "conditions") {
+                        ConditionChips(
+                            chips = state.conditions,
+                            canWrite = state.canWrite,
+                            onToggle = actions.onToggle,
+                            shake = shake,
+                        )
+                    }
+                }
+                if (state.inactiveConditions.isNotEmpty()) {
+                    item(key = "conditions-inactive") {
+                        InactiveConditions(
+                            chips = state.inactiveConditions,
+                            canWrite = state.canWrite,
+                            onToggle = actions.onToggle,
+                            shake = shake,
+                        )
+                    }
                 }
             }
 
@@ -279,73 +356,56 @@ private fun Modifier.shakeOn(shake: ShakeSignal?, propertyId: String): Modifier 
 }
 
 /**
- * 04 §3's connection chip, plus 06's snapshot banner.
+ * The whole of the tracker's connection chrome: one dot, bottom-right, only when the
+ * sheet is **not** live.
  *
- * The two are separate lines because they answer different questions: the chip says
- * whether the socket is up, the banner says whether what you are looking at came off the
- * wire or out of Room. A reconnecting screen showing a two-hour-old snapshot has to say
- * both, and a single blended string cannot.
+ * ### Why a dot and not the strip it replaced
+ *
+ * See [ConnectionStatus]. The short version: the strip reported "no problem" for almost
+ * every second it was ever on screen, and charged a row of the tracker for it.
+ *
+ * ### The 48 dp that is not the 10 dp
+ *
+ * The visual is deliberately tiny — it is a hint, not an alarm — but the *target* is the
+ * app's usual 48 dp (`PIP_TARGET_DP`, the same figure every stepper and pip uses). Sizing
+ * the touch area to the paint would make the only route to the connection details a 10 dp
+ * bullseye at the corner of the screen, which is where thumbs are least accurate.
+ *
+ * The disc behind the dot is not decoration either: this floats over arbitrary scrolling
+ * content, and an unbacked error-coloured dot can land on an error-coloured pip. The
+ * surface disc guarantees it reads as a control at any scroll position.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun StatusStrip(state: StatusStripState, modifier: Modifier = Modifier) {
-    val (label, container, onContainer) = when (state.tone) {
-        ConnectionTone.LIVE -> Triple(
-            stringResource(R.string.connection_live),
-            MaterialTheme.colorScheme.secondaryContainer,
-            MaterialTheme.colorScheme.onSecondaryContainer,
-        )
-
-        ConnectionTone.RECONNECTING -> Triple(
-            stringResource(R.string.connection_reconnecting),
-            MaterialTheme.colorScheme.tertiaryContainer,
-            MaterialTheme.colorScheme.onTertiaryContainer,
-        )
-
-        ConnectionTone.OFFLINE -> Triple(
-            state.syncedAt?.let { stringResource(R.string.connection_offline_synced, it) }
-                ?: stringResource(R.string.connection_offline),
-            MaterialTheme.colorScheme.surfaceVariant,
-            MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        ConnectionTone.SIGNED_OUT -> Triple(
-            stringResource(R.string.connection_auth_failed),
-            MaterialTheme.colorScheme.errorContainer,
-            MaterialTheme.colorScheme.onErrorContainer,
-        )
-    }
-
-    Surface(color = container, contentColor = onContainer, modifier = modifier.fillMaxWidth()) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+private fun ConnectionDot(
+    status: ConnectionStatus,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val description = stringResource(status.indicatorDescriptionRes)
+    Box(
+        modifier = modifier
+            .padding(DOT_MARGIN_DP.dp)
+            .size(PIP_TARGET_DP.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick, role = Role.Button)
+            .semantics { contentDescription = description }
+            .testTag("tracker:connection"),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
+            shadowElevation = 3.dp,
+            modifier = Modifier.size(DOT_DISC_DP.dp),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
                 Box(
                     Modifier
-                        .size(8.dp)
+                        .size(DOT_DP.dp)
                         .clip(CircleShape)
-                        .background(
-                            if (state.tone == ConnectionTone.LIVE) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                onContainer.copy(alpha = 0.5f)
-                            },
-                        ),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.testTag("tracker:status"),
-                )
-            }
-
-            if (state.showingSnapshot) {
-                Text(
-                    text = state.syncedAt
-                        ?.let { stringResource(R.string.tracker_snapshot_synced, it) }
-                        ?: stringResource(R.string.tracker_snapshot),
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.testTag("tracker:snapshot"),
+                        .background(MaterialTheme.colorScheme.error),
                 )
             }
         }
@@ -710,6 +770,53 @@ private fun ConsumableRow(
 }
 
 /**
+ * The Defenses section: one dense row per kind, *"Resistant · Fire, Poison"*.
+ *
+ * ### Why rows and not chips
+ *
+ * The conditions section next door is chips because each chip is a control with its own
+ * on/off state. Nothing here is a control — there is no DiceCloud method that changes a
+ * damage multiplier, and no tap that would want one — so chips would advertise an
+ * interaction that does not exist. A label/value row is the same visual language the HP
+ * block and the section headers already use, and it puts the three kinds under each other
+ * where they are compared, rather than flowing them into a paragraph.
+ *
+ * The kind label carries the section's only colour, for the same reason [SectionHeader]
+ * does: it is what the eye lands on when scanning for one word mid-combat.
+ *
+ * Each row is one `contentDescription` rather than two adjacent `Text`s, so TalkBack reads
+ * "Resistant: Fire, Poison" as a fact instead of announcing a stray word and then a list.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun DefenseRows(rows: List<DefenseRowState>, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        rows.forEach { row ->
+            val spoken = "${row.label}: ${row.text}"
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics(mergeDescendants = true) { contentDescription = spoken }
+                    .testTag("tracker:defense:${row.kind.name.lowercase()}"),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = row.label,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = row.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+    }
+}
+
+/**
  * 04 §3's condition chips — `tap = flipToggle`.
  *
  * `FilterChip` rather than `AssistChip` now that they are live: a filter chip has a
@@ -753,6 +860,75 @@ private fun ConditionChips(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * The conditions section's tail: *"N inactive ⌄"*, and the switched-off chips it opens.
+ *
+ * ### Why the off toggles are behind anything at all
+ *
+ * A real sheet's `toggle` list is mostly build plumbing — "Racial ASI Disabler", "Load
+ * Wizard Spells" — and at the table the question is "what is running on me right now",
+ * which fifty off chips answer badly. `ConditionToggle.shownByDefault` is the rule; this
+ * is the affordance that keeps it from being a *deletion*: turning a buff **on** is a tap
+ * on an off chip, so the off chips have to stay reachable, and one tap away.
+ *
+ * ### Why the expanded flag lives here and is not persisted
+ *
+ * It is a glance, not a preference: the user opens the drawer, flips Bless on — at which
+ * point the chip leaves this list for the one above — and moves on. Persisting it would
+ * quietly re-create the noisy list this feature exists to remove, on a device where the
+ * user last happened to be poking around. `rememberSaveable` so a rotation mid-combat does
+ * not slam the drawer shut; the `LazyColumn` item key scopes it, so scrolling past the
+ * section and back does not either.
+ */
+@Composable
+private fun InactiveConditions(
+    chips: List<ConditionChipState>,
+    canWrite: Boolean,
+    onToggle: (String) -> Unit,
+    shake: ShakeSignal?,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    // "3 inactive" is the label a sighted user reads off a chevron; a screen reader gets
+    // the whole sentence, because "3 inactive" alone does not say it can be opened.
+    val action = if (expanded) {
+        stringResource(R.string.tracker_conditions_hide_inactive)
+    } else {
+        stringResource(R.string.tracker_conditions_show_inactive, chips.size)
+    }
+
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .clickable { expanded = !expanded }
+                .semantics { contentDescription = action }
+                .padding(vertical = 4.dp)
+                .testTag("tracker:conditions:inactive"),
+        ) {
+            Text(
+                text = stringResource(R.string.tracker_conditions_inactive, chips.size),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Icon(
+                imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        if (expanded) {
+            ConditionChips(
+                chips = chips,
+                canWrite = canWrite,
+                onToggle = onToggle,
+                shake = shake,
+            )
         }
     }
 }
@@ -890,6 +1066,11 @@ private const val PLUS = "+"
 private const val PIP_TARGET_DP = 48
 private const val PIP_DOT_DP = 28
 private const val CHIPS_PER_ROW = 2
+
+/** The connection dot: a 10 dp mark on a 24 dp disc, inset from the screen corner. */
+private const val DOT_DP = 10
+private const val DOT_DISC_DP = 24
+private const val DOT_MARGIN_DP = 8
 
 /** Material's own disabled-content alpha; used where a control is drawn by hand. */
 private const val DISABLED_ALPHA = 0.38f

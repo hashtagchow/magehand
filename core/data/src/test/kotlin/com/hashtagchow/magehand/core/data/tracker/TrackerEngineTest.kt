@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
@@ -165,6 +166,21 @@ class TrackerEngineTest {
                 board.activeToggles.filter { it.flippable }.map { it.name },
             board.activeToggles.none { it.flippable },
         )
+    }
+
+    @Test
+    fun `on the live sheet the default view is 13 of 44 toggles`() {
+        // What the feature is *for*, measured on the real capture: 44 discovered toggles,
+        // 31 of them switched off. Those 31 are still on the board — the tracker files them
+        // behind its "N inactive" expander — but the chip row a player scans mid-combat is
+        // 13 long instead of 44. The exact numbers are pinned so a discovery change that
+        // quietly re-inflates the list has to come past this test.
+        val shown = board.activeToggles.filter { it.shownByDefault }
+        assertEquals(44, board.activeToggles.size)
+        assertEquals(13, shown.size)
+        assertTrue("nothing off may reach the default view unpinned", shown.all { it.enabled })
+        assertTrue("Midnight Toggle is off on this sheet", board.activeToggles
+            .single { it.name == "Midnight Toggle" }.shownByDefault.not())
     }
 
     // -----------------------------------------------------------------------
@@ -338,6 +354,189 @@ class TrackerEngineTest {
             """{"_id":"r1","type":"attribute","attributeType":"resource","name":"Odd","total":0,"value":0}""",
         )
         assertTrue(TrackerEngine.build(empty).resources.isEmpty())
+    }
+
+    // -----------------------------------------------------------------------
+    // Toggle visibility (active-buffs-only): the engine's half of the rule
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `an on toggle is shown by default and an off one is not`() {
+        val built = sheet(
+            """{"_id":"t1","type":"toggle","name":"Bless","enabled":true}""",
+            """{"_id":"t2","type":"toggle","name":"Racial ASI Disabler","disabled":true,"inactive":true}""",
+        )
+        val board = TrackerEngine.build(built)
+
+        // Both are still *discovered* — the off one has to stay reachable to be turned on.
+        assertEquals(listOf("Bless", "Racial ASI Disabler"), board.activeToggles.map { it.name })
+        assertEquals(listOf("Bless"), board.activeToggles.filter { it.shownByDefault }.map { it.name })
+    }
+
+    @Test
+    fun `a pinned toggle is shown by default even while it is off`() {
+        // The user override beats the default, in that direction: "always show me this one".
+        val built = sheet(
+            """{"_id":"t1","type":"toggle","name":"Rage","disabled":true,"inactive":true}""",
+        )
+        val board = TrackerEngine.build(built, listOf(TrackerOverride("t1", pinned = true)))
+
+        val toggle = board.activeToggles.single()
+        assertTrue("the pin must reach the row, not just the prefs table", toggle.pinned)
+        assertFalse(toggle.enabled)
+        assertTrue("a pinned toggle stays on the main list when it goes off", toggle.shownByDefault)
+    }
+
+    @Test
+    fun `a hidden toggle is gone even while it is on`() {
+        // And in the other direction: hide wins over "it is active", which is why the rule
+        // in ConditionToggle.shownByDefault never has to ask about hiding — nothing hidden
+        // survives this far.
+        val built = sheet("""{"_id":"t1","type":"toggle","name":"Bless","enabled":true}""")
+        val board = TrackerEngine.build(built, listOf(TrackerOverride("t1", hidden = true)))
+        assertTrue(board.activeToggles.isEmpty())
+    }
+
+    @Test
+    fun `an unpinned toggle carries no pin, so the default rule is the enabled flag alone`() {
+        val built = sheet("""{"_id":"t1","type":"toggle","name":"Bless","enabled":true}""")
+        assertFalse(TrackerEngine.build(built).activeToggles.single().pinned)
+    }
+
+    // -----------------------------------------------------------------------
+    // Defenses — `damageMultiplier`, read off the capture rather than off 03
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `a half multiplier is a resistance and the damage types come through`() {
+        // The exact shape of the live capture's active multiplier, with an invented name
+        // (the real one is a private-capture string — see tools/public-gate.sh).
+        val built = sheet(
+            """{"_id":"d1","type":"damageMultiplier","name":"Starlit Aegis",
+                "damageTypes":["radiant","necrotic"],"value":0.5,"order":180}""",
+        )
+        val defense = TrackerEngine.build(built).defenses.single()
+        assertEquals(DefenseKind.RESISTANT, defense.kind)
+        assertEquals(listOf("radiant", "necrotic"), defense.damageTypes)
+        assertEquals("Starlit Aegis", defense.name)
+        assertEquals(180, defense.sortOrder)
+    }
+
+    @Test
+    fun `the multiplier decides the kind, and one and negative decide nothing`() {
+        fun kindOf(value: String): DefenseKind? = TrackerEngine.build(
+            sheet(
+                """{"_id":"d1","type":"damageMultiplier","name":"X",
+                    "damageTypes":["fire"],"value":$value}""",
+            ),
+        ).defenses.singleOrNull()?.kind
+
+        assertEquals(DefenseKind.IMMUNE, kindOf("0"))
+        assertEquals(DefenseKind.RESISTANT, kindOf("0.5"))
+        assertEquals(DefenseKind.RESISTANT, kindOf("0.25"))
+        assertEquals(DefenseKind.VULNERABLE, kindOf("2"))
+        assertEquals(DefenseKind.VULNERABLE, kindOf("1.5"))
+        // A multiplier that changes nothing is not a defense, and a negative one is a
+        // different feature entirely — neither has a word, so neither gets a row.
+        assertNull("a 1x multiplier must not read as a defense", kindOf("1"))
+        assertNull("a negative multiplier is unsourced; do not guess", kindOf("-1"))
+        // And a missing value cannot be read as immunity by accident.
+        assertNull(
+            TrackerEngine.build(
+                sheet("""{"_id":"d1","type":"damageMultiplier","name":"X","damageTypes":["fire"]}"""),
+            ).defenses.singleOrNull(),
+        )
+    }
+
+    @Test
+    fun `a fractional multiplier is not truncated into an immunity`() {
+        // The bug this whole `decimal()` reader exists to prevent: `number()` would read
+        // 0.5 back as 0, turning every resistance in the app into an immunity.
+        val built = sheet(
+            """{"_id":"d1","type":"damageMultiplier","name":"X","damageTypes":["fire"],"value":0.5}""",
+        )
+        assertEquals(DefenseKind.RESISTANT, TrackerEngine.build(built).defenses.single().kind)
+    }
+
+    @Test
+    fun `an inactive or removed multiplier never reaches the table`() {
+        // "an inactive resistance from an unequipped item must not show" — the capture's
+        // second multiplier is exactly this, inactive + deactivatedByToggle.
+        listOf(
+            """{"_id":"d1","type":"damageMultiplier","name":"Grave Ward",
+                "damageTypes":["necrotic"],"value":0.5,"inactive":true,"deactivatedByToggle":true}""",
+            """{"_id":"d1","type":"damageMultiplier","name":"Gone",
+                "damageTypes":["fire"],"value":0,"removed":true}""",
+        ).forEach { json ->
+            assertTrue(json, TrackerEngine.build(sheet(json)).defenses.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a multiplier with no damage types is not an empty row`() {
+        val built = sheet(
+            """{"_id":"d1","type":"damageMultiplier","name":"X","damageTypes":[],"value":0}""",
+        )
+        assertTrue(TrackerEngine.build(built).defenses.isEmpty())
+    }
+
+    @Test
+    fun `defenses sort immunities first, then resistances, then vulnerabilities`() {
+        // Declaration order of DefenseKind is ascending multiplier, so the board reads
+        // best-news-first regardless of the server's `order`.
+        val built = sheet(
+            """{"_id":"d1","type":"damageMultiplier","name":"V","damageTypes":["fire"],"value":2,"order":1}""",
+            """{"_id":"d2","type":"damageMultiplier","name":"R","damageTypes":["cold"],"value":0.5,"order":2}""",
+            """{"_id":"d3","type":"damageMultiplier","name":"I","damageTypes":["poison"],"value":0,"order":3}""",
+        )
+        assertEquals(
+            listOf(DefenseKind.IMMUNE, DefenseKind.RESISTANT, DefenseKind.VULNERABLE),
+            TrackerEngine.build(built).defenses.map { it.kind },
+        )
+    }
+
+    @Test
+    fun `a hidden defense obeys the override layer like every other row`() {
+        // v1's customize sheet offers no control that can set this, but the repo's rule is
+        // that overrides are applied last to everything — so the engine holds up its end.
+        val built = sheet(
+            """{"_id":"d1","type":"damageMultiplier","name":"X","damageTypes":["fire"],"value":0.5}""",
+        )
+        assertTrue(
+            TrackerEngine.build(built, listOf(TrackerOverride("d1", hidden = true))).defenses.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `a board with only defenses is not empty`() {
+        val built = sheet(
+            """{"_id":"d1","type":"damageMultiplier","name":"X","damageTypes":["fire"],"value":0.5}""",
+        )
+        assertFalse(TrackerEngine.build(built).isEmpty)
+    }
+
+    @Test
+    fun `the live sheet resists radiant and necrotic, and only from the active feature`() {
+        // Capture-coupled (skips without the private fixture). The capture holds two
+        // damageMultiplier properties: an active radiant+necrotic 0.5, and a necrotic-only
+        // 0.5 that is inactive + deactivatedByToggle. Only the first may reach the board.
+        //
+        // Asserted on shape rather than on the two feature names, which are private-capture
+        // strings (tools/public-gate.sh). `single()` already proves the deactivated one did
+        // not leak, and `damageTypes` proves the survivor is the *active* one rather than
+        // the necrotic-only one — which is the whole claim.
+        val defense = board.defenses.single()
+        assertEquals(DefenseKind.RESISTANT, defense.kind)
+        assertEquals(listOf("radiant", "necrotic"), defense.damageTypes)
+    }
+
+    @Test
+    fun `the creature document's denormalized damageMultipliers rollup is not the source`() {
+        // It is `{}` on the capture despite an active multiplier existing, which is why
+        // discovery reads the properties. Pinned so nobody "simplifies" to the rollup.
+        val rollup = Fixtures.sabrielSheet().creature?.get("damageMultipliers")
+        assertEquals("{}", rollup.toString())
+        assertTrue("discovery must not depend on the empty rollup", board.defenses.isNotEmpty())
     }
 
     @Test

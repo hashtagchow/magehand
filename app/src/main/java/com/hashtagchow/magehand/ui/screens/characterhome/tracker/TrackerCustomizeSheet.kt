@@ -47,6 +47,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hashtagchow.magehand.R
@@ -132,6 +134,13 @@ fun TrackerCustomizeSheet(
                         onMoveUp = { onMove(section.section, row.propertyId, -1) },
                         onMoveDown = { onMove(section.section, row.propertyId, 1) },
                         onHide = { onSetHidden(row.propertyId, true) },
+                        // Conditions only — see CustomizeRowItem's `onSetPinned` KDoc for
+                        // why the other three sections do not get this control.
+                        onSetPinned = if (section.section == CustomizeSection.CONDITIONS) {
+                            { pinned -> onSetPinned(row.propertyId, pinned) }
+                        } else {
+                            null
+                        },
                     )
                 }
             }
@@ -209,6 +218,22 @@ private fun SheetHeader(text: String, modifier: Modifier = Modifier) {
     }
 }
 
+/**
+ * One row of a customize section: name, detail, and the controls that apply to it.
+ *
+ * @param onSetPinned the pin override, or `null` for a section where pinning means
+ *   nothing. Only the **conditions** section passes one, and that asymmetry is the point
+ *   rather than an omission: for slots, resources and consumables a pin is what put the
+ *   row in the section in the first place (an unpinned item is not a tracker row at all,
+ *   it is a picker entry), so a pin toggle there would be a checkbox that deletes its own
+ *   row. For a condition, `pinned` means something no other control expresses —
+ *   `ConditionToggle.shownByDefault` is `enabled || pinned`, so a pin is the user saying
+ *   "keep this one out of the *N inactive* expander even while it is off".
+ *
+ *   That override has been readable and persistable since WP6 and had **no UI**: the
+ *   engine stamped it, three KDocs described it, and the only control that could set one
+ *   was the item picker, which never offers a condition. This is the missing half.
+ */
 @Composable
 private fun CustomizeRowItem(
     row: CustomizeRow,
@@ -218,7 +243,11 @@ private fun CustomizeRowItem(
     onMoveDown: () -> Unit,
     onHide: () -> Unit,
     modifier: Modifier = Modifier,
+    onSetPinned: ((Boolean) -> Unit)? = null,
 ) {
+    // A bare checkbox would read to TalkBack as "checkbox, not checked" with no subject,
+    // in a list where every row has one. It names its row and says what checking it does.
+    val pinDescription = stringResource(R.string.customize_pin_condition, row.name)
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -240,6 +269,21 @@ private fun CustomizeRowItem(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+        onSetPinned?.let { setPinned ->
+            // A checkbox, not a pin glyph: `material-icons-extended` (the only artifact
+            // that carries `PushPin`) is ~50 MB and is deliberately not a dependency of
+            // this app — see gradle/libs.versions.toml. The item picker already renders
+            // exactly this override with exactly this control, so a checkbox is also the
+            // app's *existing* iconography for "pinned", which is worth more than a
+            // prettier glyph that means the same thing somewhere else.
+            Checkbox(
+                checked = row.pinned,
+                onCheckedChange = setPinned,
+                modifier = Modifier.semantics {
+                    contentDescription = pinDescription
+                },
+            )
         }
         IconButton(onClick = onMoveUp, enabled = canMoveUp, modifier = Modifier.size(48.dp)) {
             Icon(
@@ -412,6 +456,6 @@ private val CustomizeSection.titleResId: Int
         CustomizeSection.CONDITIONS -> R.string.tracker_section_conditions
     }
 
-/** Sabriel carries ~90 items; a picker that renders all of them is a scroll, not a picker. */
+/** A real sheet carries ~90 items; a picker that renders all of them is a scroll, not a picker. */
 private const val MAX_PICKER_ROWS = 40
 private const val SWATCHES_PER_ROW = 5

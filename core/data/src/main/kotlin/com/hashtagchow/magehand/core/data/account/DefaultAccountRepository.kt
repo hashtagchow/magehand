@@ -155,7 +155,16 @@ class DefaultAccountRepository(
     }
 
     /**
-     * Deletes every local trace of one account, in one path.
+     * Deletes one account's local state, in one path.
+     *
+     * "Every local trace" with one honest exception: [webViewSessionStore] is keyed by
+     * **server origin**, not by account, because that is the only key a WebView's
+     * `localStorage` has. Two accounts on the same server therefore share one entry, and
+     * signing either of them out clears the SSO session for both — the other account is
+     * still signed in to the app, it just has to log in again inside the WebView. Nothing
+     * leaks (the wrong direction would be the bug), and the alternative — leaving a
+     * rejected account's token in the WebView because a sibling account exists — is worse
+     * than the re-login. Pre-existing behaviour, stated here rather than fixed.
      *
      * The order is the file's own "token first" argument (see [persist]) carried one step
      * further out: **the `accounts` row is deleted last**. `accounts.id` is a UUID minted
@@ -189,7 +198,8 @@ class DefaultAccountRepository(
         // The token also rests in the WebView's localStorage, because that is how
         // Meteor SSO works (docs/design/05-security.md §"WebView SSO"). WP5 found it
         // surviving sign-out; clearing it here — inside the one sign-out path, not
-        // in a screen that could forget — is WP8's fix.
+        // in a screen that could forget — is WP8's fix. Origin-scoped, so it takes a
+        // same-server sibling account's WebView session with it; see the KDoc.
         if (serverOrigin != null) webViewSessionStore.clearFor(serverOrigin)
 
         accountDao.deleteById(accountId)

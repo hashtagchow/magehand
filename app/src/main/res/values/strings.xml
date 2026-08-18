@@ -14,10 +14,14 @@
     <string name="tab_sheet">Sheet</string>
 
     <!-- Screen 3: tracker tab -->
+    <string name="tracker_section_defenses">Defenses</string>
     <string name="tracker_section_slots">Spell slots</string>
     <string name="tracker_section_resources">Resources</string>
     <string name="tracker_section_consumables">Consumables</string>
     <string name="tracker_section_conditions">Conditions</string>
+    <string name="tracker_conditions_inactive">%1$d inactive</string>
+    <string name="tracker_conditions_show_inactive">Show %1$d inactive conditions</string>
+    <string name="tracker_conditions_hide_inactive">Hide inactive conditions</string>
     <string name="tracker_hit_points">Hit points</string>
     <string name="tracker_temp_hp">+%1$d temp HP</string>
     <string name="tracker_damage">Take damage</string>
@@ -28,7 +32,6 @@
     <string name="tracker_drop_concentration">Drop concentration</string>
     <string name="tracker_short_rest">Short</string>
     <string name="tracker_long_rest">Long</string>
-    <string name="tracker_snapshot">Showing the last saved copy of this sheet.</string>
     <string name="tracker_snapshot_synced">Showing the last saved copy — synced %1$s.</string>
     <string name="tracker_empty">Nothing to track yet</string>
     <string name="tracker_empty_hint">This sheet has no spell slots, resources or conditions MageHand can follow. Open the Sheet tab to see everything.</string>
@@ -60,6 +63,11 @@
     <string name="customize_move_down">Move %1$s down</string>
     <string name="customize_hide">Hide %1$s</string>
     <string name="customize_show">Show</string>
+    <!-- The conditions section's pin control. "Keep …", not "Pin …": what the user is
+         choosing is that an off condition stays on the tracker instead of folding into
+         the "N inactive" expander, and "keep it on the tracker" says that without
+         needing to know the word pin. -->
+    <string name="customize_pin_condition">Keep %1$s on the tracker</string>
     <string name="customize_accent">Accent colour</string>
     <string name="customize_accent_default">Default</string>
 
@@ -83,13 +91,32 @@
     <string name="character_list_empty_hint">Tap + to create one in DiceCloud.</string>
     <string name="character_badge_shared">Shared</string>
 
-    <!-- Connection state -->
+    <!-- Connection state: the character list's chip, which is still a persistent strip. -->
     <string name="connection_live">Live</string>
     <string name="connection_connecting">Connecting…</string>
-    <string name="connection_reconnecting">Reconnecting…</string>
     <string name="connection_offline">Offline — showing cached data</string>
-    <string name="connection_offline_synced">Offline — synced %1$s</string>
     <string name="connection_auth_failed">Signed out by the server — sign in again</string>
+
+    <!-- The tracker's not-live dot and its details sheet. There is no "live" dot, so
+         connection_indicator_live is only ever read if the sheet is open when the socket
+         comes back; the mapping stays total so that case cannot crash. -->
+    <string name="connection_indicator_live">Connected — tap for connection details</string>
+    <string name="connection_indicator_reconnecting">Reconnecting — tap for connection details</string>
+    <string name="connection_indicator_offline">Offline — tap for connection details</string>
+    <string name="connection_indicator_signed_out">Signed out — tap for connection details</string>
+    <string name="connection_state_live">Live</string>
+    <string name="connection_state_reconnecting">Reconnecting…</string>
+    <string name="connection_state_offline">Offline</string>
+    <string name="connection_state_signed_out">Signed out</string>
+    <string name="connection_details_title">Connection</string>
+    <string name="connection_details_live">Connected to DiceCloud. Changes you make here save straight away.</string>
+    <string name="connection_details_reconnecting">MageHand is reconnecting to DiceCloud.</string>
+    <string name="connection_details_offline">MageHand can\'t reach DiceCloud right now.</string>
+    <string name="connection_details_signed_out">DiceCloud rejected this account\'s saved sign-in. Sign in again from Settings — waiting will not fix this one.</string>
+    <string name="connection_details_synced">Last synced at %1$s.</string>
+    <string name="connection_details_never_synced">This sheet has never finished syncing on this device.</string>
+    <string name="connection_details_auto">MageHand keeps retrying on its own; this only asks it to try now.</string>
+    <string name="connection_details_retry">Try reconnecting</string>
 
     <!-- Screen 6: settings -->
     <string name="settings_accounts">Accounts</string>

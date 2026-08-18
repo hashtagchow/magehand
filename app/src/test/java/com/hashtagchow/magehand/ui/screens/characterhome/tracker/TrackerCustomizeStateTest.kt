@@ -7,6 +7,7 @@ import org.junit.Test
 import com.hashtagchow.magehand.core.data.tracker.CreatureSheet
 import com.hashtagchow.magehand.core.data.tracker.TrackerEngine
 import com.hashtagchow.magehand.core.model.ConditionToggle
+import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerKind
@@ -31,7 +32,12 @@ class TrackerCustomizeStateTest {
             TrackedResource("i1", TrackerKind.ITEM, "Gold piece", 109, 109),
             TrackedResource("i2", TrackerKind.ITEM, "Potion of Healing", 2, 2),
         ),
-        activeToggles = listOf(ConditionToggle("t1", "Load Wizard Spells", enabled = true)),
+        activeToggles = listOf(
+            ConditionToggle("t1", "Load Wizard Spells", enabled = true),
+            // Off, and therefore the only kind of row the conditions pin exists for: the
+            // tracker files it behind the "N inactive" expander until it is pinned.
+            ConditionToggle("t2", "Bless", enabled = false, flippable = true),
+        ),
     )
 
     // --- state build --------------------------------------------------------
@@ -89,6 +95,84 @@ class TrackerCustomizeStateTest {
             "1 / 2",
             state.sections.first().rows.first().detail,
         )
+    }
+
+    // --- the conditions pin (the sheet's only control for `shownByDefault`) ---
+
+    /**
+     * The sheet lists every discovered toggle, on or off, and each carries the pin state
+     * the row's control has to render. Without this the checkbox would have nothing
+     * truthful to draw itself from.
+     */
+    @Test
+    fun `condition rows carry their pin, on or off`() {
+        val state = toCustomizeState(
+            board,
+            overrides = listOf(TrackerOverride("t2", pinned = true)),
+            accentColor = null,
+        )
+        val conditions = state.sections.single { it.section == CustomizeSection.CONDITIONS }
+        assertEquals(listOf("Load Wizard Spells", "Bless"), conditions.rows.map { it.name })
+        assertEquals("Off", conditions.rows.single { it.propertyId == "t2" }.detail)
+        assertTrue(conditions.rows.single { it.propertyId == "t2" }.pinned)
+        assertFalse(conditions.rows.single { it.propertyId == "t1" }.pinned)
+    }
+
+    /**
+     * The whole point of the control, end to end and through the real engine: pinning an
+     * **off** condition in the customize sheet promotes it out of the "N inactive"
+     * expander and onto the tracker's main chip row, and un-pinning puts it back.
+     *
+     * This is the claim that had no way of being true before WP8's review — the override
+     * was readable, persistable and described in three KDocs, and the only control that
+     * could write one was the item picker, which never lists a condition. Asserted across
+     * all three layers (planner → engine → UI state) because each of them was individually
+     * correct while the feature as a whole did not exist.
+     */
+    @Test
+    fun `pinning an off condition moves it out of the inactive expander, and un-pinning returns it`() {
+        val sheet = CreatureSheet.fromSnapshotJson(TOGGLE_SHEET)
+
+        fun conditionsFor(overrides: List<TrackerOverride>): TrackerUiState =
+            toTrackerUiState(
+                creatureId = "FakeCreature23456",
+                board = TrackerEngine.build(sheet, overrides),
+                connection = ConnectionState.LIVE,
+                lastSyncedAt = null,
+                isShowingSnapshot = false,
+            )
+
+        // Default: off means filed away.
+        val before = conditionsFor(emptyList())
+        assertEquals(listOf("Bless"), before.conditions.map { it.name })
+        assertEquals(listOf("Load Wizard Spells"), before.inactiveConditions.map { it.name })
+
+        // What the sheet's checkbox does — the same planner call the item picker makes.
+        val pinned = listOf(TrackerOverridePlan.setPinned(emptyList(), "t2", pinned = true))
+        assertTrue(pinned.single().pinned)
+        val after = conditionsFor(pinned)
+        assertEquals(listOf("Bless", "Load Wizard Spells"), after.conditions.map { it.name })
+        assertTrue(after.inactiveConditions.isEmpty())
+
+        // And back. Un-checking is a write, not a delete, so the row persists unpinned.
+        val unpinned = listOf(TrackerOverridePlan.setPinned(pinned, "t2", pinned = false))
+        assertFalse(unpinned.single().pinned)
+        val restored = conditionsFor(unpinned)
+        assertEquals(listOf("Bless"), restored.conditions.map { it.name })
+        assertEquals(listOf("Load Wizard Spells"), restored.inactiveConditions.map { it.name })
+    }
+
+    /**
+     * Pinning is not hiding's opposite and must not become it: a pinned condition that is
+     * also hidden stays hidden, because the engine drops hidden rows before
+     * `shownByDefault` is ever consulted.
+     */
+    @Test
+    fun `a hidden condition stays hidden even when it is pinned`() {
+        val sheet = CreatureSheet.fromSnapshotJson(TOGGLE_SHEET)
+        val overrides = listOf(TrackerOverride("t2", pinned = true, hidden = true))
+        val board = TrackerEngine.build(sheet, overrides)
+        assertTrue(board.activeToggles.none { it.propertyId == "t2" })
     }
 
     // --- the planner --------------------------------------------------------
@@ -195,6 +279,17 @@ class TrackerCustomizeStateTest {
                 "value":1,"total":2,"reset":"longRest","spellSlotLevel":2,"order":11},
                {"_id":"s3","type":"attribute","attributeType":"spellSlot","name":"3rd Level",
                 "value":1,"total":1,"reset":"longRest","spellSlotLevel":3,"order":12}
+             ],
+             "creatureVariables":[]}
+        """.trimIndent()
+
+        /** One on, one off — the two halves `ConditionToggle.shownByDefault` splits. */
+        val TOGGLE_SHEET = """
+            {"creatures":[{"_id":"c1","name":"Test"}],
+             "creatureProperties":[
+               {"_id":"t1","type":"toggle","name":"Bless","enabled":true,"order":10},
+               {"_id":"t2","type":"toggle","name":"Load Wizard Spells","disabled":true,
+                "inactive":true,"order":11}
              ],
              "creatureVariables":[]}
         """.trimIndent()

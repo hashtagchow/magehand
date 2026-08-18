@@ -14,6 +14,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import com.hashtagchow.magehand.core.data.tracker.CreatureSheet
+import com.hashtagchow.magehand.core.data.tracker.TrackerEngine
 
 /**
  * The four WP4 DAOs against real SQLite, same Robolectric route as `AccountDaoTest`
@@ -223,6 +225,47 @@ class TrackerDaoTest {
 
         assertEquals(1, database.characterDao().getForAccount("acc-2").size)
         assertEquals(1, database.snapshotDao().countForAccount("acc-2"))
+    }
+
+    @Test
+    fun `pref rows written before the active-buffs-only change still mean what they meant`() = runTest {
+        // The upgrade contract for the toggle-visibility feature: **no schema change**, so
+        // the rows an existing install already has are inserted here in exactly their
+        // pre-feature shape (the same three columns, same types, nothing new to default).
+        // What must not have drifted is their *meaning* once TrackerEngine reads them.
+        val dao = database.trackerPrefDao()
+        dao.upsert(
+            listOf(
+                TrackerPrefEntity("acc-1", "cr-1", "t-pinned", pinned = true, hidden = false, sortIndex = null),
+                TrackerPrefEntity("acc-1", "cr-1", "t-hidden", pinned = false, hidden = true, sortIndex = null),
+                TrackerPrefEntity("acc-1", "cr-1", "slot-1", pinned = false, hidden = false, sortIndex = 0),
+            ),
+        )
+
+        val overrides = dao.get("acc-1", "cr-1").map { it.toDomain() }
+        val board = TrackerEngine.build(
+            CreatureSheet.fromSnapshotJson(
+                """{"creatureProperties":[
+                     {"_id":"t-pinned","type":"toggle","name":"Rage","disabled":true,"inactive":true},
+                     {"_id":"t-hidden","type":"toggle","name":"Load Wizard Spells","enabled":true},
+                     {"_id":"t-plain","type":"toggle","name":"Bless","enabled":true},
+                     {"_id":"slot-1","type":"attribute","attributeType":"spellSlot",
+                      "name":"1st Level","reset":"longRest","total":4,"order":9}
+                   ]}""",
+            ),
+            overrides,
+        )
+
+        // pinned still means pinned — and now also "keep showing it while it is off".
+        val pinned = board.activeToggles.single { it.propertyId == "t-pinned" }
+        assertTrue(pinned.pinned)
+        assertTrue(pinned.shownByDefault)
+        // hidden still means hidden, on or off, and is not resurrected by the new rule.
+        assertTrue(board.activeToggles.none { it.propertyId == "t-hidden" })
+        // an untouched toggle is governed by the default alone.
+        assertTrue(board.activeToggles.single { it.propertyId == "t-plain" }.shownByDefault)
+        // and a sortIndex row is still a sortIndex row on a kind the feature never touches.
+        assertEquals("1st Level", board.slots.single().name)
     }
 
     @Test

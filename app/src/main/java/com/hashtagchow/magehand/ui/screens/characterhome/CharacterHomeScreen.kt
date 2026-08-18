@@ -48,6 +48,7 @@ import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpNumberPadDial
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.RestConfirmDialog
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ShakeSignal
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerActions
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerConnectionSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerCustomizeSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerHistorySheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerTab
@@ -87,6 +88,9 @@ fun CharacterHomeScreen(
     var customizeOpen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var hpPadOpen by rememberSaveable { mutableStateOf(false) }
+    // Survives the sheet going live under it on purpose: the sheet then renders its LIVE
+    // copy rather than vanishing mid-read. See TrackerConnectionSheet.
+    var connectionOpen by rememberSaveable { mutableStateOf(false) }
     var restToConfirm by rememberSaveable { mutableStateOf<RestKind?>(null) }
     var shake by remember { mutableStateOf<ShakeSignal?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -238,6 +242,7 @@ fun CharacterHomeScreen(
                             onHpTap = { hpPadOpen = true },
                             onItemDelta = viewModel::adjustItem,
                             onToggle = viewModel::toggleCondition,
+                            onConnectionDetails = { connectionOpen = true },
                         ),
                         shake = shake,
                     )
@@ -251,6 +256,14 @@ fun CharacterHomeScreen(
                             SheetWebViewHost(state = sheetState, modifier = Modifier.fillMaxSize())
                         }
                 }
+            }
+
+            if (connectionOpen) {
+                TrackerConnectionSheet(
+                    status = uiState.tracker.status,
+                    onRetry = viewModel::reconnect,
+                    onDismiss = { connectionOpen = false },
+                )
             }
 
             if (historyOpen) {
