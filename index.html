@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MageHand — Privacy Policy</title>
+<style>
+  body { max-width: 42rem; margin: 0 auto; padding: 2rem 1.25rem 4rem;
+         font: 16px/1.6 system-ui, sans-serif; color: #1c1b22; background: #ffffff; }
+  h1 { font-size: 1.6rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+  code { background: #f0eef6; padding: .1em .3em; border-radius: 4px; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e4e1ee; background: #16141c; }
+    code { background: #2a2733; }
+  }
+</style>
+</head>
+<body>
+<h1>MageHand — Privacy Policy</h1>
+<p><em>Effective 18 August 2026</em></p>
+
+<p>MageHand is a companion app for <a href="https://dicecloud.com">DiceCloud v2</a>
+character sheets. It is built so that the developer receives <strong>no data about you at
+all</strong>. This page explains exactly what the app does with the information you give it.</p>
+
+<h2>What the app collects, and where it goes</h2>
+<p>When you sign in, you enter your DiceCloud username or email and your password. These are
+sent <strong>once, over HTTPS, directly to the DiceCloud server you chose</strong> —
+dicecloud.com by default, or a self-hosted server whose address you typed yourself. In
+exchange the server returns a session token. Your password is not stored anywhere by the
+app.</p>
+<p>Nothing you enter — credentials, character data, settings — is ever transmitted to the
+developer of MageHand or to any third party. The app contains no analytics, no crash
+reporting, no advertising SDKs, and no tracking of any kind. Its only network traffic is
+between your device and the DiceCloud server you selected.</p>
+
+<h2>What is stored on your device</h2>
+<ul>
+  <li>Your <strong>session token</strong>, encrypted at rest using the Android Keystore
+      (hardware-backed where the device supports it).</li>
+  <li>Your username and server address, stored as labels so the app can show which account
+      is signed in.</li>
+  <li>A <strong>local cache of your character sheet</strong> so it remains viewable
+      offline, plus your tracker layout preferences. These never leave the device.</li>
+</ul>
+
+<h2>Your DiceCloud data</h2>
+<p>Your characters live on the DiceCloud server you signed in to, under that server's own
+terms and privacy practices. The in-app Sheet view displays that server's web interface;
+MageHand does not alter, collect, or redistribute what it shows. For dicecloud.com, see the
+DiceCloud project's own policies.</p>
+
+<h2>Deleting your data</h2>
+<ul>
+  <li><strong>Sign out</strong> (Settings → account → sign out): deletes the session token,
+      the cached sheet, and the in-app browser session from your device, and revokes the
+      session on the server.</li>
+  <li><strong>Uninstalling the app</strong> removes everything it stored.</li>
+  <li>Deleting your DiceCloud <em>account</em> is done on your DiceCloud server, not in
+      this app.</li>
+</ul>
+
+<h2>Permissions</h2>
+<p>The app requests exactly two Android permissions: <code>INTERNET</code> and
+<code>ACCESS_NETWORK_STATE</code> (to show connection status). It requests no access to
+location, contacts, storage, camera, or anything else.</p>
+
+<h2>Children</h2>
+<p>MageHand is not directed at children under 13 and collects no data from anyone.</p>
+
+<h2>Changes</h2>
+<p>If a future version of the app changes any of the above, this page will be updated
+before that version is released, with a new effective date.</p>
+
+<h2>Contact</h2>
+<p>Questions about this policy: <a href="mailto:legal@stolzenberg.co.za">legal@stolzenberg.co.za</a></p>
+</body>
+</html>
