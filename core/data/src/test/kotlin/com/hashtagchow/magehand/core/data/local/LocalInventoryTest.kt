@@ -36,6 +36,9 @@ import com.hashtagchow.magehand.core.model.LocalCharacter
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.LocalTrackerRow
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.core.model.InventoryMoveTarget
+import com.hashtagchow.magehand.core.model.TrackedResource
+import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerWriteKind
 
 /**
@@ -571,5 +574,147 @@ class LocalInventoryTest {
             AbilityScores().score(Ability.STR) * InventoryBoard.CAPACITY_PER_STRENGTH,
             character.loadedInventory().capacityLb,
         )
+    }
+
+    // --- removeItem / moveItem (FR-9, 12 decisions 7 and 8) -----------------
+
+    /**
+     * The local delete is a **real** delete: the row leaves `local_tracker_rows`.
+     *
+     * The server path soft-removes because that is the only deletion DiceCloud offers, and the
+     * reversibility that falls out of it is a genuine gain. Copying the shape here would mean a
+     * `removed` column, a filter on every local query and a tombstone the player can never see
+     * — a schema migration bought to back one button. So: gone.
+     */
+    @Test
+    fun `removing an item deletes the local row outright`() = runTest {
+        seed(rows = listOf(itemEntity("i1", "Torch"), itemEntity("i2", "Rope")))
+        val character = open()
+
+        character.removeItem("i1")
+        character.awaitIdle()
+
+        assertEquals(listOf("Rope"), dao.getRows(characterId).map { it.label })
+    }
+
+    /**
+     * **Honestly not undoable** — the asymmetry decision 7 accepts, and the reason the confirm
+     * dialog's copy differs by character kind (`InventoryRowState.deleteWarningRes`).
+     *
+     * The entry is still *filed*: "what did I do?" is answered either way, and the history
+     * sheet is read for that as much as for its buttons. It simply offers no UNDO, which is
+     * the shape `addItem` already established here.
+     */
+    @Test
+    fun `a local delete is honestly not undoable`() = runTest {
+        seed(rows = listOf(itemEntity("i1", "Torch")))
+        val character = open()
+
+        character.removeItem("i1")
+        character.awaitIdle()
+
+        val entry = character.writeHistory.value.single()
+        assertEquals(TrackerWriteKind.ITEM_DELETE, entry.kind)
+        assertEquals("Torch", entry.targetName)
+        assertFalse("there is no row left to restore", entry.undoable)
+        assertFalse(character.canUndo.value)
+        assertFalse(character.undoLastWrite())
+        assertTrue("and nothing came back", dao.getRows(characterId).isEmpty())
+    }
+
+    /**
+     * A delete is not a rest: it falsifies nothing above it, so an earlier spend stays
+     * undoable. (Contrast `a rest is not undoable and invalidates everything above it`.)
+     */
+    @Test
+    fun `a local delete leaves earlier writes undoable`() = runTest {
+        seed(rows = listOf(itemEntity("i1", "Torch", quantity = 3), itemEntity("i2", "Rope")))
+        val character = open()
+
+        character.adjustItem(
+            TrackedResource(propertyId = "i1", kind = TrackerKind.ITEM, name = "Torch", value = 3, total = 3),
+            -1,
+        )
+        character.awaitIdle()
+        character.removeItem("i2")
+        character.awaitIdle()
+
+        assertTrue("deleting a rope says nothing about the torch you used", character.canUndo.value)
+        assertTrue(character.undoLastWrite())
+        assertEquals(3, dao.findRow("i1")!!.current)
+    }
+
+    /**
+     * **Items only** — the gate LOW-1 was the absence of.
+     *
+     * `local_tracker_rows` holds slots, resources and items in one table, and `findRow` is
+     * keyed on the id alone, so an id from the *tracker* board would otherwise reach the app's
+     * one irreversible operation and destroy a spell-slot row. The two boards share an id
+     * space (`TrackedResource.propertyId` == `InventoryItem.propertyId`), which is what makes
+     * that reachable rather than hypothetical.
+     *
+     * Note the asymmetry this closes: the server path is gated twice over — its board lookup
+     * holds only items, and its delete is a reversible `softRemove` — while this path is the
+     * one place a mistake cannot be taken back.
+     */
+    @Test
+    fun `local removeItem cannot reach a SLOT or RESOURCE row`() = runTest {
+        seed(
+            rows = listOf(
+                itemEntity("i1", "Torch"),
+                itemEntity("s1", "1st Level").copy(kind = LocalRowKind.SLOT.storedValue, total = 4, current = 4),
+                itemEntity("r1", "Rage").copy(kind = LocalRowKind.RESOURCE.storedValue, total = 3, current = 3),
+            ),
+        )
+        val character = open()
+
+        character.removeItem("s1")
+        character.removeItem("r1")
+        character.awaitIdle()
+
+        assertEquals(
+            "the one irreversible op in the app must not be reachable from the tracker's ids",
+            listOf("i1", "s1", "r1").sorted(),
+            dao.getRows(characterId).map { it.id }.sorted(),
+        )
+        assertTrue("and nothing is filed as having happened", character.writeHistory.value.isEmpty())
+
+        // The same call on the item beside them still works — this is a gate, not a wall.
+        character.removeItem("i1")
+        character.awaitIdle()
+        assertEquals(listOf("r1", "s1"), dao.getRows(characterId).map { it.id }.sorted())
+    }
+
+    @Test
+    fun `removing a row the character does not have does nothing`() = runTest {
+        seed(rows = listOf(itemEntity("i1", "Torch")))
+        val character = open()
+
+        character.removeItem("vanished")
+        character.awaitIdle()
+
+        assertEquals(1, dao.getRows(characterId).size)
+        assertTrue(character.writeHistory.value.isEmpty())
+    }
+
+    /**
+     * A no-op, by decision 8: local characters have no containers. The UI omits the control
+     * entirely (`InventoryRowState.showsMoveControl` is false whenever `isLocal`), and this
+     * pins that the second gate holds too — including that it does **not** quietly reinterpret
+     * a move as a `sortIndex` reorder, which would be this class inventing a fenced feature.
+     */
+    @Test
+    fun `moving an item locally does nothing at all`() = runTest {
+        seed(rows = listOf(itemEntity("i1", "Torch").copy(sortIndex = 5)))
+        val character = open()
+
+        character.moveItem("i1", InventoryMoveTarget.Container("nowhere"))
+        character.moveItem("i1", InventoryMoveTarget.Carried)
+        character.awaitIdle()
+
+        val row = dao.findRow("i1")!!
+        assertEquals("the row is untouched — sortIndex included", 5, row.sortIndex)
+        assertTrue("and nothing is filed as having happened", character.writeHistory.value.isEmpty())
+        assertFalse(character.canUndo.value)
     }
 }

@@ -473,6 +473,249 @@ sealed class WriteOp {
     }
 
     /**
+     * `creatureProperties.softRemove {_id}` — the detail sheet's Delete
+     * (docs/design/12-inventory-layout.md decision 7, FR-9).
+     *
+     * ### There is no hard delete, and that is the feature
+     *
+     * The probe found exactly one deletion method on this server and it is a **soft** one:
+     * `softRemove` sets `removed: true` on the property and `creatureProperties.restore {_id}`
+     * clears it again. Nothing this app can call erases the document. That constraint is what
+     * makes decision 7's headline claim honest — a delete on a DiceCloud character is
+     * genuinely reversible, so the snackbar's UNDO is a real offer rather than a best effort,
+     * and 1.3.0's recorded gap ("duplicate coin items have no in-app remedy") closes without
+     * this app ever gaining the power to destroy a player's data.
+     *
+     * ### The first op whose inverse is a different method
+     *
+     * Every undoable op before this one inverts into **its own method with other arguments**:
+     * `damage` undone by `damage`, `equip` undone by `equip`, `flipToggle` by `flipToggle`.
+     * This one inverts into [RestoreProperty] — `softRemove` undone by `restore`. Nothing in
+     * the queue needed changing for that (an [inverse] has always been "some `WriteOp`", not
+     * "one of me"), and it is called out here because the *rate gate is keyed on the method
+     * name*: an undo therefore waits in `restore`'s own lane rather than behind the
+     * `softRemove` that caused it, which is the correct reading of a server that rate-limits
+     * per method and is a behaviour nobody would predict from the type alone.
+     *
+     * ### What the client sees afterwards, and why nothing else had to change
+     *
+     * **Soft-removed properties are still delivered to clients** — that is 10's probe fact
+     * and the reason 10 decision 3 made removed-filtering a wave-wide audit. So every list
+     * and every sum in this app already drops `removed:true`, and a delete makes the item
+     * disappear from the inventory tab, the tracker, the item picker and the carried-weight
+     * total the moment the mirror updates, with no new code and no invalidation to write.
+     * `DefaultOpenCharacterWriteTest` pins that end to end rather than leaving it as a
+     * property of six filters that happen to agree today.
+     *
+     * ### No optimistic layer
+     *
+     * [OptimisticChange]'s vocabulary is values and toggles; "this row is gone" is neither,
+     * and it is the same argument [Equip] makes about relocating a row between sections. The
+     * subscription answers within the round trip, and a deletion the user has just confirmed
+     * in a dialog is not an interaction that needs latency compensation.
+     */
+    data class RemoveProperty(
+        val propertyId: String,
+        override val targetName: String = "",
+    ) : WriteOp() {
+        override val method: String get() = "creatureProperties.softRemove"
+        override val targetId: String get() = propertyId
+        override val params: List<JsonElement>
+            get() = listOf(buildJsonObject { put("_id", propertyId) })
+        override val minSpacingMillis: Long get() = SLOW_SPACING_MILLIS
+
+        /**
+         * Never merged.
+         *
+         * A delete arrives from a destructive confirm dialog, one tap at a time, so there is
+         * no burst to fold — and unlike [Equip] there is nothing a second one could mean: the
+         * item is already removed. Giving it a coalesce key would only create the possibility
+         * of a delete merging with the `restore` sitting behind it in the queue, which is a
+         * pair the user asked for *in order* and not a pair that cancels out.
+         */
+        override val coalesceKey: String? get() = null
+
+        override val optimistic: OptimisticChange? get() = null
+        override val intent: TrackerWriteKind get() = TrackerWriteKind.ITEM_DELETE
+        override val magnitude: Int get() = 1
+
+        override val inverse: WriteOp
+            get() = RestoreProperty(propertyId, targetName)
+
+        override val description: String get() = "softRemove $propertyId"
+    }
+
+    /**
+     * `creatureProperties.restore {_id}` — [RemoveProperty]'s inverse, and the only way this
+     * app ever sends it.
+     *
+     * There is no "restore" intent on [OpenCharacter] and there deliberately is not one: an
+     * undeleted item is something the player gets back by pressing UNDO on the write they just
+     * made, not by browsing a trash can this app does not render. The type exists so the undo
+     * stack has something to hold; a factory for it would be a feature.
+     *
+     * Its own [inverse] is the delete again, which makes the pair symmetric — but note that
+     * the queue never pushes it, because an undo is submitted with `recordUndo = false`
+     * (undo is not redo, see `WriteQueue.undo`). The symmetry is here so the type tells the
+     * truth about itself, not because anything walks it.
+     */
+    data class RestoreProperty(
+        val propertyId: String,
+        override val targetName: String = "",
+    ) : WriteOp() {
+        override val method: String get() = "creatureProperties.restore"
+        override val targetId: String get() = propertyId
+        override val params: List<JsonElement>
+            get() = listOf(buildJsonObject { put("_id", propertyId) })
+        override val minSpacingMillis: Long get() = SLOW_SPACING_MILLIS
+        override val coalesceKey: String? get() = null
+        override val optimistic: OptimisticChange? get() = null
+        override val intent: TrackerWriteKind get() = TrackerWriteKind.ITEM_RESTORE
+        override val magnitude: Int get() = 1
+
+        override val inverse: WriteOp get() = RemoveProperty(propertyId, targetName)
+
+        override val description: String get() = "restore $propertyId"
+    }
+
+    /**
+     * `organize.organizeDoc {docRef, parentRef, order}` — the detail sheet's "Move to…"
+     * (12 decision 8, FR-9).
+     *
+     * ### Probe-verified, and not by this feature
+     *
+     * The method and its parameter shape were established live during FR-8's probe, as the
+     * mechanism that *would* have restored an unequipped item's original folder had FR-8
+     * shipped one — see [Equip]'s "it cannot return the tree" paragraph, which names
+     * `organizeDoc` and a memory of where the item was as the two missing pieces. This op is
+     * both of them.
+     *
+     * ### Why only unequipped items may move
+     *
+     * 12 decision 8's fence, and it is about ownership rather than caution. `equip`
+     * **reparents**: the server moves an equipped item under the `equipment` folder and an
+     * unequipped one under `carried`, on its own schedule and without asking. An item that was
+     * both equipped and hand-placed in a backpack would therefore have two writers of one
+     * field, and the next equip tap would silently undo the move the player had just made.
+     * The control is absent on equipped rows rather than disabled, matching how the equip
+     * control itself is absent on a tinderbox (11 decision 3).
+     *
+     * ### The inverse carries the old location, not a direction
+     *
+     * [previousParentId] / [previousParentCollection] / [previousOrder] are read off the
+     * property **as the sheet has it now** and carried on the op, exactly as
+     * [Equip.previousEquipped] is and for the same reason: it is the only way an inverse can
+     * be correct after a coalesced burst. Deriving "move it back" from the destination is not
+     * possible at all — a destination says nothing about where the thing came from.
+     *
+     * ### Rate class
+     *
+     * [SLOW_SPACING_MILLIS], the 5-calls-per-5-seconds class every method but
+     * `creatureProperties.damage` is in (02 §Method catalog). `organizeDoc` is not in the
+     * doc's original table — the FR-9 wave adds it — and it is filed in the slow class
+     * because that is the server's default for everything that is not damage, and because a
+     * method that rewrites parent pointers is the last one to give a fast lane to on a guess.
+     */
+    data class MoveProperty(
+        val propertyId: String,
+        /** Where it is going — a container's id, or the carried folder's. */
+        val parentId: String,
+        /** `"creatureProperties"` for a folder or container, `"creatures"` for the root. */
+        val parentCollection: String,
+        /** Position within the destination. `DefaultOpenCharacter` supplies end-of-sheet. */
+        val order: Int,
+        /** Where it is now — see the KDoc's inverse paragraph. */
+        val previousParentId: String,
+        val previousParentCollection: String,
+        val previousOrder: Int,
+        override val targetName: String = "",
+    ) : WriteOp() {
+        override val method: String get() = "organize.organizeDoc"
+
+        /**
+         * The **item**, not the destination.
+         *
+         * Coalescing may skip past ops with a different target but never past one with the
+         * same target it cannot merge with, and the thing two moves conflict over is the item
+         * whose parent they both rewrite. Keying on the destination would let two moves of one
+         * item reorder around each other, which is precisely how it ends up somewhere neither
+         * tap asked for. ([InsertProperty] keys on its parent for the opposite reason: an
+         * insert has no property id yet.)
+         */
+        override val targetId: String get() = propertyId
+
+        override val params: List<JsonElement>
+            get() = listOf(
+                buildJsonObject {
+                    put(
+                        "docRef",
+                        buildJsonObject {
+                            put("id", propertyId)
+                            put("collection", COLLECTION_CREATURE_PROPERTIES)
+                        },
+                    )
+                    put(
+                        "parentRef",
+                        buildJsonObject {
+                            put("id", parentId)
+                            put("collection", parentCollection)
+                        },
+                    )
+                    put("order", order)
+                },
+            )
+
+        override val minSpacingMillis: Long get() = SLOW_SPACING_MILLIS
+
+        override val coalesceKey: String get() = "move:$propertyId"
+
+        /** No prediction — [Equip]'s argument, whole: a move relocates a row between sections. */
+        override val optimistic: OptimisticChange? get() = null
+
+        override val intent: TrackerWriteKind get() = TrackerWriteKind.ITEM_MOVE
+        override val magnitude: Int get() = 1
+
+        override val inverse: WriteOp
+            get() = MoveProperty(
+                propertyId = propertyId,
+                parentId = previousParentId,
+                parentCollection = previousParentCollection,
+                order = previousOrder,
+                previousParentId = parentId,
+                previousParentCollection = parentCollection,
+                previousOrder = order,
+                targetName = targetName,
+            )
+
+        /**
+         * A later move of the same item **supersedes** this one, keeping this op's starting
+         * point so the undo returns to where the item was before the *first* tap — [Equip]'s
+         * merge rule exactly.
+         *
+         * ### Why there is no [Noop] collapse
+         *
+         * [Equip] collapses a round trip to nothing because "equipped" has two values and
+         * equality is decidable. A location has three fields, and one of them — [order] — is
+         * recomputed against the live sheet on every tap (`InventoryEngine.moveTarget` returns
+         * one past the sheet's maximum), so moving Belt Pouch → Carried → Belt Pouch produces
+         * a *different* order than it started with and is not the same destination. Testing
+         * equality on the parent alone and calling it a Noop would silently drop a call that
+         * does change the sheet. Sending the one merged move is correct in every case and
+         * cheap in the only case that differs.
+         */
+        override fun coalesceWith(other: WriteOp): WriteOp? {
+            if (other !is MoveProperty || other.propertyId != propertyId) return null
+            return other.copy(
+                previousParentId = previousParentId,
+                previousParentCollection = previousParentCollection,
+                previousOrder = previousOrder,
+            )
+        }
+
+        override val description: String get() = "move $propertyId under $parentId"
+    }
+
+    /**
      * `creature.methods.rest {creatureId, restType}`.
      *
      * **Not undoable** ([inverse] is `null`) and never coalesced: the server applies every
@@ -781,6 +1024,44 @@ sealed class WriteOp {
             },
             targetId = parentId,
             targetName = spec.name,
+        )
+
+        /**
+         * Delete an item — the detail sheet's destructive confirm (12 decision 7).
+         *
+         * No "current state" to capture, unlike every other factory here: the inverse of
+         * removing a property is restoring the same property, and the id is the whole of what
+         * both calls need. See [RemoveProperty] for why that inverse is a *different method*.
+         */
+        fun removeItem(propertyId: String, targetName: String = ""): WriteOp =
+            RemoveProperty(propertyId = propertyId, targetName = targetName)
+
+        /**
+         * Move an item into a container or back to the carried root (12 decision 8).
+         *
+         * @param previousParentId where the property sits **now**, read off the sheet by the
+         *   caller. Captured for the same reason every factory here captures current state —
+         *   it is what makes a correct inverse possible — and it cannot be derived from the
+         *   destination, because a destination says nothing about the origin.
+         */
+        fun moveItem(
+            propertyId: String,
+            parentId: String,
+            order: Int,
+            previousParentId: String,
+            previousOrder: Int,
+            parentCollection: String = COLLECTION_CREATURE_PROPERTIES,
+            previousParentCollection: String = COLLECTION_CREATURE_PROPERTIES,
+            targetName: String = "",
+        ): WriteOp = MoveProperty(
+            propertyId = propertyId,
+            parentId = parentId,
+            parentCollection = parentCollection,
+            order = order,
+            previousParentId = previousParentId,
+            previousParentCollection = previousParentCollection,
+            previousOrder = previousOrder,
+            targetName = targetName,
         )
 
         /** The DDP collection name a `parentRef` names when the parent is a property. */

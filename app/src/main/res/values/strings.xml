@@ -49,9 +49,35 @@
     <string name="inventory_wallet_total">%1$s gp total</string>
     <string name="inventory_coin_add">Add one %1$s</string>
     <string name="inventory_coin_remove">Remove one %1$s</string>
-    <string name="inventory_equip">Equip %1$s</string>
-    <string name="inventory_unequip">Unequip %1$s</string>
+    <!-- FR-13 (12 decision 2): the equip chip's two words. The unequipped chip offers an
+         ACTION, the equipped one states a FACT — one word each, and the chip's own label rather
+         than a tint is what carries the difference. `inventory_chip_equipped` is deliberately a
+         separate string from `inventory_section_equipped` above even though both read
+         "Equipped" today: one is a section heading and one is a control's label, and a
+         translator is entitled to render a heading and a button differently. -->
+    <string name="inventory_chip_equip">Equip</string>
+    <string name="inventory_chip_equipped">Equipped</string>
+    <!-- The spoken half of the same split, joined to the item's name (and, when it is equipped,
+         to the word above) by InventoryRowState.spokenEquipLabel. Lower case and verb-first
+         because they are the tail of a sentence, not a label: "Longsword, tap to equip". -->
+    <string name="inventory_equip_action">tap to equip</string>
+    <string name="inventory_unequip_action">tap to unequip</string>
     <string name="inventory_open_detail">%1$s — open details</string>
+    <!-- FR-9 (12 decision 7): delete, behind a destructive confirm. The two warning lines are
+         chosen by InventoryRowState.deleteWarningRes and are the whole point of the dialog —
+         a DiceCloud delete is a soft-remove and genuinely reversible, a local one deletes the
+         row. Saying which BEFORE the tap beats leaving the player to notice a missing UNDO. -->
+    <string name="inventory_delete">Delete</string>
+    <string name="inventory_delete_title">Delete %1$s?</string>
+    <string name="inventory_delete_undoable">You can undo this straight afterwards.</string>
+    <string name="inventory_delete_permanent">This can\'t be undone.</string>
+    <string name="inventory_delete_confirm">Delete</string>
+    <!-- FR-9 (12 decision 8): move. `inventory_move_carried` names the destination the player
+         understands — loose in the pack — rather than the `carried`-tagged folder it resolves
+         to, which is a piece of sheet structure this app has never shown them. -->
+    <string name="inventory_move">Move to…</string>
+    <string name="inventory_move_title">Move %1$s</string>
+    <string name="inventory_move_carried">Carried</string>
     <string name="inventory_empty">Nothing carried yet</string>
     <string name="inventory_empty_hint">Coins are always here. Tap + to put something else on this sheet.</string>
 
@@ -65,6 +91,22 @@
     <string name="inventory_attunement_requires">Requires attunement</string>
     <string name="inventory_attunement_attuned">Attuned</string>
     <string name="inventory_attunement_not_attuned">Not attuned</string>
+
+    <!-- FR-14 (12 decision 3): the inventory customize sheet. It reuses the tracker sheet's
+         control vocabulary wholesale — customize_move_up / _down / _hide / _show / _hidden /
+         _reset are the same strings on both sheets, deliberately, because they are the same
+         controls and a second spelling of "Move %1$s up" is a second thing to translate.
+         What is NOT shared is the title and the subtitle, because hiding means something
+         different here: on the tracker it removes a row, on this tab it only regroups one. -->
+    <string name="inventory_customize_title">Customize inventory</string>
+    <string name="inventory_customize_subtitle">Reorder the sections on this tab. Hiding one folds its items into Gear — nothing is ever hidden from you. Saved on this device only.</string>
+    <!-- Shown under a folded section in the Hidden list, so "where did my weapons go" is
+         answered on the screen that did it rather than by the player scrolling to find out. -->
+    <string name="inventory_customize_folded">Its items are in Gear</string>
+    <!-- The wallet is the one hide that removes rather than regroups, and it is allowed to
+         because coins are not items and appear nowhere else on the tab. Said plainly, because
+         it is the one place the sheet's promise above does not apply. -->
+    <string name="inventory_customize_wallet_hidden">Your coins are still on the character sheet</string>
 
     <!-- Add-item flow (10 decision 6) -->
     <string name="inventory_add">Add item</string>

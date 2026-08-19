@@ -54,6 +54,11 @@ class InventoryUiStateTest {
         // re-derived them would only assert its own re-derivation.
         isEquippable: Boolean = true,
         equipGroup: EquipGroup = EquipGroup.GEAR,
+        // FR-9. `tags` is what the coin exclusion (12 decision 7) reads, and `containerId` is
+        // what the move picker subtracts the item's current location by (decision 8). Both are
+        // parameters here for the reason the two above are: this class tests the mapping.
+        tags: List<String> = emptyList(),
+        containerId: String? = null,
     ) = InventoryItem(
         propertyId = id,
         name = name,
@@ -66,6 +71,8 @@ class InventoryUiStateTest {
         attuned = attuned,
         isEquippable = isEquippable,
         equipGroup = equipGroup,
+        tags = tags,
+        containerId = containerId,
     )
 
     /** Four coin rows with quantities, all backed by real properties. */
@@ -80,7 +87,12 @@ class InventoryUiStateTest {
 
     private val board = InventoryBoard(
         wallet = wallet(gp = 109, sp = 4),
-        equipped = listOf(item("eq1", "Longsword", weightLb = 3.0, valueGp = 15.0)),
+        // `equipped = true` on the item as well as membership of the board's `equipped` list.
+        // The engine always sets both — the list *is* the items whose flag is set — and the
+        // fixture used to set only the list, which was invisible until FR-9 gave the flag a
+        // second job (12 decision 8 refuses to move an equipped item). A fixture that
+        // disagrees with itself is a test that passes for the wrong reason.
+        equipped = listOf(item("eq1", "Longsword", weightLb = 3.0, valueGp = 15.0, equipped = true)),
         containers = listOf(
             InventoryContainer(
                 propertyId = "cont1",
@@ -104,6 +116,7 @@ class InventoryUiStateTest {
         isShowingSnapshot: Boolean = false,
         canWrite: Boolean = true,
         equippableOverrides: Set<String> = emptySet(),
+        isLocal: Boolean = false,
     ) = toInventoryUiState(
         creatureId = "FakeCreature23456",
         board = board,
@@ -111,6 +124,7 @@ class InventoryUiStateTest {
         isShowingSnapshot = isShowingSnapshot,
         canWrite = canWrite,
         equippableOverrides = equippableOverrides,
+        isLocal = isLocal,
     )
 
     // --- section composition (10 decision 2) -------------------------------------
@@ -326,12 +340,18 @@ class InventoryUiStateTest {
 
         // Board order is deliberately scrambled above: the section order is this screen's, not
         // the sheet's, and it must not depend on which item happened to come first.
+        //
+        // The containers moved **below** Armor in FR-13 (12 decision 1) — they were between
+        // Equipped and Weapons when this test was written. That is the whole of decision 1 as far
+        // as this fixture can see it, and it is the reason the two sections a player reaches for
+        // mid-combat are now adjacent instead of separated by however many backpacks the sheet
+        // happens to have.
         assertEquals(
             listOf(
                 InventorySectionKind.EQUIPPED,
-                InventorySectionKind.CONTAINER,
                 InventorySectionKind.WEAPONS,
                 InventorySectionKind.ARMOR,
+                InventorySectionKind.CONTAINER,
                 InventorySectionKind.GEAR,
             ),
             state.sections.map { it.kind },
@@ -495,6 +515,55 @@ class InventoryUiStateTest {
         )
 
         assertEquals(plain.sections, withStale.sections)
+    }
+
+    // --- 12 decision 2: the chip's verb split, seen and spoken -------------------------
+
+    @Test
+    fun `the chip offers a verb while it is off and states a fact while it is on`() {
+        val unequipped = item("c1", "Dagger")
+        val equipped = item("eq2", "Rapier", equipped = true)
+
+        // The whole of FR-13's addendum. The chip used to read "Equipped" in both states and
+        // leave the difference to a tint, which is legible only when the two are side by side —
+        // and a player scrolling Weapons never sees them side by side.
+        assertEquals(R.string.inventory_chip_equip, unequipped.toRowState().equipChipLabelRes)
+        assertEquals(R.string.inventory_chip_equipped, equipped.toRowState().equipChipLabelRes)
+    }
+
+    @Test
+    fun `the spoken sentence names the item, then the state only when there is one, then the tap`() {
+        // The house pattern `WalletUiState.spokenLabel` set, applied to a control: the copy
+        // arrives as parameters and the *rule* is what is pinned here. That rule is the
+        // asymmetry — "not equipped" is deliberately never said, because it would spend a whole
+        // clause restating what the verb already implies, on the majority of rows on every sheet.
+        assertEquals(
+            "Dagger, tap to equip",
+            item("c1", "Dagger").toRowState()
+                .spokenEquipLabel(equippedLabel = "Equipped", action = "tap to equip"),
+        )
+        assertEquals(
+            "Rapier, Equipped, tap to unequip",
+            item("eq2", "Rapier", equipped = true).toRowState()
+                .spokenEquipLabel(equippedLabel = "Equipped", action = "tap to unequip"),
+        )
+    }
+
+    @Test
+    fun `the spoken action is the same verb split the chip's label is`() {
+        // One concept, one decision, two renderings — so a future edit cannot end up with a chip
+        // reading "Equip" beside a sentence saying "tap to unequip".
+        assertEquals(R.string.inventory_equip_action, item("c1", "Dagger").toRowState().equipActionRes)
+        assertEquals(
+            R.string.inventory_unequip_action,
+            item("eq2", "Rapier", equipped = true).toRowState().equipActionRes,
+        )
+    }
+
+    /** The row this item becomes on the tab — resolved through the real mapper, never by hand. */
+    private fun InventoryItem.toRowState(): InventoryRowState {
+        val state = map(board.copy(equipped = listOf(this).filter { it.equipped }, carried = listOf(this).filterNot { it.equipped }))
+        return state.row(propertyId)!!
     }
 
     // --- rows ----------------------------------------------------------------------
@@ -870,5 +939,188 @@ class InventoryUiStateTest {
             assertNotNull(kind.name, kind.titleRes)
             assertTrue(kind.name, kind.titleRes != 0)
         }
+    }
+
+    // --- delete and move controls (FR-9, 12 decisions 7 and 8) ------------------
+
+    /**
+     * The ordinary case, and the one that has to be right on every row of every sheet: a
+     * server item offers both.
+     */
+    @Test
+    fun `an unequipped server item offers delete and move`() {
+        val row = map().row("c1")!!
+
+        assertTrue(row.showsDeleteControl)
+        assertTrue(row.showsMoveControl)
+        assertTrue("a DiceCloud delete is a softRemove, so it is reversible", row.deleteIsUndoable)
+        assertEquals(R.string.inventory_delete_undoable, row.deleteWarningRes)
+    }
+
+    /**
+     * Decision 8's fence: `equip` reparents on the server's own schedule, so an equipped item
+     * that had also been hand-placed would have two writers of one field.
+     *
+     * Delete is deliberately *not* fenced the same way — nothing owns an item's existence, so
+     * making the player take a thing off before they may destroy it would be a step to
+     * discover for no gain.
+     */
+    @Test
+    fun `an equipped item may be deleted but not moved`() {
+        val row = map().row("eq1")!!
+
+        assertFalse("equip already owns an equipped item's location", row.showsMoveControl)
+        assertTrue("but nothing owns its existence", row.showsDeleteControl)
+    }
+
+    /**
+     * Decision 7's coin exclusion, as a rule about the **item** rather than about the section
+     * it landed in.
+     *
+     * `InventoryEngine` routes every coin-tagged item into the wallet, so this board — which
+     * puts one in `carried` directly — is not one the engine would build. That is the point:
+     * the assertion is that the control is absent because the thing is a coin, not because
+     * some upstream filter got there first. A player who deletes their gold stack and
+     * dismisses the snackbar has lost a character's money.
+     */
+    @Test
+    fun `a coin-tagged item offers neither delete nor move, wherever it lands`() {
+        val state = map(
+            board = board.copy(
+                carried = listOf(item("gp1", "Gold piece", quantity = 109, tags = listOf("gold"))),
+            ),
+        )
+        val row = state.row("gp1")!!
+
+        assertFalse("wallet rows are stepper-managed (12 decision 7)", row.showsDeleteControl)
+        assertFalse(row.showsMoveControl)
+        assertTrue(row.isCoin)
+    }
+
+    /** The tag is read case-insensitively and out of the library list too — `CoinKind`'s rule. */
+    @Test
+    fun `a coin is recognised from a library tag and from odd casing`() {
+        val state = map(
+            board = board.copy(
+                carried = listOf(
+                    item("gp1", "Gold piece", tags = listOf("Gold")),
+                    item("sp1", "Silver piece", tags = emptyList()).copy(libraryTags = listOf("silver")),
+                    item("t1", "Torch"),
+                ),
+            ),
+        )
+
+        assertTrue(state.row("gp1")!!.isCoin)
+        assertTrue(state.row("sp1")!!.isCoin)
+        assertFalse("and an ordinary item is not swept up by it", state.row("t1")!!.isCoin)
+    }
+
+    /**
+     * Decision 7's honest asymmetry: a local delete cannot be undone, and the confirm says so
+     * **before** the tap rather than leaving the player to notice a missing UNDO afterwards.
+     */
+    @Test
+    fun `a local item still offers delete, but warns that it is permanent`() {
+        val row = map(isLocal = true).row("c1")!!
+
+        assertTrue(row.showsDeleteControl)
+        assertFalse("a deleted Room row has no identity left to restore", row.deleteIsUndoable)
+        assertEquals(R.string.inventory_delete_permanent, row.deleteWarningRes)
+    }
+
+    /** Decision 8: a local character has no containers, so there is nowhere to move to. */
+    @Test
+    fun `a local item offers no move control at all`() {
+        assertFalse(map(isLocal = true).row("c1")!!.showsMoveControl)
+        assertFalse(map(isLocal = true).row("eq1")!!.showsMoveControl)
+    }
+
+    // --- the move picker's destinations -----------------------------------------
+
+    @Test
+    fun `move targets are the carried root first, then every container`() {
+        val state = map()
+
+        assertEquals(
+            listOf(null, "cont1"),
+            state.moveTargets.map { it.containerId },
+        )
+        assertEquals("Backpack", state.moveTargets.last().name)
+    }
+
+    /**
+     * The K9 filter drops a container with no displayable contents from the *section* list, and
+     * this list deliberately keeps it.
+     *
+     * An empty pouch is the single most useful thing to move something into. Building the
+     * picker from the rendered sections would have hidden exactly the containers a player is
+     * trying to fill.
+     */
+    @Test
+    fun `an empty container is a move target even though it draws no section`() {
+        val state = map(
+            board = board.copy(
+                containers = board.containers + InventoryContainer(
+                    propertyId = "empty1",
+                    name = "Empty Sack",
+                    quantity = 1,
+                    weightLb = 0.5,
+                    rollupWeightLb = null,
+                    rollupValueGp = null,
+                    contents = emptyList(),
+                ),
+            ),
+        )
+
+        assertTrue(
+            "K9: an empty container draws no header",
+            state.sections.none { it.containerName == "Empty Sack" },
+        )
+        assertTrue(
+            "but it is still somewhere you can put things",
+            state.moveTargets.any { it.containerId == "empty1" },
+        )
+    }
+
+    /**
+     * A picker listing where you already are is a control with a no-op in it: the write-side
+     * guard would answer the tap by doing nothing, which is the interaction that looks most
+     * like a bug.
+     */
+    @Test
+    fun `the picker leaves out the container the item is already in`() {
+        val state = map(
+            board = board.copy(
+                carried = listOf(item("c1", "Torch", containerId = "cont1")),
+            ),
+        )
+        val row = state.row("c1")!!
+
+        assertEquals(listOf(null), state.moveTargetsFor(row).map { it.containerId })
+    }
+
+    /** The same rule from the other side: an item loose in the pack is not offered "Carried". */
+    @Test
+    fun `an item already in the carried root is not offered the carried root`() {
+        val state = map()
+        val row = state.row("c1")!!
+
+        assertEquals(null, row.containerId)
+        assertEquals(listOf("cont1"), state.moveTargetsFor(row).map { it.containerId })
+    }
+
+    /**
+     * A local character produces no containers, so the only entry is the carried root — which
+     * every local row is already in, leaving the list empty. The control is gated on `isLocal`
+     * anyway; this is the data agreeing with the rule rather than a second copy of it.
+     */
+    @Test
+    fun `a local character has nowhere to move anything`() {
+        val state = map(
+            board = InventoryBoard(carried = listOf(item("c1", "Torch"))),
+            isLocal = true,
+        )
+
+        assertTrue(state.moveTargetsFor(state.row("c1")!!).isEmpty())
     }
 }

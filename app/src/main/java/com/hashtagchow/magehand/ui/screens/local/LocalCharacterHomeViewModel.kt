@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
@@ -27,15 +28,19 @@ import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryLayoutPlan
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.toInventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.CustomizeSection
@@ -99,6 +104,7 @@ class LocalCharacterHomeViewModel @Inject constructor(
     appSettingsStore: AppSettingsStore,
     private val selectedRollStore: SelectedRollStore,
     private val equippableOverrideStore: EquippableOverrideStore,
+    private val inventoryLayoutStore: InventoryLayoutStore,
     private val factory: LocalOpenCharacterFactory,
 ) : ViewModel() {
 
@@ -187,6 +193,17 @@ class LocalCharacterHomeViewModel @Inject constructor(
     private val equippableOverrideKey: String = EquippableOverrideStore.localKey(characterId)
 
     /**
+     * FR-14's key for this character (12 decision 6), in the same local namespace and for the
+     * same reason as [rollKey].
+     *
+     * 12 decision 6: a local character gets the **same** customize surface, over a smaller set of
+     * sections — no containers, and every local item is equippable so Weapons and Armor stay
+     * empty until FR-10b. Nothing about the mechanism differs, which is the decision: the sheet,
+     * the plan and the store are the DiceCloud ones, reached with a local key.
+     */
+    private val inventoryLayoutKey: String = InventoryLayoutStore.localKey(characterId)
+
+    /**
      * The two *preference* signals, paired.
      *
      * `combine` tops out at five typed flows before it degenerates into an `Array<Any?>` with
@@ -262,7 +279,8 @@ class LocalCharacterHomeViewModel @Inject constructor(
                 local.inventory,
                 local.canWrite,
                 equippableOverrideStore.overrides(equippableOverrideKey),
-            ) { board, canWrite, overrides ->
+                inventoryLayoutStore.layout(inventoryLayoutKey),
+            ) { board, canWrite, overrides, layout ->
                 toInventoryUiState(
                     creatureId = characterId,
                     board = board,
@@ -270,6 +288,10 @@ class LocalCharacterHomeViewModel @Inject constructor(
                     isShowingSnapshot = false,
                     canWrite = canWrite,
                     equippableOverrides = overrides,
+                    layout = layout,
+                    // 12 decisions 7 and 8, stamped onto every row: delete offers no undo here,
+                    // and move is not offered at all. See `InventoryRowState.isLocal`.
+                    isLocal = true,
                 )
             }
         }
@@ -416,6 +438,36 @@ class LocalCharacterHomeViewModel @Inject constructor(
         open.value?.addItem(spec)
     }
 
+    /**
+     * Delete an item row, after the detail sheet's destructive confirm (FR-9, 12 decision 7).
+     *
+     * **Not undoable here, unlike the server path**, and the dialog has already said so: the
+     * copy is chosen by `InventoryRowState.deleteWarningRes`, which turns on the same
+     * `isLocal` flag this screen stamps onto every row. `LocalOpenCharacter.removeItem` gives
+     * the reason — a Room row that is deleted is gone, and buying an undo would mean a
+     * tombstone table.
+     */
+    fun removeItem(propertyId: String) {
+        open.value?.removeItem(propertyId)
+    }
+
+    /**
+     * A no-op, kept only so the inventory tab can be wired identically on both screens.
+     *
+     * 12 decision 8: local characters have no containers, so the detail sheet omits the Move
+     * control entirely (`InventoryRowState.showsMoveControl` is false whenever `isLocal`) and
+     * nothing can reach this. `LocalOpenCharacter.moveItem` refuses it a second time. Wiring
+     * the callback to `null` instead would mean the two screens constructed
+     * `InventoryActions` differently, which is the drift that makes one of them quietly lose a
+     * control nobody notices for a release.
+     */
+    fun moveItem(propertyId: String, containerId: String?) {
+        val target = containerId
+            ?.let { InventoryMoveTarget.Container(it) }
+            ?: InventoryMoveTarget.Carried
+        open.value?.moveItem(propertyId, target)
+    }
+
     fun undoLastWrite() {
         val character = open.value ?: return
         viewModelScope.launch { character.undoLastWrite() }
@@ -433,7 +485,46 @@ class LocalCharacterHomeViewModel @Inject constructor(
         viewModelScope.launch { selectedRollStore.setSelectedRollId(rollKey, rollId) }
     }
 
-    /** The customize sheet's ▲/▼. The only mutation that sheet offers for a local character. */
+    // --- inventory customize sheet (12 decisions 3 and 6) ---------------------------
+    //
+    // Byte for byte the DiceCloud view model's three methods, against the same plan and the same
+    // store with a local key. 12 decision 6 asks for the same surface, and this is what "same"
+    // looks like from here — note in particular that Reset is offered, unlike the *tracker*
+    // customize sheet's, which a local character does not get (09 decision 8's reorder-only mode
+    // exists because `sortIndex` IS the tracker's order). An inventory arrangement is one stored
+    // key with a documented default either way, so resetting means the same thing for both kinds.
+
+    /** Moves one inventory section one place. `delta` is −1 (up) or +1 (down). */
+    fun moveInventorySection(key: String, delta: Int) = mutateInventoryLayout { resolved, stored ->
+        InventoryLayoutPlan.move(resolved, stored, key, delta)
+    }
+
+    /** Folds an inventory section into Gear, or brings it back. */
+    fun setInventorySectionHidden(key: String, hidden: Boolean) =
+        mutateInventoryLayout { resolved, stored ->
+            InventoryLayoutPlan.setHidden(resolved, stored, key, hidden)
+        }
+
+    /** The sheet's Reset — a key deletion, so the default is never frozen into a character. */
+    fun resetInventoryLayout() {
+        viewModelScope.launch { inventoryLayoutStore.clearForCharacter(inventoryLayoutKey) }
+    }
+
+    private inline fun mutateInventoryLayout(
+        crossinline plan: (
+            resolved: List<InventoryLayoutEntry>,
+            stored: List<InventoryLayoutEntry>,
+        ) -> List<InventoryLayoutEntry>,
+    ) {
+        viewModelScope.launch {
+            val resolved = uiState.value.inventory.customize.resolved
+            val stored = inventoryLayoutStore.layout(inventoryLayoutKey).first()
+            val next = plan(resolved, stored)
+            if (next.isNotEmpty()) inventoryLayoutStore.setLayout(inventoryLayoutKey, next)
+        }
+    }
+
+    /** The tracker customize sheet's ▲/▼. The only mutation *that* sheet offers here. */
     fun moveRow(section: CustomizeSection, propertyId: String, delta: Int) {
         val character = open.value ?: return
         viewModelScope.launch {

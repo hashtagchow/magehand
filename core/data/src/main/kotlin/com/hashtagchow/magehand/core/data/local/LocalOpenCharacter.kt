@@ -29,6 +29,7 @@ import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.InventoryBoard
+import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.ResetRule
@@ -392,6 +393,68 @@ class LocalOpenCharacter(
             journal(TrackerWriteKind.ITEM_CREATE, spec.name, spec.quantity, undo = null)
         }
     }
+
+    /**
+     * Deletes the row (FR-9, docs/design/12-inventory-layout.md decision 7).
+     *
+     * ### Honestly not undoable
+     *
+     * The server path's delete *is* reversible, because DiceCloud offers no hard delete at all:
+     * `softRemove` only sets a flag and `restore` clears it, so the document survives and the
+     * inverse op is real. Here the row is gone. Making this undoable would mean keeping the
+     * deleted row somewhere — a `removed` column and a filter on every local query, or a
+     * tombstone table — which is a schema migration bought to back one button, on a screen
+     * whose whole design premise (09 decision 5) is that local characters do not pay for
+     * server machinery they have no server for.
+     *
+     * So the history entry offers no UNDO, exactly as [addItem]'s does, and the confirm dialog
+     * says the deletion cannot be undone **before** the tap rather than leaving the player to
+     * infer it from a snackbar with no button. This is the one place where the two
+     * implementations of this interface differ in what the player can do rather than only in
+     * how it is stored, and it is stated on `OpenCharacter.removeItem` for that reason.
+     *
+     * Note what is *not* here: no undo-stack invalidation. Deleting a row does not falsify the
+     * entries above it the way a rest does — an undo that restores some other row's value is
+     * still perfectly correct — and the one entry that could name this row is skipped by
+     * [undoLastWrite]'s existing "a row deleted by that same edit is skipped" branch, which
+     * the form's delete already exercised.
+     */
+    override fun removeItem(propertyId: String, targetName: String) {
+        dispatch {
+            val stored = dao.findRow(propertyId) ?: return@dispatch
+            // **Items only.** `local_tracker_rows` is one table holding slots, resources and
+            // items alike, and `findRow` is keyed on the id alone — so without this line the
+            // one irreversible operation in the app would delete a spell-slot row for any
+            // caller that handed it a tracker id, and the two boards share an id space
+            // (`TrackedResource.propertyId` == `InventoryItem.propertyId`). The server path
+            // gets this gate for free twice over: its board lookup only holds items, and its
+            // delete is a reversible `softRemove` in any case. This path has neither, so the
+            // gate is written out. Refused rather than journalled: nothing happened.
+            if (LocalRowKind.fromStored(stored.kind) != LocalRowKind.ITEM) return@dispatch
+            dao.deleteRow(stored.id)
+            dao.touch(creatureId, now())
+            journal(TrackerWriteKind.ITEM_DELETE, stored.label, amount = 1, undo = null)
+        }
+    }
+
+    /**
+     * No-op. 12 decision 8: **local characters have no containers**, so there is nowhere to
+     * move an item to.
+     *
+     * The same shape [toggle] has, and for the same kind of reason: [OpenCharacter] names the
+     * intent, the local data model expresses nothing it could act on, and doing nothing is the
+     * honest implementation of "move an item into a container that cannot exist". Wave 2's UI
+     * omits the control entirely on a local character rather than dimming it — a destination
+     * picker with no destinations is not a control — so nothing can reach this in practice; it
+     * is here so that the interface is satisfied without a `TODO` or a thrown exception, and
+     * so that a future local container model has one obvious place to land.
+     *
+     * `local_tracker_rows.sortIndex` is not touched either. Reordering is the customize
+     * sheet's mechanism (09 decision 8's "ONE mechanism"), and quietly reinterpreting a *move
+     * between containers* as a *reorder within one list* would be this class inventing a
+     * feature the design fenced out.
+     */
+    override fun moveItem(propertyId: String, targetParent: InventoryMoveTarget, targetName: String) = Unit
 
     /**
      * The wallet stepper (10 decision 10): four integer columns, no items and no tags.

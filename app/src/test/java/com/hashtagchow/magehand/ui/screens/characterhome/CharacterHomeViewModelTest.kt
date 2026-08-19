@@ -30,13 +30,17 @@ import com.hashtagchow.magehand.core.data.connection.AccountConnection
 import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.EquipGroup
 import com.hashtagchow.magehand.core.model.InventoryBoard
+import com.hashtagchow.magehand.core.model.InventoryContainer
 import com.hashtagchow.magehand.core.model.InventoryItem
 import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
@@ -103,6 +107,7 @@ class CharacterHomeViewModelTest {
             appSettingsStore = FakeAppSettingsStore(showToggles),
             selectedRollStore = selectedRolls,
             equippableOverrideStore = equippableOverrides,
+            inventoryLayoutStore = inventoryLayouts,
             openCharacterFactory = factory,
             connectionManager = connectionManager,
         )
@@ -113,6 +118,9 @@ class CharacterHomeViewModelTest {
 
     /** FR-7's per-character selection. In memory; the persistence itself is `:core:data`'s. */
     private val selectedRolls = FakeSelectedRollStore()
+
+    /** FR-14's per-character arrangement, likewise in memory. */
+    private val inventoryLayouts = FakeInventoryLayoutStore()
 
     /** FR-10's per-item overrides. In memory, for the same reason as the selection above. */
     private val equippableOverrides = FakeEquippableOverrideStore()
@@ -293,6 +301,138 @@ class CharacterHomeViewModelTest {
 
             assertTrue(equippableOverrides.keys.isEmpty())
         }
+
+    // --- FR-14: the inventory customize sheet (12 decisions 3 and 5) -------------
+
+    /** A board with all four hideable kinds of section, so a gesture has somewhere to go. */
+    private fun arrangeableBoard() = InventoryBoard(
+        equipped = listOf(inventoryItem("eq1", "Longsword")),
+        containers = listOf(
+            InventoryContainer(
+                propertyId = "cont1",
+                name = "Backpack",
+                quantity = 1,
+                weightLb = 5.0,
+                valueGp = 1.0,
+                rollupWeightLb = 6.0,
+                rollupValueGp = 2.0,
+                contents = listOf(inventoryItem("in1", "Rations")),
+            ),
+        ),
+        carried = listOf(
+            inventoryItem("w1", "Dagger", equipGroup = EquipGroup.WEAPON),
+            inventoryItem("g1", "Torch"),
+        ),
+    )
+
+    private fun inventoryItem(
+        id: String,
+        name: String,
+        equipGroup: EquipGroup = EquipGroup.GEAR,
+    ) = InventoryItem(
+        propertyId = id,
+        name = name,
+        quantity = 1,
+        weightLb = 1.0,
+        valueGp = null,
+        description = null,
+        equipped = false,
+        equipGroup = equipGroup,
+    )
+
+    @Test
+    fun `moving an inventory section persists the whole arrangement under the account key`() =
+        runTest(dispatcher) {
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            character.inventory.value = arrangeableBoard()
+            advanceUntilIdle()
+
+            vm.moveInventorySection("wallet", delta = 1)
+            advanceUntilIdle()
+
+            // Account-scoped, matching the roll selection and the equippability overrides: two
+            // accounts reaching one shared creature must not share an arrangement.
+            val key = InventoryLayoutStore.serverKey(character.accountId, creatureId)
+            assertEquals(setOf(key), inventoryLayouts.keys)
+            // The **whole** order, not a delta — the value is an order, and an order cannot be
+            // edited one element at a time. See `InventoryLayoutStore.setLayout`.
+            assertEquals(
+                listOf("equipped", "wallet", "weapons", "container:cont1", "gear"),
+                inventoryLayouts.layoutFor(key).map { it.key },
+            )
+            // …and it is a live read: the tab re-renders in the new order.
+            assertEquals(
+                listOf("equipped", "wallet", "weapons", "container:cont1", "gear"),
+                vm.uiState.value.inventory.blocks.map { it.key },
+            )
+        }
+
+    @Test
+    fun `a bounce off the end of the list writes nothing at all`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        character.inventory.value = arrangeableBoard()
+        advanceUntilIdle()
+
+        vm.moveInventorySection("wallet", delta = -1)
+        advanceUntilIdle()
+
+        // Not "wrote the same order back" — wrote *nothing*, so a character who has never
+        // customized does not acquire a stored key by tapping a dead arrow.
+        assertTrue(inventoryLayouts.keys.isEmpty())
+    }
+
+    @Test
+    fun `folding a section moves its items into Gear and never off the tab`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        character.inventory.value = arrangeableBoard()
+        advanceUntilIdle()
+
+        vm.setInventorySectionHidden("container:cont1", hidden = true)
+        advanceUntilIdle()
+
+        val inventory = vm.uiState.value.inventory
+        assertTrue("the container's header is gone", inventory.blocks.none { it.key == "container:cont1" })
+        // 12 decision 3's invariant, end to end through the view model: the Rations are in Gear,
+        // not missing. This is the one failure on this tab that would be a data-loss bug from
+        // the player's point of view.
+        assertEquals(
+            listOf("g1", "in1"),
+            inventory.sections.single { it.key == "gear" }.rows.map { it.propertyId },
+        )
+        assertEquals(listOf("container:cont1"), inventory.customize.hidden.map { it.key })
+    }
+
+    @Test
+    fun `resetting deletes the key rather than storing today's default order`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        character.inventory.value = arrangeableBoard()
+        advanceUntilIdle()
+
+        vm.setInventorySectionHidden("wallet", hidden = true)
+        advanceUntilIdle()
+        assertTrue(inventoryLayouts.keys.isNotEmpty())
+
+        vm.resetInventoryLayout()
+        advanceUntilIdle()
+
+        // A deletion, which is decision 5's own wording and the meaningfully different one: a
+        // stored copy of the default would freeze *today's* default into that character, so a
+        // later release that changed decision 1 would change the order for every new character
+        // and for nobody who had ever pressed Reset.
+        assertTrue(inventoryLayouts.keys.isEmpty())
+        assertEquals(
+            listOf("wallet", "equipped", "weapons", "container:cont1", "gear"),
+            vm.uiState.value.inventory.blocks.map { it.key },
+        )
+    }
 
     @Test
     fun `the connection status follows the session, not the character list`() = runTest(dispatcher) {
@@ -881,6 +1021,35 @@ private class FakeSelectedRollStore : SelectedRollStore {
         entries.value = entries.value.toMutableMap().apply {
             if (rollId == null) remove(characterKey) else put(characterKey, rollId)
         }
+    }
+
+    override suspend fun deleteForAccount(accountId: String) = Unit
+}
+
+/**
+ * FR-14's store. Recording, for the same reason as the two around it: the claim worth asserting
+ * is that the view model writes the *account-scoped* key and the arrangement the plan produced,
+ * neither of which a constant could show.
+ */
+private class FakeInventoryLayoutStore : InventoryLayoutStore {
+    private val entries = MutableStateFlow<Map<String, List<InventoryLayoutEntry>>>(emptyMap())
+
+    val keys: Set<String> get() = entries.value.keys
+
+    fun layoutFor(characterKey: String): List<InventoryLayoutEntry> =
+        entries.value[characterKey].orEmpty()
+
+    override fun layout(characterKey: String): Flow<List<InventoryLayoutEntry>> =
+        entries.map { it[characterKey].orEmpty() }
+
+    override suspend fun setLayout(characterKey: String, layout: List<InventoryLayoutEntry>) {
+        entries.value = entries.value.toMutableMap().apply {
+            if (layout.isEmpty()) remove(characterKey) else put(characterKey, layout)
+        }
+    }
+
+    override suspend fun clearForCharacter(characterKey: String) {
+        entries.value = entries.value - characterKey
     }
 
     override suspend fun deleteForAccount(accountId: String) = Unit

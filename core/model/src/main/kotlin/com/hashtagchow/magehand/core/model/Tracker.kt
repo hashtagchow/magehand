@@ -410,6 +410,34 @@ enum class TrackerWriteKind {
      * nothing before it, so it does not clear the stack.
      */
     ITEM_CREATE,
+
+    /**
+     * An item deleted from the sheet (FR-9, docs/design/12-inventory-layout.md decision 7).
+     *
+     * **Invertible on a server character and not on a local one**, and the enum deliberately
+     * does not try to say which: [inverted] answers "what would the undoing write be called",
+     * and the answer is [ITEM_RESTORE] in both cases. Whether an undo is *offered* is decided
+     * by whether the op carries an inverse — `WriteOp.RemoveProperty` does,
+     * `LocalOpenCharacter.removeItem` does not — because that is the one place that knows
+     * whether there is anything left to restore.
+     */
+    ITEM_DELETE,
+
+    /**
+     * A deleted item put back (FR-9). The inverse half of [ITEM_DELETE], and the **first
+     * write in this app whose inverse is a different server method** — `softRemove` undone by
+     * `restore` rather than by the same call with the other argument.
+     */
+    ITEM_RESTORE,
+
+    /**
+     * An item moved into a container or back to the carried root (FR-9, 12 decision 8).
+     *
+     * Self-inverting like [TOGGLE], and for the same reason: undoing a move is a move. The
+     * *destination* differs between the two, but the vocabulary does not, so a history entry
+     * for the undo reads "Moved X" — which is what happened.
+     */
+    ITEM_MOVE,
     TOGGLE,
     SHORT_REST,
     LONG_REST,
@@ -428,6 +456,9 @@ enum class TrackerWriteKind {
         ITEM_ADD -> ITEM_USE
         EQUIP -> UNEQUIP
         UNEQUIP -> EQUIP
+        ITEM_DELETE -> ITEM_RESTORE
+        ITEM_RESTORE -> ITEM_DELETE
+        ITEM_MOVE -> ITEM_MOVE
         TOGGLE -> TOGGLE
         SET_VALUE, ITEM_SET, ITEM_CREATE, SHORT_REST, LONG_REST -> null
     }

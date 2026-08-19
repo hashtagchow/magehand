@@ -25,6 +25,8 @@ import com.hashtagchow.magehand.core.data.local.LocalOpenCharacter
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 
 /**
@@ -75,10 +77,12 @@ class LocalCharacterHomeLifecycleTest {
                 dao,
                 FakeSelectedRollStore,
                 FakeEquippableOverrideStore,
+                FakeInventoryLayoutStore,
             ),
             appSettingsStore = FakeAppSettingsStore,
             selectedRollStore = FakeSelectedRollStore,
             equippableOverrideStore = FakeEquippableOverrideStore,
+            inventoryLayoutStore = FakeInventoryLayoutStore,
             factory = LocalOpenCharacterFactory(dao),
         )
     }
@@ -152,6 +156,7 @@ private object EmptyLocalCharacterDao : LocalCharacterDao {
     override suspend fun delete(id: String) = unreachable()
     override suspend fun deleteRowsMissing(characterId: String, keep: List<String>) = unreachable()
     override suspend fun deleteAllRows(characterId: String) = unreachable()
+    override suspend fun deleteRow(rowId: String) = unreachable()
     override suspend fun setCurrentHp(id: String, currentHp: Int, at: Long) = unreachable()
     override suspend fun setRowCurrent(rowId: String, current: Int) = unreachable()
     override suspend fun setRowQuantity(rowId: String, quantity: Int) = unreachable()
@@ -188,6 +193,14 @@ private object FakeEquippableOverrideStore : EquippableOverrideStore {
         propertyId: String,
         overridden: Boolean,
     ) = Unit
+    override suspend fun clearForCharacter(characterKey: String) = Unit
+    override suspend fun deleteForAccount(accountId: String) = Unit
+}
+
+/** FR-14's store, likewise: this class is about the open/close hand-off, not the arrangement. */
+private object FakeInventoryLayoutStore : InventoryLayoutStore {
+    override fun layout(characterKey: String): Flow<List<InventoryLayoutEntry>> = flowOf(emptyList())
+    override suspend fun setLayout(characterKey: String, layout: List<InventoryLayoutEntry>) = Unit
     override suspend fun clearForCharacter(characterKey: String) = Unit
     override suspend fun deleteForAccount(accountId: String) = Unit
 }

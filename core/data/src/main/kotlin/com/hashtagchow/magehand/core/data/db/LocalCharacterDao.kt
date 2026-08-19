@@ -73,6 +73,24 @@ interface LocalCharacterDao {
     @Query("DELETE FROM local_tracker_rows WHERE characterId = :characterId")
     suspend fun deleteAllRows(characterId: String)
 
+    /**
+     * Deletes **one** row, by id — FR-9's local delete
+     * (docs/design/12-inventory-layout.md decision 7).
+     *
+     * A real `DELETE` and not a flag. The server path soft-removes because that is the only
+     * deletion its API offers, and the reversibility that falls out of it is a genuine gain;
+     * copying the shape here would mean a `removed` column, a filter on every local query and
+     * a tombstone the player can never see or empty — a schema migration to back an UNDO
+     * button. `LocalOpenCharacter.removeItem` therefore files a non-undoable history entry and
+     * the confirm dialog says so, which is the honest version of what this statement does.
+     *
+     * Keyed on the row id alone rather than on `(characterId, id)`: ids are UUIDs minted per
+     * row (see `LocalOpenCharacter.newRowId`), and every other single-row statement in this
+     * DAO — `setRowCurrent`, `setRowQuantity`, `setRowEquipped` — is keyed the same way.
+     */
+    @Query("DELETE FROM local_tracker_rows WHERE id = :rowId")
+    suspend fun deleteRow(rowId: String)
+
     @Query("UPDATE local_characters SET currentHp = :currentHp, updatedAt = :at WHERE id = :id")
     suspend fun setCurrentHp(id: String, currentHp: Int, at: Long)
 

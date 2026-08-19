@@ -52,6 +52,7 @@ import com.hashtagchow.magehand.ui.navigation.LocalCharacterHomeTab
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryActions
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryCustomizeSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryTab
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.ItemDetailSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpNumberPadDialog
@@ -108,6 +109,9 @@ fun LocalCharacterHomeScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var selectedTab by rememberSaveable { mutableStateOf(LocalCharacterHomeTab.Tracker) }
     var customizeOpen by rememberSaveable { mutableStateOf(false) }
+    /** The inventory tab's own wrench (12 decisions 3 and 6). Its own flag, as on the DiceCloud
+     *  screen and for the same reason: two sheets, two controls, two pieces of saved state. */
+    var inventoryCustomizeOpen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var hpPadOpen by rememberSaveable { mutableStateOf(false) }
     var addItemOpen by rememberSaveable { mutableStateOf(false) }
@@ -209,6 +213,20 @@ fun LocalCharacterHomeScreen(
                                 contentDescription = stringResource(R.string.inventory_add),
                             )
                         }
+                        // 12 decision 6: a local character gets the same surface. Same icon,
+                        // same place, same sheet — over a smaller set of sections, which is the
+                        // board's doing and not this screen's.
+                        IconButton(
+                            onClick = { inventoryCustomizeOpen = true },
+                            modifier = Modifier.testTag("inventory:customize:open"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Build,
+                                contentDescription = stringResource(
+                                    R.string.inventory_customize_title,
+                                ),
+                            )
+                        }
                     }
                     IconButton(
                         onClick = { onEdit(uiState.characterId) },
@@ -268,6 +286,10 @@ fun LocalCharacterHomeScreen(
                         onCoinDelta = viewModel::adjustCoins,
                         onQuantityDelta = viewModel::adjustItemQuantity,
                         onRowTap = { detailItemId = it },
+                        // FR-9. Both arrive from the detail sheet, which is where the
+                        // confirm and the picker live — nothing on the list can reach them.
+                        onDelete = viewModel::removeItem,
+                        onMove = viewModel::moveItem,
                     ),
                 )
             }
@@ -286,6 +308,11 @@ fun LocalCharacterHomeScreen(
                 onEquip = viewModel::setEquipped,
                 onEquippableOverride = viewModel::setEquippableOverride,
                 onDismiss = { detailItemId = null },
+                // Already filtered of the container the item is in (12 decision 8):
+                // a picker listing where you already are is a control with a no-op in it.
+                moveTargets = uiState.inventory.moveTargetsFor(row),
+                onDelete = viewModel::removeItem,
+                onMove = viewModel::moveItem,
             )
         }
 
@@ -323,6 +350,16 @@ fun LocalCharacterHomeScreen(
                 state = uiState.tracker,
                 onConfirm = { viewModel.rest(kind) },
                 onDismiss = { restToConfirm = null },
+            )
+        }
+
+        if (inventoryCustomizeOpen) {
+            InventoryCustomizeSheet(
+                state = uiState.inventory.customize,
+                onDismiss = { inventoryCustomizeOpen = false },
+                onMove = viewModel::moveInventorySection,
+                onSetHidden = viewModel::setInventorySectionHidden,
+                onReset = viewModel::resetInventoryLayout,
             )
         }
 

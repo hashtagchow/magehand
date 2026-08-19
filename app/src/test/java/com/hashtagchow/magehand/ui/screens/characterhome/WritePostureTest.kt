@@ -61,6 +61,15 @@ class WritePostureTest {
         // still catches `equipItem` if it ever reappears.
         "creatureProperties.equip",
         "creatureProperties.insert",
+        // FR-9's three (docs/design/12-inventory-layout.md decisions 7 and 8). `softRemove`
+        // and `restore` are the delete and its inverse — the only deletion this server offers,
+        // and the reason a delete is undoable at all — and `organizeDoc` reparents a property.
+        // All three are exactly the kind of call that must never be reachable from a
+        // composable: two of them destroy or relocate a player's property with one method
+        // invocation and no rate gate, no confirm and no undo entry of their own.
+        "creatureProperties.softRemove",
+        "creatureProperties.restore",
+        "organize.organizeDoc",
         "creature.methods.rest",
         "creatures.insertCreature",
         "creatures.update",
@@ -81,6 +90,14 @@ class WritePostureTest {
         "setEquipped",
         "addItem",
         "adjustCoins",
+        // FR-9's two, added deliberately per this list's own rule (12 decisions 7 and 8).
+        // Both are *intents*: `removeItem` names what the player did and says nothing about
+        // whether the storage soft-removes or deletes — which is exactly the difference
+        // between the two implementations behind this interface — and `moveItem` takes an
+        // `InventoryMoveTarget`, a container or the carried root, rather than a DDP
+        // `parentRef`. Neither lets `:app` name a method; the two assertions above prove it.
+        "removeItem",
+        "moveItem",
         "toggle",
         "rest",
         "undoLastWrite",

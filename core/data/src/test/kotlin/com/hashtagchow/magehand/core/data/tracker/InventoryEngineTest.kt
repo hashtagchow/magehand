@@ -509,6 +509,92 @@ class InventoryEngineTest {
         assertEquals("c1", InventoryEngine.insertTarget(built)!!.parentId)
     }
 
+    // --- move targeting (FR-9, 12 decision 8) --------------------------------------
+
+    /**
+     * A move to the carried root is [InventoryEngine.insertTarget]'s answer, unaltered — one
+     * reader, one opinion about where "loose in my pack" is, on a tree that `equip` rewrites.
+     */
+    @Test
+    fun `moving to the carried root resolves exactly where an add would go`() {
+        val built = sheet(
+            """{"_id":"car","type":"folder","name":"Carried","tags":["carried"],"order":20}""",
+            item("a", "Rope", extra = ""","order":42"""),
+        )
+
+        assertEquals(InventoryEngine.insertTarget(built), InventoryEngine.moveTarget(built, containerId = null))
+    }
+
+    @Test
+    fun `moving into a container keeps the end-of-sheet order`() {
+        val built = sheet(
+            """{"_id":"car","type":"folder","name":"Carried","tags":["carried"],"order":20}""",
+            """{"_id":"bag","type":"container","name":"Belt Pouch","quantity":1,"order":21}""",
+            item("a", "Rope", extra = ""","order":42"""),
+        )
+
+        val target = InventoryEngine.moveTarget(built, containerId = "bag")!!
+        assertEquals("bag", target.parentId)
+        assertEquals(CreatureSheet.CREATURE_PROPERTIES, target.parentCollection)
+        assertEquals("one past the sheet's highest order — the bottom of the destination", 43, target.order)
+    }
+
+    /**
+     * The carried root can be the **creature itself** on a sheet with neither folder, so the
+     * collection has to travel with the id. A move into a container is always a property.
+     */
+    @Test
+    fun `a sheet with no inventory folders moves items to the creature root`() {
+        val target = InventoryEngine.moveTarget(sheet(item("a", "Rope")), containerId = null)!!
+        assertEquals("c1", target.parentId)
+        assertEquals(CreatureSheet.CREATURES, target.parentCollection)
+    }
+
+    @Test
+    fun `an empty sheet has nowhere to move anything either`() {
+        assertNull(InventoryEngine.moveTarget(CreatureSheet.EMPTY, containerId = null))
+        assertNull(InventoryEngine.moveTarget(CreatureSheet.EMPTY, containerId = "bag"))
+    }
+
+    // --- the prior location, which is what makes a move's undo possible -------------
+
+    @Test
+    fun `an item's current location is its parent and its own order`() {
+        val built = sheet(
+            """{"_id":"bag","type":"container","name":"Belt Pouch","quantity":1,"order":2}""",
+            item("a", "Rope", extra = ""","order":7,"parent":{"id":"bag","collection":"creatureProperties"}"""),
+        )
+
+        val from = InventoryEngine.currentLocation(built, "a")!!
+        assertEquals("bag", from.parentId)
+        assertEquals(CreatureSheet.CREATURE_PROPERTIES, from.parentCollection)
+        assertEquals("the order it has, not a fresh end-of-sheet one", 7, from.order)
+    }
+
+    /**
+     * An unparented property lives at the creature, which is where `insertTarget`'s last branch
+     * puts a new one. Returning `null` here would make a top-level item unmovable — refusing
+     * the one operation that would tidy it up.
+     */
+    @Test
+    fun `a property with no parent is located at the creature`() {
+        val from = InventoryEngine.currentLocation(sheet(item("a", "Rope", extra = ""","order":3""")), "a")!!
+        assertEquals("c1", from.parentId)
+        assertEquals(CreatureSheet.CREATURES, from.parentCollection)
+    }
+
+    /**
+     * A soft-removed property has no current location worth moving away from, and no honest
+     * inverse — `livePropertyList` is removed-filtered, so this falls out of 10 decision 3
+     * rather than being a branch of its own.
+     */
+    @Test
+    fun `a soft-removed or unknown property has no current location`() {
+        val built = sheet(item("a", "Rope", extra = ""","removed":true"""))
+        assertNull(InventoryEngine.currentLocation(built, "a"))
+        assertNull(InventoryEngine.currentLocation(built, "never-existed"))
+    }
+
     @Test
     fun `an empty sheet has nowhere to put an item`() {
         assertNull(InventoryEngine.insertTarget(CreatureSheet.EMPTY))

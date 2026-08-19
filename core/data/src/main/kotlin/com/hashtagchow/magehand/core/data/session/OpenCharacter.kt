@@ -37,6 +37,7 @@ import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryItem
+import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.WalletRow
@@ -165,6 +166,72 @@ interface OpenCharacter {
      * See `WriteOp.InsertProperty`.
      */
     fun addItem(spec: NewItemSpec)
+
+    /**
+     * Delete an item from the character (FR-9, docs/design/12-inventory-layout.md decision 7).
+     *
+     * The screen has already shown a destructive confirm by the time this runs — this call
+     * assumes it, the way [rest] assumes its dialog. What it does *not* assume is that the
+     * confirm said the same thing on both kinds of character, because it truthfully cannot:
+     *
+     * | | server | local |
+     * |---|---|---|
+     * | mechanism | `creatureProperties.softRemove` | the Room row is deleted |
+     * | undoable | **yes** — `restore {_id}` puts it back | **no** |
+     *
+     * That asymmetry is decision 7's, and it is the one place in this interface where the two
+     * implementations differ in what the *player* can do rather than only in how it is stored.
+     * The server keeps the document and merely flags it, so an undo is a real inverse; a local
+     * row that has been deleted has no identity left to restore, and pretending otherwise
+     * would mean keeping a hidden tombstone table to back a button. So the local path files a
+     * **non-undoable** history entry — the shape [addItem] already has — and the local copy in
+     * the confirm dialog says the deletion cannot be undone. Saying so before the tap beats
+     * discovering it from a missing UNDO on the snackbar.
+     *
+     * ### Coins are not deletable, and this is the second gate
+     *
+     * The UI omits the control on a coin-tagged row (decision 7: wallet rows are
+     * stepper-managed). This call is gated again, from the other direction: it resolves the id
+     * against the inventory board's items, and `InventoryBoard`'s precedence puts every
+     * coin-tagged item in the **wallet** and in no item list — so a coin id arriving here
+     * resolves to nothing and the tap is dropped. Two independent gates because "delete your
+     * entire gold stack" is the one mistake in this feature that a player could not usefully
+     * be told about afterwards.
+     *
+     * @param targetName the row's name at tap time, for the history entry and the snackbar —
+     *   see [WriteOp.targetName]. The implementations re-read it from the board and this is
+     *   only a fallback for a caller that has one already.
+     */
+    fun removeItem(propertyId: String, targetName: String = "")
+
+    /**
+     * Move an item into a container, or back out to the carried root (FR-9, 12 decision 8).
+     *
+     * **Undoable**, and completely: the op carries the item's prior parent and order, so the
+     * inverse is the move back. That is the capability `WriteOp.Equip` documents itself as
+     * lacking — it named `organizeDoc` and "a memory of where the item was" as the two missing
+     * pieces, and this intent is both.
+     *
+     * ### Only on unequipped items
+     *
+     * Decision 8's fence, enforced here and not only in the UI: `equip` reparents the property
+     * on its own schedule, so an equipped item that had also been hand-placed would have two
+     * writers of one field and the next equip tap would quietly undo the player's move. A
+     * request to move an equipped item is dropped rather than sent.
+     *
+     * ### Server only
+     *
+     * A local character has no containers to move between — its items are Room rows with a
+     * sort index and no tree at all — so `LocalOpenCharacter` implements this as a no-op and
+     * the control is absent from the local detail sheet entirely. Absent rather than disabled,
+     * because a destination picker with nothing in it is not a control.
+     *
+     * @param targetParent where to put it, in the player's vocabulary rather than the wire's.
+     *   The `parentRef` collection, the folder id behind "Carried" and the `order` are all
+     *   resolved against the live sheet by `InventoryEngine.moveTarget` — see
+     *   [InventoryMoveTarget] for why the UI is not handed a `parentRef`.
+     */
+    fun moveItem(propertyId: String, targetParent: InventoryMoveTarget, targetName: String = "")
 
     /**
      * Move one denomination of coin by [delta] — the wallet steppers (10 decision 5).
@@ -414,6 +481,81 @@ internal class DefaultOpenCharacter(
         val target = InventoryEngine.insertTarget(session.currentSheet) ?: return
         session.writeQueue.submit(
             WriteOp.insertItem(spec, target.parentId, target.order, target.parentCollection),
+        )
+    }
+
+    /**
+     * `creatureProperties.softRemove` behind the interface's confirm assumption
+     * (12 decision 7).
+     *
+     * ### The board lookup is the coin gate
+     *
+     * Resolving the id against [CreatureSession.inventory] rather than trusting the caller does
+     * two jobs at once. It supplies the row's real name for the history entry, so "Deleted
+     * Torch" cannot end up quoting a Meteor id — and, because `InventoryBoard`'s section
+     * precedence puts every coin-tagged item in the **wallet** and in no item list, a coin id
+     * resolves to nothing here and is dropped. The UI already omits the control on those rows;
+     * this is the same rule enforced where the write actually happens, which is what the
+     * interface's KDoc means by two independent gates.
+     *
+     * It also fails closed on a stale id — an item deleted on another device, or by this very
+     * call arriving twice — for the reason `addItem` drops a tap on an empty sheet: a write
+     * about a property that is not there is not a write anyone asked for.
+     */
+    override fun removeItem(propertyId: String, targetName: String) {
+        val item = session.inventory.value.allItems.firstOrNull { it.propertyId == propertyId }
+            ?: return
+        session.writeQueue.submit(WriteOp.removeItem(propertyId, item.name.ifBlank { targetName }))
+    }
+
+    /**
+     * `organize.organizeDoc`, with both ends of the move resolved against the sheet **as it is
+     * at tap time** (12 decision 8).
+     *
+     * Three reads, each of which has to be live rather than remembered:
+     *
+     * 1. the **item**, from the board — its existence, its name, and its `equipped` state,
+     *    which is decision 8's fence (see the interface KDoc for why an equipped item has two
+     *    owners of its location);
+     * 2. **where it is now**, from the sheet, because that is what the inverse move targets and
+     *    nothing else in this app records it;
+     * 3. **where it is going**, from `InventoryEngine.moveTarget`, which re-uses the same
+     *    `carried`/`inventory`/creature preference order a new item's insert follows — the
+     *    folder ids belong to the sheet's own structure and `equip` rewrites them.
+     *
+     * A move to the location the item is already in is dropped. Not merely wasteful: it would
+     * burn one of the five calls the server's 5 s window allows and file a history entry
+     * offering to undo a move that did not happen — [setEquipped]'s no-op guard, applied to a
+     * location instead of a flag. The comparison is on the **parent** alone and deliberately
+     * ignores `order`, because `moveTarget` always returns end-of-sheet: comparing it too
+     * would make every re-pick of the current container a real call that only reorders.
+     */
+    override fun moveItem(propertyId: String, targetParent: InventoryMoveTarget, targetName: String) {
+        val item = session.inventory.value.allItems.firstOrNull { it.propertyId == propertyId }
+            ?: return
+        // Decision 8: equip already owns an equipped item's parent. Dropped rather than sent.
+        if (item.equipped) return
+
+        val sheet = session.currentSheet
+        val from = InventoryEngine.currentLocation(sheet, propertyId) ?: return
+        val containerId = when (targetParent) {
+            is InventoryMoveTarget.Carried -> null
+            is InventoryMoveTarget.Container -> targetParent.propertyId
+        }
+        val to = InventoryEngine.moveTarget(sheet, containerId) ?: return
+        if (to.parentId == from.parentId && to.parentCollection == from.parentCollection) return
+
+        session.writeQueue.submit(
+            WriteOp.moveItem(
+                propertyId = propertyId,
+                parentId = to.parentId,
+                order = to.order,
+                previousParentId = from.parentId,
+                previousOrder = from.order,
+                parentCollection = to.parentCollection,
+                previousParentCollection = from.parentCollection,
+                targetName = item.name.ifBlank { targetName },
+            ),
         )
     }
 

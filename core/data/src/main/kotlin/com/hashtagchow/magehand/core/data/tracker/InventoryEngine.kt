@@ -314,6 +314,79 @@ object InventoryEngine {
         return InsertTarget(creatureId, CreatureSheet.CREATURES, order)
     }
 
+    // -----------------------------------------------------------------------
+    // Move targeting (12 decision 8)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Where a **moved** item goes, and at what position (docs/design/12-inventory-layout.md
+     * decision 8).
+     *
+     * Reuses [insertTarget] outright rather than re-deriving the carried root, which is the
+     * point of the function rather than an economy. That resolution has a preference order
+     * (`carried` → `inventory` → the creature) with an argument behind each step, and a second
+     * copy of it would be a second opinion about where "loose in my pack" is — on a tree the
+     * `equip` method rewrites on its own schedule. One reader, one answer, and the FR-9 move
+     * lands exactly where an FR-8 add would have.
+     *
+     * ### The `order`
+     *
+     * Taken from [insertTarget] whichever branch is chosen: one past the highest `order` on
+     * the sheet. DiceCloud's `order` is a single index across the whole property tree, so that
+     * is decision 8's "end of target" — the item appears at the bottom of the destination
+     * rather than in the middle of a list the player was reading, which is the same rule a
+     * newly added item follows.
+     *
+     * ### A container is taken on trust
+     *
+     * [containerId] is **not** checked against the sheet. The id came from the picker, which
+     * was built from this same board one frame ago, and the honest failure mode of a container
+     * that has since been deleted is the server refusing the move — a rolled-back write with a
+     * message — rather than this app silently dropping the tap and leaving the player tapping a
+     * destination that does nothing. `DefaultOpenCharacter.moveItem` does validate the *item*,
+     * because there the alternative is sending a write about nothing at all.
+     *
+     * @param containerId the destination container's `creatureProperties._id`, or `null` for
+     *   the carried root. `null` and not a sentinel: see `InventoryMoveTarget`.
+     * @return `null` only when the sheet names no creature — an empty sheet, with nothing to
+     *   move and nowhere to move it.
+     */
+    fun moveTarget(sheet: CreatureSheet, containerId: String?): InsertTarget? {
+        val carried = insertTarget(sheet) ?: return null
+        return if (containerId == null) {
+            carried
+        } else {
+            carried.copy(parentId = containerId, parentCollection = CreatureSheet.CREATURE_PROPERTIES)
+        }
+    }
+
+    /**
+     * Where a property sits **now** — the half of a move that makes its inverse possible.
+     *
+     * Read off the live sheet at call time and handed to `WriteOp.moveItem`, exactly as
+     * `WriteOp.Equip` is handed the item's current equipped state, and for the identical
+     * reason: an op that captures the world it is about is an op whose undo cannot be wrong.
+     *
+     * A property whose `parent` names nothing resolves to the **creature**, which is where an
+     * unparented property actually lives (`insertTarget`'s last branch says the same thing
+     * from the other end). Returning `null` there would make a top-level item unmovable —
+     * refusing the one operation that would tidy it up.
+     *
+     * @return `null` when the sheet does not carry this property at all, or carries it
+     *   soft-removed: there is no current location to move away from, and no honest inverse.
+     */
+    fun currentLocation(sheet: CreatureSheet, propertyId: String): InsertTarget? {
+        val property = sheet.livePropertyList.firstOrNull { it.string("_id") == propertyId }
+            ?: return null
+        val order = property.number("order") ?: 0
+        val parent = property.parentId()
+        return if (parent != null) {
+            InsertTarget(parent, CreatureSheet.CREATURE_PROPERTIES, order)
+        } else {
+            InsertTarget(sheet.creatureId ?: return null, CreatureSheet.CREATURES, order)
+        }
+    }
+
     private const val TYPE_FOLDER = "folder"
     private const val TAG_CARRIED = "carried"
     private const val TAG_INVENTORY = "inventory"

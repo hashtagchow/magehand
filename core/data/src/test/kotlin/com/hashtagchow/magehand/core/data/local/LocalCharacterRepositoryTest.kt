@@ -29,6 +29,9 @@ import com.hashtagchow.magehand.core.data.db.MageHandDatabase
 import com.hashtagchow.magehand.core.data.settings.DataStoreEquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreSelectedRollStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
+import com.hashtagchow.magehand.core.data.settings.DataStoreInventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import java.io.File
 import com.hashtagchow.magehand.core.model.AbilityScores
@@ -69,6 +72,7 @@ class LocalCharacterRepositoryTest {
     private lateinit var storeScope: CoroutineScope
     private lateinit var selectedRolls: SelectedRollStore
     private lateinit var equippableOverrides: EquippableOverrideStore
+    private lateinit var inventoryLayouts: InventoryLayoutStore
 
     private var clock = 1_000L
     private var nextId = 0
@@ -91,10 +95,16 @@ class LocalCharacterRepositoryTest {
                 File(temp.root, "equippable-overrides.preferences_pb")
             },
         )
+        inventoryLayouts = DataStoreInventoryLayoutStore(
+            PreferenceDataStoreFactory.create(scope = storeScope) {
+                File(temp.root, "inventory-layouts.preferences_pb")
+            },
+        )
         repository = LocalCharacterRepository(
             dao = dao,
             selectedRollStore = selectedRolls,
             equippableOverrideStore = equippableOverrides,
+            inventoryLayoutStore = inventoryLayouts,
             now = { clock },
             newId = { "id-${++nextId}" },
         )
@@ -425,6 +435,40 @@ class LocalCharacterRepositoryTest {
             "and a DiceCloud character's least of all",
             setOf("prop-4"),
             equippableOverrides.overrides(serverCharacter).first(),
+        )
+    }
+
+    @Test
+    fun `deleting takes the character's inventory layout with it, and only that`() = runTest {
+        val doomed = saveOrFail(form(name = "Brambles"))
+        val survivor = saveOrFail(form(name = "Thistle"))
+        val serverCharacter = InventoryLayoutStore.serverKey("acct-1", "creature-1")
+        val arrangement = listOf(
+            InventoryLayoutEntry("equipped"),
+            InventoryLayoutEntry("wallet", hidden = true),
+        )
+
+        inventoryLayouts.setLayout(InventoryLayoutStore.localKey(doomed), arrangement)
+        inventoryLayouts.setLayout(InventoryLayoutStore.localKey(survivor), arrangement)
+        inventoryLayouts.setLayout(serverCharacter, arrangement)
+
+        repository.delete(doomed)
+
+        // 12 decision 5's second reaping path — the third store to need one, and the same
+        // argument each time: a DataStore key rather than a row, in the local namespace that
+        // sign-out is forbidden to reach, keyed by a UUID that will never recur.
+        assertTrue(
+            inventoryLayouts.layout(InventoryLayoutStore.localKey(doomed)).first().isEmpty(),
+        )
+        assertEquals(
+            "another on-device character's arrangement is not this character's business",
+            arrangement,
+            inventoryLayouts.layout(InventoryLayoutStore.localKey(survivor)).first(),
+        )
+        assertEquals(
+            "and a DiceCloud character's least of all",
+            arrangement,
+            inventoryLayouts.layout(serverCharacter).first(),
         )
     }
 

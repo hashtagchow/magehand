@@ -1,15 +1,20 @@
 package com.hashtagchow.magehand.ui.screens.characterhome.inventory
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -18,8 +23,14 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -65,6 +76,26 @@ import com.hashtagchow.magehand.ui.screens.characterhome.tracker.StepperButton
  *   `EquippableOverrideStore` key, never the sheet, so there is no undo entry and nothing to
  *   roll back. It is offered whether or not [canWrite]: refusing it offline would mean a player
  *   on a bad connection could not even fix how their own inventory is *displayed*.
+ *
+ * ### Delete and Move (FR-9, 12 decisions 7 and 8)
+ *
+ * Both live at the **bottom**, under everything the sheet reads out, and behind a divider. That
+ * is not decoration: this sheet's job is the read, and the two controls that can change what the
+ * player owns should not sit where a thumb lands on the way to the quantity stepper. Delete is
+ * additionally behind a destructive confirm — the rest dialog's pattern, including the coloured
+ * warning line — and the warning it prints differs by character kind, because a DiceCloud delete
+ * is reversible and a local one is not (see [InventoryRowState.deleteWarningRes]).
+ *
+ * Whether each control renders at all is [InventoryRowState]'s decision, not this file's:
+ * [InventoryRowState.showsDeleteControl] and [InventoryRowState.showsMoveControl] carry the
+ * coin / equipped / local exclusions where a unit test can call them. This composable resolves
+ * copy and owns two pieces of dialog latch state, and nothing else.
+ *
+ * @param moveTargets where this item may go, already filtered of the container it is in — pass
+ *   `InventoryUiState.moveTargetsFor(row)`. Empty hides the Move control even where the row
+ *   would offer it, which is the honest rendering of a sheet with nowhere else to put things.
+ * @param onDelete confirmed deletion. The dialog has already been shown and accepted.
+ * @param onMove `containerId` is `null` for the carried root — see `InventoryMoveTargetState`.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
@@ -76,12 +107,23 @@ fun ItemDetailSheet(
     onEquippableOverride: (propertyId: String, canEquip: Boolean) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    moveTargets: List<InventoryMoveTargetState> = emptyList(),
+    onDelete: (propertyId: String) -> Unit = {},
+    onMove: (propertyId: String, containerId: String?) -> Unit = { _, _ -> },
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
     val unknown = stringResource(R.string.inventory_unknown)
-    val equipDescription = stringResource(
-        if (row.equipped) R.string.inventory_unequip else R.string.inventory_equip,
-        row.name,
+    // Two latches rather than one nullable enum: they are mutually exclusive in practice but
+    // nothing needs them to be, and `rememberSaveable` keeps a half-made decision alive across a
+    // rotation — the player who tilted their phone mid-confirm gets the dialog back rather than
+    // a silently cancelled delete.
+    var confirmingDelete by rememberSaveable { mutableStateOf(false) }
+    var choosingMove by rememberSaveable { mutableStateOf(false) }
+    // 12 decision 2's verb split, the same call the row makes — so the chip in the sheet and
+    // the chip on the row it was opened from cannot say different things about one item.
+    val equipDescription = row.spokenEquipLabel(
+        equippedLabel = stringResource(R.string.inventory_chip_equipped),
+        action = stringResource(row.equipActionRes),
     )
 
     ModalBottomSheet(
@@ -113,7 +155,7 @@ fun ItemDetailSheet(
                     selected = row.equipped,
                     onClick = { onEquip(row.propertyId, !row.equipped) },
                     enabled = canWrite,
-                    label = { Text(stringResource(R.string.inventory_section_equipped)) },
+                    label = { Text(stringResource(row.equipChipLabelRes)) },
                     modifier = Modifier
                         .semantics { contentDescription = equipDescription }
                         .testTag("inventory:detail:equip"),
@@ -281,8 +323,218 @@ fun ItemDetailSheet(
                         .testTag("inventory:detail:description"),
                 )
             }
+
+            // FR-9. Last, under a divider, and only when the row offers either — a lone
+            // divider over nothing is worse than no divider.
+            val showsMove = row.showsMoveControl && moveTargets.isNotEmpty()
+            if (row.showsDeleteControl || showsMove) {
+                Spacer8()
+                HorizontalDivider()
+                Spacer8()
+                if (showsMove) {
+                    TextButton(
+                        onClick = { choosingMove = true },
+                        enabled = canWrite,
+                        modifier = Modifier.testTag("inventory:detail:move"),
+                    ) { Text(stringResource(R.string.inventory_move)) }
+                }
+                if (row.showsDeleteControl) {
+                    TextButton(
+                        onClick = { confirmingDelete = true },
+                        enabled = canWrite,
+                        // Error colour on the button itself, so the destructive one is
+                        // distinguishable from the neighbouring Move before it is read.
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                        modifier = Modifier.testTag("inventory:detail:delete"),
+                    ) { Text(stringResource(R.string.inventory_delete)) }
+                }
+            }
         }
     }
+
+    if (confirmingDelete) {
+        DeleteConfirmDialog(
+            row = row,
+            onConfirm = {
+                onDelete(row.propertyId)
+                // The sheet closes with the dialog: the item it was reading out no longer
+                // exists, and `InventoryUiState.row` would return null a frame later anyway
+                // (the screen's own "the item vanished" branch). Closing here makes the tap
+                // feel finished rather than leaving a sheet that dismisses itself.
+                onDismiss()
+            },
+            onDismiss = { confirmingDelete = false },
+        )
+    }
+
+    if (choosingMove) {
+        MoveTargetDialog(
+            row = row,
+            targets = moveTargets,
+            onPick = { containerId ->
+                onMove(row.propertyId, containerId)
+                choosingMove = false
+                onDismiss()
+            },
+            onDismiss = { choosingMove = false },
+        )
+    }
+}
+
+/**
+ * The destructive confirm in front of Delete (12 decision 7).
+ *
+ * `RestConfirmDialog`'s pattern, deliberately down to the shape: a title naming the thing, a
+ * short body, and the consequence in the error colour at the bottom. That the two dialogs look
+ * alike is the point — this app has one visual vocabulary for "this is the last chance to stop",
+ * and a second one would make the first stop meaning anything.
+ *
+ * Where it *differs* from the rest dialog is the one line that matters: a rest is never undoable
+ * and says so flatly, while a delete's reversibility depends on the character. That sentence is
+ * chosen by [InventoryRowState.deleteWarningRes] rather than here, so a test can assert which
+ * warning a given row earns without a Compose runtime.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun DeleteConfirmDialog(
+    row: InventoryRowState,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    /**
+     * Fires the confirm **once** (LOW-2).
+     *
+     * A double tap on this button used to submit two `RemoveProperty` ops. Nothing downstream
+     * could absorb the second: the op has no `coalesceKey` by design (a delete is not a stepper
+     * — see `WriteOp.RemoteProperty`), and `DefaultOpenCharacter.removeItem`'s stale-id guard
+     * reads the board, which cannot have updated between two taps in the same frame. The result
+     * was a second `RestoreProperty` left on the undo stack: one UNDO put the item back, and the
+     * button stayed lit offering a restore of something already restored.
+     *
+     * The check is made **synchronously inside the lambda**, not by `enabled` alone. `enabled`
+     * only takes effect at the next recomposition, which is exactly the window a double tap
+     * lives in; reading and writing the state in the click handler closes it, because a
+     * `MutableState` write is visible to the next read immediately. `enabled` is kept on top so
+     * the refusal is visible rather than silent, per 04 §3's rule for every other dimmed control
+     * on these screens.
+     *
+     * `remember`, not `rememberSaveable`: the dialog dismisses on that same tap, so there is no
+     * configuration change for the latch to survive — and one that *did* survive would mean a
+     * rotation mid-confirm left a dead button behind.
+     */
+    var confirmed by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.inventory_delete_title, row.name)) },
+        text = {
+            Text(
+                text = stringResource(row.deleteWarningRes),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                // Error colour on both wordings. The reversible one is still a deletion, and
+                // the sentence a player needs to read is the one that says what happens next.
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .semantics { testTagsAsResourceId = true }
+                    .testTag("inventory:delete:warning"),
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    // Synchronous check-and-set — see the latch's KDoc for why `enabled` alone
+                    // is one recomposition too late to stop a double tap.
+                    if (!confirmed) {
+                        confirmed = true
+                        onConfirm()
+                        onDismiss()
+                    }
+                },
+                enabled = !confirmed,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+                modifier = Modifier
+                    .semantics { testTagsAsResourceId = true }
+                    .testTag("inventory:delete:confirm"),
+            ) { Text(stringResource(R.string.inventory_delete_confirm)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+        },
+    )
+}
+
+/**
+ * The "Move to…" picker (12 decision 8): the carried root plus every container, by name.
+ *
+ * ### A dialog rather than a second bottom sheet
+ *
+ * The detail sheet is a `ModalBottomSheet`, and stacking another one on it is a fight with two
+ * scrims and two back handlers for no gain. A picker is a short list of mutually exclusive
+ * choices, which is what an `AlertDialog` is for.
+ *
+ * ### No confirm, and no "are you sure"
+ *
+ * A move is fully undoable (`WriteOp.MoveProperty` carries the prior parent and order), and the
+ * picker is itself the deliberate step. Putting a confirm in front of a reversible action is how
+ * players learn to dismiss confirms without reading them — which is exactly what has to not
+ * happen on the delete dialog above.
+ *
+ * [targets] arrives already filtered of the container the item is in, by
+ * `InventoryUiState.moveTargetsFor`, so every row here is a real destination.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun MoveTargetDialog(
+    row: InventoryRowState,
+    targets: List<InventoryMoveTargetState>,
+    onPick: (containerId: String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val carried = stringResource(R.string.inventory_move_carried)
+    val unnamedContainer = stringResource(R.string.inventory_section_container)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.inventory_move_title, row.name)) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .semantics { testTagsAsResourceId = true },
+            ) {
+                targets.forEach { target ->
+                    Text(
+                        // The carried root is the fixed word; a container is its own name, and
+                        // a blank-named one falls back to the generic section heading — the same
+                        // fallback `InventorySectionKind.CONTAINER` already makes. Deliberately
+                        // *not* falling back to "Carried": two rows reading the same word would
+                        // be two destinations nobody could choose between.
+                        text = if (target.containerId == null) {
+                            carried
+                        } else {
+                            target.name?.takeIf { it.isNotBlank() } ?: unnamedContainer
+                        },
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .clickable { onPick(target.containerId) }
+                            .padding(vertical = 12.dp)
+                            .testTag("inventory:move:${target.containerId ?: "carried"}"),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+        },
+    )
 }
 
 @OptIn(ExperimentalComposeUiApi::class)

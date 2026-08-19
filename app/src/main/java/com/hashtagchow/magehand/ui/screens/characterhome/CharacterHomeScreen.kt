@@ -48,6 +48,7 @@ import com.hashtagchow.magehand.ui.navigation.CharacterHomeTab
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryActions
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryCustomizeSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryTab
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.ItemDetailSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpNumberPadDialog
@@ -93,6 +94,10 @@ fun CharacterHomeScreen(
     var selectedTab by rememberSaveable { mutableStateOf(CharacterHomeTab.Tracker) }
     var sheetEverOpened by rememberSaveable { mutableStateOf(false) }
     var customizeOpen by rememberSaveable { mutableStateOf(false) }
+    // The inventory tab's own wrench (12 decision 3). A second flag rather than one shared with
+    // the tracker's sheet: the two sheets are different controls over different state, and one
+    // flag would make a rotation on the inventory tab reopen whichever sheet was last used.
+    var inventoryCustomizeOpen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var hpPadOpen by rememberSaveable { mutableStateOf(false) }
     var addItemOpen by rememberSaveable { mutableStateOf(false) }
@@ -236,6 +241,23 @@ fun CharacterHomeScreen(
                                     contentDescription = stringResource(R.string.inventory_add),
                                 )
                             }
+                            // 12 decision 3: "the same wrench → sheet affordance as the
+                            // tracker" — same icon, same place in the bar, three actions along
+                            // from the tracker's own. Not gated on `canWrite`, unlike the add
+                            // button beside it: an arrangement is a local preference and stays
+                            // editable while the socket is down, exactly as the tracker's
+                            // customize sheet does.
+                            IconButton(
+                                onClick = { inventoryCustomizeOpen = true },
+                                modifier = Modifier.testTag("inventory:customize:open"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Build,
+                                    contentDescription = stringResource(
+                                        R.string.inventory_customize_title,
+                                    ),
+                                )
+                            }
                         }
                         IconButton(onClick = onSettingsClick) {
                             Icon(
@@ -285,6 +307,10 @@ fun CharacterHomeScreen(
                             onCoinDelta = viewModel::adjustCoins,
                             onQuantityDelta = viewModel::adjustItemQuantity,
                             onRowTap = { detailItemId = it },
+                            // FR-9. Both arrive from the detail sheet, which is where the
+                            // confirm and the picker live — nothing on the list can reach them.
+                            onDelete = viewModel::removeItem,
+                            onMove = viewModel::moveItem,
                         ),
                     )
 
@@ -355,6 +381,11 @@ fun CharacterHomeScreen(
                     onEquip = viewModel::setEquipped,
                     onEquippableOverride = viewModel::setEquippableOverride,
                     onDismiss = { detailItemId = null },
+                    // Already filtered of the container the item is in (12 decision 8):
+                    // a picker listing where you already are is a control with a no-op in it.
+                    moveTargets = uiState.inventory.moveTargetsFor(row),
+                    onDelete = viewModel::removeItem,
+                    onMove = viewModel::moveItem,
                 )
             }
 
@@ -362,6 +393,16 @@ fun CharacterHomeScreen(
                 AddItemSheet(
                     onAdd = viewModel::addItem,
                     onDismiss = { addItemOpen = false },
+                )
+            }
+
+            if (inventoryCustomizeOpen) {
+                InventoryCustomizeSheet(
+                    state = uiState.inventory.customize,
+                    onDismiss = { inventoryCustomizeOpen = false },
+                    onMove = viewModel::moveInventorySection,
+                    onSetHidden = viewModel::setInventorySectionHidden,
+                    onReset = viewModel::resetInventoryLayout,
                 )
             }
 

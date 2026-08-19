@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
@@ -27,9 +28,12 @@ import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -38,6 +42,7 @@ import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryLayoutPlan
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.toInventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.CustomizeSection
@@ -123,6 +128,7 @@ class CharacterHomeViewModel @Inject constructor(
     appSettingsStore: AppSettingsStore,
     private val selectedRollStore: SelectedRollStore,
     private val equippableOverrideStore: EquippableOverrideStore,
+    private val inventoryLayoutStore: InventoryLayoutStore,
     private val openCharacterFactory: OpenCharacterFactory,
     private val connectionManager: DdpConnectionManager,
 ) : ViewModel() {
@@ -206,6 +212,15 @@ class CharacterHomeViewModel @Inject constructor(
         EquippableOverrideStore.serverKey(character.accountId, character.creatureId)
 
     /**
+     * FR-14's per-character inventory arrangement (12 decision 5), for the *opened* character.
+     *
+     * Read through the store rather than through [OpenCharacter] for [selectedRollId]'s reason,
+     * whole: it is a preference about how this app draws a sheet, not sheet state.
+     */
+    private fun inventoryLayoutKey(character: OpenCharacter): String =
+        InventoryLayoutStore.serverKey(character.accountId, character.creatureId)
+
+    /**
      * FR-6 applies to **every** character, not only local ones (09 decision 9: "for ALL
      * characters"). It is read here rather than in the composable so the gate is on the state
      * the screen renders, which is what `TrackerUiStateTest` can pin.
@@ -268,19 +283,34 @@ class CharacterHomeViewModel @Inject constructor(
                 character.connectionState,
                 character.isShowingSnapshot,
                 character.canWrite,
-                equippableOverrideStore.overrides(equippableOverrideKey(character)),
-            ) { board, connection, showingSnapshot, canWrite, overrides ->
+                inventoryPrefs(character),
+            ) { board, connection, showingSnapshot, canWrite, prefs ->
                 toInventoryUiState(
                     creatureId = creatureId,
                     board = board,
                     connection = connection,
                     isShowingSnapshot = showingSnapshot,
                     canWrite = canWrite,
-                    equippableOverrides = overrides,
+                    equippableOverrides = prefs.equippableOverrides,
+                    layout = prefs.layout,
                 )
             }
         }
     }
+
+    /**
+     * The inventory tab's two DataStore-backed preferences, paired.
+     *
+     * The same arity fix as [Prefs] and for the same reason: `combine` tops out at five typed
+     * flows before it degenerates into an `Array<Any?>` with unchecked casts, and FR-14's layout
+     * made this tab's need six. The grouping means something rather than being an arbitrary split
+     * to fit — both are stored choices about how to *draw* this character's inventory, neither is
+     * sheet data, and they are reaped by the same two paths.
+     */
+    private fun inventoryPrefs(character: OpenCharacter): Flow<InventoryPrefs> = combine(
+        equippableOverrideStore.overrides(equippableOverrideKey(character)),
+        inventoryLayoutStore.layout(inventoryLayoutKey(character)),
+    ) { overrides, layout -> InventoryPrefs(overrides, layout) }
 
     private val customizeState: Flow<TrackerCustomizeState> = open.flatMapLatest { character ->
         if (character == null) {
@@ -451,6 +481,38 @@ class CharacterHomeViewModel @Inject constructor(
         open.value?.addItem(spec)
     }
 
+    /**
+     * Delete an item, after the detail sheet's destructive confirm (FR-9, 12 decision 7).
+     *
+     * **Undoable on a DiceCloud character**, because the server's only deletion is a
+     * soft-remove and `restore` is a real inverse — so the snackbar's UNDO works and the
+     * history entry offers it. `OpenCharacter.removeItem` carries the whole argument.
+     *
+     * Unvalidated against the board here, unlike [setEquipped]: `setEquipped` has to look the
+     * item up because it needs the item's *current state* to build a correct inverse, and a
+     * delete needs nothing but the id. The lookup that would have gone here happens one layer
+     * down instead — `DefaultOpenCharacter.removeItem` resolves the id against the inventory
+     * board for the row's name and, in the same read, refuses a coin. Doing it twice would only
+     * mean two chances for the two copies to disagree.
+     */
+    fun removeItem(propertyId: String) {
+        open.value?.removeItem(propertyId)
+    }
+
+    /**
+     * Move an item into a container or back to the carried root (12 decision 8).
+     *
+     * @param containerId `null` for the carried root. The screen speaks in containers and the
+     *   carried root; `:core:data` turns that into a `parentRef` against the live sheet — see
+     *   `InventoryMoveTarget` for why the picker is not handed one.
+     */
+    fun moveItem(propertyId: String, containerId: String?) {
+        val target = containerId
+            ?.let { InventoryMoveTarget.Container(it) }
+            ?: InventoryMoveTarget.Carried
+        open.value?.moveItem(propertyId, target)
+    }
+
     /** A condition chip (or the concentration banner's ✕, which is the same write). */
     fun toggleCondition(propertyId: String) {
         val character = open.value ?: return
@@ -538,6 +600,60 @@ class CharacterHomeViewModel @Inject constructor(
         }
     }
 
+    // --- inventory customize sheet (12 decision 3) — all local, all DataStore -------
+
+    /**
+     * Moves one inventory section one place. `delta` is −1 (up) or +1 (down).
+     *
+     * Every gesture writes the **whole** arrangement, because the value is an order — see
+     * `InventoryLayoutStore.setLayout`. The plan is handed both the arrangement on screen and the
+     * one on disk: the second is what stops a gesture made while a container is missing from the
+     * board (a cold open, a snapshot) from quietly forgetting where that container sat.
+     */
+    fun moveInventorySection(key: String, delta: Int) = mutateInventoryLayout { resolved, stored ->
+        InventoryLayoutPlan.move(resolved, stored, key, delta)
+    }
+
+    /** Folds an inventory section into Gear, or brings it back (12 decision 3). */
+    fun setInventorySectionHidden(key: String, hidden: Boolean) =
+        mutateInventoryLayout { resolved, stored ->
+            InventoryLayoutPlan.setHidden(resolved, stored, key, hidden)
+        }
+
+    /**
+     * The sheet's Reset: forget this character's arrangement, so 12 decision 1's default draws.
+     *
+     * A key deletion rather than a write of the default order, which is decision 5's own wording
+     * and is the meaningfully different one: a stored copy of the default would freeze *today's*
+     * default into that character, so a later release that changed decision 1 would change the
+     * order for every new character and for nobody who had ever pressed Reset.
+     */
+    fun resetInventoryLayout() {
+        val key = inventoryLayoutKey(open.value ?: return)
+        viewModelScope.launch { inventoryLayoutStore.clearForCharacter(key) }
+    }
+
+    /**
+     * Applies a plan and persists it, unless the plan says the gesture was a no-op.
+     *
+     * An empty result means "nothing to do" — a bounce off the top of the list, or a hide the
+     * guardrail refuses — and is deliberately not written: see `InventoryLayoutPlan.move`.
+     */
+    private inline fun mutateInventoryLayout(
+        crossinline plan: (
+            resolved: List<InventoryLayoutEntry>,
+            stored: List<InventoryLayoutEntry>,
+        ) -> List<InventoryLayoutEntry>,
+    ) {
+        val key = inventoryLayoutKey(open.value ?: return)
+        viewModelScope.launch {
+            val resolved = uiState.value.inventory.customize.resolved
+            val stored = inventoryLayoutStore.layout(key).first()
+            val next = plan(resolved, stored)
+            if (next.isNotEmpty()) inventoryLayoutStore.setLayout(key, next)
+        }
+    }
+
     /**
      * FR-7: the Rolls dropdown was used.
      *
@@ -605,6 +721,12 @@ class CharacterHomeViewModel @Inject constructor(
      * data), so the grouping means something rather than being an arbitrary split to fit.
      */
     private data class Prefs(val showToggles: Boolean, val selectedRollId: String?)
+
+    /** The inventory tab's stored preferences. See [inventoryPrefs]. */
+    private data class InventoryPrefs(
+        val equippableOverrides: Set<String>,
+        val layout: List<InventoryLayoutEntry>,
+    )
 
     private companion object {
         const val STOP_TIMEOUT_MILLIS = 5_000L

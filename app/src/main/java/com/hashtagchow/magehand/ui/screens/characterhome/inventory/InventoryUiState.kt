@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.ui.screens.characterhome.inventory
 
 import androidx.annotation.StringRes
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.EquipGroup
@@ -48,6 +49,21 @@ private const val AMOUNT_DECIMALS = 2
  * everybody notices.
  */
 const val EM_DASH: String = "—"
+
+/**
+ * What separates the facts inside a **spoken** sentence on this tab.
+ *
+ * A comma, because these strings are read aloud: the middle dot the wallet summary and the item
+ * meta line use is a *visual* separator that a screen reader either skips or announces as "middle
+ * dot", while a comma is the pause a sentence needs. The two are deliberately different
+ * characters and must not be unified.
+ *
+ * File-level rather than duplicated into each builder, because there are two of them now
+ * ([WalletUiState.spokenLabel] and [InventoryRowState.spokenEquipLabel]) and a tab that paused
+ * differently in two places would be the sort of drift nobody reports and every screen-reader
+ * user hears.
+ */
+private const val SPOKEN_SEPARATOR = ", "
 
 /**
  * `142.0` → `"142"`, `1.5` → `"1.5"`, `0.02` → `"0.02"`, `0.005` → `"0.01"`.
@@ -174,6 +190,50 @@ data class InventoryRowState(
     val isEquippable: Boolean = true,
     /** Whether this character's [EquippableOverrideStore] carries this item. 11 decision 2. */
     val equippableOverridden: Boolean = false,
+    /**
+     * The container this item sits directly inside, or `null` for the carried root.
+     *
+     * Carried on the row purely so the move picker can leave out the destination the item is
+     * **already in** (12 decision 8) — see [InventoryUiState.moveTargetsFor]. The tab itself
+     * still never renders the tree; this is the one fact about the folder structure that a
+     * feature which moves things between folders cannot do without.
+     */
+    val containerId: String? = null,
+    /**
+     * Whether this item is a coin — `platinum`/`gold`/`silver`/`copper` on its own or its
+     * library's tags (12 decision 7).
+     *
+     * ### Why a row can say this at all, given coins never reach a row
+     *
+     * `InventoryEngine` routes every coin-tagged item into the wallet before any item section
+     * is built (`InventoryBoard`'s precedence), so on a real server board this is `false` on
+     * every row that exists. That makes it look redundant, and it is deliberately kept:
+     *
+     * - **The rule belongs to the item, not to its placement.** "Wallet rows are
+     *   stepper-managed, so they offer no delete" is a statement about what a coin *is*. A
+     *   delete control that was absent only because a *different* class had filtered the row
+     *   out first is one refactor away from appearing, and the refactor would touch neither
+     *   this file nor its tests.
+     * - **The wallet is the one thing in this feature with no remedy.** A deleted torch is one
+     *   UNDO away; a player who deletes their gold stack and dismisses the snackbar has lost a
+     *   character's money. Decision 7 fences it, and a fence that is only enforced upstream is
+     *   a fence in one place.
+     *
+     * `DefaultOpenCharacter.removeItem` gates the same rule again at the write, from the other
+     * direction — a coin id resolves to nothing in `allItems`. Two gates, stated in both.
+     */
+    val isCoin: Boolean = false,
+    /**
+     * Whether this row belongs to a **local** character (12 decisions 7 and 8).
+     *
+     * A character-level fact repeated per row, and that is the deliberate choice: it is what
+     * lets [showsMoveControl] and [deleteIsUndoable] be plain properties of the row, callable
+     * from a unit test with no board, no view model and no Compose runtime — which is this
+     * file's whole posture (see [showsEquipControl], [equipChipLabelRes]). Passing the flag
+     * into the composable instead would split each rule across the state and the screen, and
+     * the half in the screen is the half no test sees.
+     */
+    val isLocal: Boolean = false,
 ) {
     /**
      * Whether the row prints a `×n` badge.
@@ -220,6 +280,130 @@ data class InventoryRowState(
      * behaviour, and `InventoryUiStateTest` pins each leg of it.
      */
     val showsEquippableToggle: Boolean get() = !isEquippable
+
+    /**
+     * Whether the detail sheet offers **Delete** (12 decision 7).
+     *
+     * Everything except a coin, on both kinds of character. Equipped items included, and
+     * deliberately: taking an item off before you may destroy it would be a step the player has
+     * to discover, and unlike a *move* there is no second writer of anything to conflict with —
+     * a removed property is removed whichever folder it was in. That asymmetry with
+     * [showsMoveControl] is decision 8's, not an inconsistency: `equip` owns an equipped item's
+     * **location**, and nothing owns its existence.
+     *
+     * See [isCoin] for why the coin case is a rule about the item rather than a filter the
+     * board already applied, and [deleteIsUndoable] for what the confirm then has to say.
+     */
+    val showsDeleteControl: Boolean get() = !isCoin
+
+    /**
+     * Whether deleting this item can be taken back (12 decision 7).
+     *
+     * **True on a server character, false on a local one**, and this is the fact the confirm
+     * dialog's copy turns on. DiceCloud offers no hard delete — `softRemove` sets a flag and
+     * `restore` clears it — so the undo is a real inverse. A local row is a Room row and
+     * deleting it deletes it; see `LocalOpenCharacter.removeItem` for why buying an undo there
+     * would mean a tombstone table.
+     *
+     * Stated *before* the tap, in the dialog, rather than discovered afterwards from a
+     * snackbar with no UNDO button on it.
+     */
+    val deleteIsUndoable: Boolean get() = !isLocal
+
+    /**
+     * The line the delete confirm prints under the item's name.
+     *
+     * A `@StringRes` and not a boolean-plus-`if` in the composable, per this file's split: the
+     * *rule* (which sentence, and therefore whether the player is warned about permanence) is
+     * asserted in a unit test, and the words are `strings.xml`'s.
+     */
+    @get:StringRes
+    val deleteWarningRes: Int
+        get() = if (deleteIsUndoable) {
+            R.string.inventory_delete_undoable
+        } else {
+            R.string.inventory_delete_permanent
+        }
+
+    /**
+     * Whether the detail sheet offers **"Move to…"** (12 decision 8).
+     *
+     * Three exclusions, each with its own reason and none of them cosmetic:
+     *
+     * - **Equipped items.** `creatureProperties.equip` reparents the property on the server's
+     *   own schedule, so an equipped item that had also been hand-placed would have two writers
+     *   of one field and the next equip tap would silently undo the player's move. Decision 8's
+     *   words: *"two conflicting owners of its location"*.
+     * - **Coins.** [isCoin]'s argument, and the wallet has no location to speak of anyway.
+     * - **Local characters.** They have no containers — items are Room rows with a sort index
+     *   and no tree — so there is nowhere to move to. Absent rather than disabled: a
+     *   destination picker with no destinations is not a control.
+     *
+     * The same three are enforced again at the write (`DefaultOpenCharacter.moveItem` drops an
+     * equipped item and cannot resolve a coin; `LocalOpenCharacter.moveItem` is a no-op).
+     */
+    val showsMoveControl: Boolean get() = !equipped && !isCoin && !isLocal
+
+    /**
+     * The equip chip's **label**: "Equip" on an unequipped item, "Equipped" on an equipped one
+     * (docs/design/12-inventory-layout.md decision 2, FR-13's addendum).
+     *
+     * ### Why the chip stopped saying one word in two situations
+     *
+     * It read "Equipped" in both states and leaned entirely on `FilterChip`'s selected styling to
+     * say which was which — a tint difference, on a chip whose word does not change. That is
+     * legible when the two states are side by side and ambiguous when they are not, which is
+     * every real sheet: a player scrolling Weapons sees a column of chips all reading "Equipped"
+     * and has to decode a colour to learn that none of them are.
+     *
+     * The split is verb-versus-state, which is the ordinary vocabulary for a control that both
+     * *does* a thing and *reports* a thing: the unequipped chip offers an **action** ("Equip" —
+     * press this and it will be), the equipped chip states the **fact** ("Equipped" — it is).
+     * That reading is the same one the spoken sentence makes ([spokenEquipLabel]), so the two
+     * cannot drift into describing the chip differently.
+     *
+     * The rule is here rather than in the composable because a test can call it; the two words
+     * are `strings.xml`'s, per this file's number/sentence split.
+     */
+    @get:StringRes
+    val equipChipLabelRes: Int
+        get() = if (equipped) R.string.inventory_chip_equipped else R.string.inventory_chip_equip
+
+    /** The verb half of [spokenEquipLabel] — "tap to equip" / "tap to unequip". */
+    @get:StringRes
+    val equipActionRes: Int
+        get() = if (equipped) R.string.inventory_unequip_action else R.string.inventory_equip_action
+
+    /**
+     * What TalkBack says when it lands on this row's equip chip — *"Longsword, tap to equip"*, or
+     * *"Longsword, Equipped, tap to unequip"* (12 decision 2).
+     *
+     * ### Why a built sentence rather than one format string per state
+     *
+     * [WalletUiState.spokenLabel]'s argument, applied to a control instead of a read-out. The
+     * chip is a single accessibility node carrying three facts — which item, whether it is on,
+     * and that it can be tapped — and a screen-reader user gets exactly what this string says and
+     * nothing else. The old descriptions ("Equip %1$s" / "Unequip %1$s") named the item and the
+     * action and never said *whether the item was currently equipped*: `FilterChip` does announce
+     * its selected state, but it announces it about a `contentDescription` that had already
+     * replaced the label, so the one fact a player most wants — am I holding this? — was carried
+     * only by the chip's tint.
+     *
+     * The **state fragment is present only when equipped**, and that asymmetry is the decision
+     * rather than an oversight: "Longsword, not equipped, tap to equip" spends a whole clause
+     * restating what the verb already implies, on the majority of rows on every sheet. That rule
+     * is what this function exists for and what the test pins; the words arrive as parameters,
+     * so nothing here names a resource.
+     *
+     * @param equippedLabel the state fragment, dropped entirely when the item is not equipped.
+     *   The chip's own [equipChipLabelRes] word, deliberately: one concept, one string, so a
+     *   translator cannot end up with a chip and a sentence that disagree about what "equipped"
+     *   is called.
+     * @param action "tap to equip" / "tap to unequip" — [equipActionRes] resolved.
+     */
+    fun spokenEquipLabel(equippedLabel: String, action: String): String =
+        listOfNotNull(name, equippedLabel.takeIf { equipped }, action)
+            .joinToString(SPOKEN_SEPARATOR)
 
     /** What the whole stack weighs, or `null` when the source gave no weight at all. */
     val stackWeight: String? get() = weightLb?.let { formatAmount(it * quantity) }
@@ -378,15 +562,6 @@ data class WalletUiState(
     private companion object {
         /** A middle dot with hair spaces around it, as the item rows' meta line already uses. */
         const val SUMMARY_SEPARATOR = " · "
-
-        /**
-         * A comma, because this one is *read aloud*.
-         *
-         * The middle dot above is a visual separator a screen reader would either skip or
-         * announce as "middle dot"; a comma is the pause a sentence needs. The two are
-         * deliberately different characters for that reason and must not be unified.
-         */
-        const val SPOKEN_SEPARATOR = ", "
     }
 }
 
@@ -407,12 +582,51 @@ data class AttunementChipState(
     val slots: Int = InventoryBoard.ATTUNEMENT_SLOTS,
 )
 
+/**
+ * One destination in the "Move to…" picker (docs/design/12-inventory-layout.md decision 8).
+ *
+ * @param containerId the container's `creatureProperties._id`, or **`null` for the carried
+ *   root**. `null` rather than a sentinel id for the reason `InventoryMoveTarget` gives: the
+ *   carried root is resolved from the sheet's tags at write time and has no id this screen is
+ *   entitled to remember.
+ * @param name the container's name, or `null` for the carried root — whose label is a fixed
+ *   string (`inventory_section_gear`'s sibling `inventory_move_carried`) rather than a name off
+ *   the sheet, because the folder it resolves to is an implementation detail the player has
+ *   never been shown.
+ */
+data class InventoryMoveTargetState(
+    val containerId: String?,
+    val name: String? = null,
+)
+
 data class InventoryUiState(
     val creatureId: String = "",
-    /** Always present, always four rows. The first thing on the tab (10 decision 2). */
+    /**
+     * Always four rows — but no longer always *drawn*, and no longer always first.
+     *
+     * The rows themselves are unconditional (10 decision 5: a sheet carrying no coins still shows
+     * four zeroes, because "you have no silver" and "this app could not find your silver" look
+     * identical when the row is missing). Whether the wallet **block** is on the tab, and where,
+     * is now the player's (12 decisions 1 and 3) and is expressed by [blocks].
+     */
     val wallet: WalletUiState = WalletUiState(),
-    /** Equipped, then one per container, then Carried. See [toInventoryUiState]. */
-    val sections: List<InventorySectionState> = emptyList(),
+    /**
+     * Everything the tab draws, in the order it draws it — the wallet block and the item
+     * sections, interleaved however this character's stored layout asks (12 decisions 1 and 3).
+     *
+     * One list rather than "the wallet, then the sections" because the wallet is orderable and
+     * hideable now, so the order is a property of the whole tab rather than of the sections
+     * alone. See [InventoryBlock] for why the union is two cases and not one.
+     */
+    val blocks: List<InventoryBlock> = emptyList(),
+    /**
+     * The customize sheet's state (12 decision 3), built in the same pass as [blocks].
+     *
+     * On the state rather than in its own flow, unlike the tracker's — see
+     * [InventoryCustomizeState] for why one board can answer both questions here and cannot
+     * there.
+     */
+    val customize: InventoryCustomizeState = InventoryCustomizeState(),
     /** The top line's left half — a client sum over every non-removed item, formatted. */
     val carriedWeight: String = "0",
     /**
@@ -426,6 +640,25 @@ data class InventoryUiState(
     val isOverCapacity: Boolean = false,
     /** `null` unless the sheet says something about attunement — see [AttunementChipState]. */
     val attunement: AttunementChipState? = null,
+    /**
+     * Where "Move to…" can put an item: the carried root first, then **every** container on the
+     * sheet (12 decision 8). Empty on a local character, which has no containers.
+     *
+     * ### Every container, not the ones the tab drew
+     *
+     * [blocks] deliberately omits a container with no displayable contents (K9 — an empty
+     * section is a header over nothing), and this list deliberately does not. An **empty pouch
+     * is the single most useful thing to move something into**, and building the picker from
+     * the rendered sections would have made exactly the containers a player is trying to fill
+     * the ones they cannot choose. So this is built from the board's own `containers`, before
+     * the emptiness filter.
+     *
+     * Hidden containers are in here too, for the same reason and one more: 12 decision 3's
+     * invariant is that hiding changes *grouping*, never item reachability, and a destination
+     * that vanished from the picker because its section was folded into Gear would break that
+     * in the one direction the invariant did not anticipate.
+     */
+    val moveTargets: List<InventoryMoveTargetState> = emptyList(),
     /**
      * Whether a tap may reach the server. Every control on the tab is dimmed and inert when
      * false, matching the tracker's rule rather than restating it.
@@ -441,10 +674,21 @@ data class InventoryUiState(
     val isLoading: Boolean = false,
 ) {
     /**
+     * The item sections being drawn, in order — [blocks] without the wallet.
+     *
+     * Derived rather than carried, so the two can never disagree about what is on screen. Every
+     * existing reader of this tab's sections (the empty check, the row lookup, the emulator
+     * probe's section tags) is asking about *item* sections and is unaffected by the wallet
+     * having joined the order.
+     */
+    val sections: List<InventorySectionState>
+        get() = blocks.filterIsInstance<InventoryBlock.Items>().map { it.section }
+
+    /**
      * True when the character carries nothing at all — no coins, no items, no containers.
      *
-     * The wallet still renders in this state (it always does), so this drives a hint under
-     * it rather than an empty screen.
+     * The wallet still renders in this state (it always does, unless the player folded it away),
+     * so this drives a hint under it rather than an empty screen.
      */
     val isEmpty: Boolean get() = sections.isEmpty() && wallet.rows.all { it.quantity == 0 }
 
@@ -462,6 +706,25 @@ data class InventoryUiState(
         sections.firstNotNullOfOrNull { section ->
             section.rows.firstOrNull { it.propertyId == propertyId }
         }
+
+    /**
+     * The destinations offered for **this** row — [moveTargets] without the one the item is
+     * already in (12 decision 8).
+     *
+     * A picker that lists where you already are is a control with a no-op in it: tapping it
+     * would be answered by `DefaultOpenCharacter.moveItem`'s same-parent guard, so the player
+     * would choose a destination and nothing at all would happen — the interaction that looks
+     * most like a bug. The filter is here rather than in the composable so a test can call it
+     * without a Compose runtime, which is this file's rule for every branch that decides
+     * whether a control exists.
+     *
+     * Note this compares [InventoryRowState.containerId] to
+     * [InventoryMoveTargetState.containerId] and therefore treats `null == null` as a match:
+     * an item already loose in the carried root is not offered "Carried". That is the same
+     * equality the write-side guard makes, one frame earlier.
+     */
+    fun moveTargetsFor(row: InventoryRowState): List<InventoryMoveTargetState> =
+        moveTargets.filterNot { it.containerId == row.containerId }
 }
 
 /**
@@ -481,6 +744,36 @@ data class InventoryUiState(
  *     [InventoryItem.equipGroup] and each present only if it has rows. A character carrying
  *     nothing but gear therefore sees one GEAR header, not a CARRIED header with a GEAR header
  *     nested under it.
+ *  3. **The order and the grouping are the player's** (12 decisions 1 and 3) — see below.
+ *
+ * ### The default order, and what customizing can do to it
+ *
+ * 12 decision 1 replaces FR-8's order with **Wallet · Equipped · Weapons · Armor · containers ·
+ * Gear**, which is a pure ordering change: not one section-membership rule from designs 10 and 11
+ * moves. What it buys is that the two sections a player reaches for mid-combat — what they are
+ * holding, and what they could pick up — are adjacent and near the top, instead of separated by
+ * however many backpacks the sheet happens to have.
+ *
+ * [layout] then rearranges that per character, and the only interesting half is **hiding**, which
+ * on this tab does not mean what it means on the tracker. Decision 3's invariant is *items fold,
+ * never vanish*: hiding Weapons, Armor or a container moves its rows into **Gear**, so the same
+ * items are on the same tab under a different heading. Hiding is a **grouping** control here, not
+ * a visibility one, and that is why the tracker's per-row hide has no counterpart on this tab —
+ * an inventory that could conceal an item would be an inventory a player cannot trust.
+ *
+ * The Wallet is the one section whose hide removes something outright, and it is allowed to
+ * because there is nothing to fold: the coin rows are not items and are not duplicated anywhere
+ * else on the tab. Equipped and Gear cannot be hidden at all; see
+ * [InventoryLayoutKeys.isHideable] for both reasons.
+ *
+ * ### What the fold does to the weights
+ *
+ * A folded container's contents are summed into **Gear's** header, and the container's own shell
+ * weight is then in no section header at all. That is correct rather than lost: the top line is
+ * the one authoritative total (10 decision 10), it is a client sum over items plus every
+ * container's empty weight, and it has never consulted the section list — the K9 argument below
+ * is the same fact from the other direction. A future reader who "fixes" Gear's figure by adding
+ * a folded shell's weight into it gets a failing test, because that would be a double count.
  *
  * ### K9: a container with nothing displayable in it does not render
  *
@@ -521,6 +814,13 @@ data class InventoryUiState(
  * @param equippableOverrides the ids this character's `EquippableOverrideStore` carries
  *   (11 decision 2). Passed in rather than read here because this function is pure and must
  *   stay so — the store is a flow, and the view model is where flows are combined.
+ * @param layout this character's stored arrangement (12 decision 5), or empty for the default.
+ *   Passed in for [equippableOverrides]' reason, whole: another flow, another view model job.
+ * @param isLocal whether this is a local character (12 decisions 7 and 8). It decides whether
+ *   delete offers an undo and whether move is offered at all, so it is stamped onto every row
+ *   ([InventoryRowState.isLocal]) rather than kept at the top — see there for why. Defaulted
+ *   `false`, i.e. "a DiceCloud character", which is the reading every existing caller and test
+ *   fixture already means.
  */
 fun toInventoryUiState(
     creatureId: String,
@@ -529,51 +829,163 @@ fun toInventoryUiState(
     isShowingSnapshot: Boolean = false,
     canWrite: Boolean = false,
     equippableOverrides: Set<String> = emptySet(),
+    layout: List<InventoryLayoutEntry> = emptyList(),
+    isLocal: Boolean = false,
 ): InventoryUiState {
-    val sections = buildList {
-        if (board.equipped.isNotEmpty()) {
-            add(
-                InventorySectionState(
-                    kind = InventorySectionKind.EQUIPPED,
-                    key = "equipped",
-                    weight = formatAmount(board.equipped.sumOf { it.totalWeightLb }),
-                    rows = board.equipped.map { it.toRow(equippableOverrides) },
-                ),
-            )
+    // 11 decision 3. Grouped rather than filtered three times so the partition is provably
+    // total: every carried item lands in exactly one of the three, because `EquipGroup` has
+    // exactly three values and `of` is exhaustive over them.
+    val carried = board.carried.groupBy { InventorySectionKind.of(it.equipGroup) }
+    // K9 — see the KDoc above. `contents` is already coin- and removed-filtered, so an empty one
+    // means there is nothing displayable, and the shell's weight is counted by the board's client
+    // sum whether or not this section exists.
+    val containers = board.containers.filter { it.contents.isNotEmpty() }
+
+    // 12 decision 1's order, restricted to the sections this character actually has. This is the
+    // vocabulary `InventoryLayoutPlan` arranges; a key that is not in here cannot be ordered,
+    // which is exactly how a vanished container drops out harmlessly (decision 4).
+    val defaultKeys = buildList {
+        // Unconditional: the wallet is the one section that exists on every character, including
+        // one carrying nothing (10 decision 5). It is in the *order* even when the player has
+        // folded it away, because the fold is a position too — see `InventoryLayoutPlan.move`.
+        add(InventoryLayoutKeys.WALLET)
+        if (board.equipped.isNotEmpty()) add(InventoryLayoutKeys.EQUIPPED)
+        if (carried[InventorySectionKind.WEAPONS].orEmpty().isNotEmpty()) {
+            add(InventoryLayoutKeys.WEAPONS)
         }
-        // K9 — see the KDoc above. `contents` is already coin- and removed-filtered, so an
-        // empty one means there is nothing displayable, and the shell's weight is counted by
-        // the board's client sum whether or not this section exists.
-        board.containers
-            .filter { it.contents.isNotEmpty() }
-            .forEach { add(it.toSection(equippableOverrides)) }
-        // 11 decision 3. Grouped rather than filtered three times so the partition is provably
-        // total: every carried item lands in exactly one of the three, because `EquipGroup` has
-        // exactly three values and `of` is exhaustive over them.
-        val carried = board.carried.groupBy { InventorySectionKind.of(it.equipGroup) }
-        CARRIED_SECTION_ORDER.forEach { kind ->
-            val items = carried[kind].orEmpty()
-            if (items.isEmpty()) return@forEach
-            add(
-                InventorySectionState(
-                    kind = kind,
-                    key = kind.name.lowercase(Locale.ROOT),
-                    weight = formatAmount(items.sumOf { it.totalWeightLb }),
-                    rows = items.map { it.toRow(equippableOverrides) },
-                ),
+        if (carried[InventorySectionKind.ARMOR].orEmpty().isNotEmpty()) {
+            add(InventoryLayoutKeys.ARMOR)
+        }
+        containers.forEach { add(InventoryLayoutKeys.container(it.propertyId)) }
+        // Gear is in the order whenever anything *could* land in it — its own items, or anything
+        // foldable. Keyed on "could" rather than on "does" because the fold has not been computed
+        // yet and computing it needs the resolved order: a character carrying only weapons has no
+        // Gear section until the moment they fold Weapons away, and Gear has to already have a
+        // place for it to fold into. An entry whose section turns out empty simply draws nothing.
+        if (board.carried.isNotEmpty() || containers.isNotEmpty()) add(InventoryLayoutKeys.GEAR)
+    }
+    val resolved = InventoryLayoutPlan.resolve(defaultKeys, layout)
+    val hidden = resolved.filter { it.hidden }.map { it.key }.toSet()
+
+    // Decision 3's invariant, and the one place it is implemented: every item a hidden section
+    // would have shown is added to Gear's rows instead. Note what is *not* here — no branch drops
+    // an item — which is what makes "fold, never vanish" a property of the code rather than a
+    // promise in a KDoc. `InventoryUiStateTest` pins the item count across every hide combination.
+    //
+    // The folded rows arrive **after** Gear's own, in decision 1's section order rather than in
+    // the player's: Gear is the section they did not touch, so its contents should not reshuffle
+    // when an unrelated section is folded, and hidden sections carry no order the player can see.
+    val foldedIntoGear = buildList {
+        if (InventoryLayoutKeys.WEAPONS in hidden) {
+            addAll(carried[InventorySectionKind.WEAPONS].orEmpty())
+        }
+        if (InventoryLayoutKeys.ARMOR in hidden) {
+            addAll(carried[InventorySectionKind.ARMOR].orEmpty())
+        }
+        containers
+            .filter { InventoryLayoutKeys.container(it.propertyId) in hidden }
+            .forEach { addAll(it.contents) }
+    }
+    val gearItems = carried[InventorySectionKind.GEAR].orEmpty() + foldedIntoGear
+
+    // The section one key draws, or `null` when it has no rows to draw. Called **twice** on
+    // purpose — once for the tab and once for the customize sheet — so the two cannot disagree
+    // about what a section is called or what it weighs. See `InventoryCustomizeState`.
+    //
+    // Every branch but Gear's is the section's own items; Gear's is `gearItems`, which already
+    // has everything folded in. A folded Weapons section still resolves here to its own rows,
+    // which is what the sheet needs to name a row the tab is not drawing.
+    fun sectionFor(key: String): InventorySectionState? = when {
+        key == InventoryLayoutKeys.EQUIPPED -> board.equipped
+            .toSection(InventorySectionKind.EQUIPPED, key, equippableOverrides, isLocal)
+
+        key == InventoryLayoutKeys.WEAPONS -> carried[InventorySectionKind.WEAPONS].orEmpty()
+            .toSection(InventorySectionKind.WEAPONS, key, equippableOverrides, isLocal)
+
+        key == InventoryLayoutKeys.ARMOR -> carried[InventorySectionKind.ARMOR].orEmpty()
+            .toSection(InventorySectionKind.ARMOR, key, equippableOverrides, isLocal)
+
+        key == InventoryLayoutKeys.GEAR ->
+            gearItems.toSection(InventorySectionKind.GEAR, key, equippableOverrides, isLocal)
+
+        InventoryLayoutKeys.isContainer(key) -> containers
+            .firstOrNull { InventoryLayoutKeys.container(it.propertyId) == key }
+            ?.toSection(equippableOverrides, isLocal)
+
+        // A key naming nothing this build knows about. Unreachable today — `resolve` only ever
+        // returns keys from `defaultKeys` — and `null` rather than an `error` so that a future
+        // section key read off a newer install's preferences file is a section that does not
+        // draw, not a crash on the inventory tab.
+        else -> null
+    }
+
+    val walletUi = board.wallet.toUiState()
+
+    val blocks = resolved.filterNot { it.hidden }.mapNotNull { entry ->
+        if (entry.key == InventoryLayoutKeys.WALLET) {
+            InventoryBlock.Wallet
+        } else {
+            sectionFor(entry.key)?.let(InventoryBlock::Items)
+        }
+    }
+
+    // Every entry, folded ones included — a section the tab is not drawing a header for still has
+    // to be listed in the sheet or there would be no way to bring it back.
+    val customizeRows = resolved.mapNotNull { entry ->
+        if (entry.key == InventoryLayoutKeys.WALLET) {
+            InventoryCustomizeRow(
+                key = InventoryLayoutKeys.WALLET,
+                titleRes = R.string.inventory_section_wallet,
+                // No weight, by 10 decision 10: the coins count towards the top line and print no
+                // section figure. The coin line is the distinguishing fact instead.
+                summary = walletUi.summary,
+                hidden = entry.hidden,
+                canHide = InventoryLayoutKeys.isHideable(entry.key),
             )
+        } else {
+            sectionFor(entry.key)?.let { section ->
+                InventoryCustomizeRow(
+                    key = entry.key,
+                    titleRes = section.kind.titleRes,
+                    containerName = section.containerName,
+                    // What the section weighs is what tells two same-named pouches apart, which
+                    // is the job the tracker sheet's `detail` does. No new copy for it: the
+                    // number is already formatted and "lb" is already a string.
+                    weightLabel = section.weight,
+                    hidden = entry.hidden,
+                    canHide = InventoryLayoutKeys.isHideable(entry.key),
+                )
+            }
         }
     }
 
     return InventoryUiState(
         creatureId = creatureId,
-        wallet = board.wallet.toUiState(),
-        sections = sections,
+        wallet = walletUi,
+        blocks = blocks,
+        customize = InventoryCustomizeState(customizeRows),
         carriedWeight = formatAmount(board.carriedWeightLb),
         capacityWeight = board.capacityLb?.let { formatAmount(it.toDouble()) },
         isOverCapacity = board.isOverCapacity,
         // 10 decision 9's gate, and the only place it is applied.
         attunement = if (board.hasAttunementData) AttunementChipState(board.attunedCount) else null,
+        // 12 decision 8. Built from `board.containers` and **not** from the `containers` local
+        // above, which is emptiness-filtered for the section list (K9) — an empty pouch is the
+        // most useful destination there is, and filtering it out here would have hidden exactly
+        // the containers a player is trying to fill. See `InventoryUiState.moveTargets`.
+        //
+        // Empty on a local character: `LocalInventoryBoard` produces no containers, so the list
+        // is empty by construction rather than by a branch on `isLocal`. The control is gated on
+        // `isLocal` anyway (`InventoryRowState.showsMoveControl`), which is the rule; this is
+        // the data agreeing with it.
+        moveTargets = buildList {
+            // The carried root first, because it is the destination that always exists and the
+            // one every container's contents came out of.
+            add(InventoryMoveTargetState(containerId = null))
+            board.containers.forEach {
+                add(InventoryMoveTargetState(containerId = it.propertyId, name = it.name))
+            }
+        },
         canWrite = canWrite,
         // Identical to TrackerUiState.isLoading: nothing discovered, nothing cached, and the
         // socket not yet live. A board that is empty because the character genuinely owns
@@ -591,19 +1003,38 @@ private fun Wallet.toUiState(): WalletUiState = WalletUiState(
 )
 
 /**
- * The order Carried's three subsections render in (11 decision 3).
+ * A list of items as a drawable section, or `null` when the list is empty.
  *
- * Named rather than left to `EquipGroup`'s declaration order, because this is a *presentation*
- * decision — what a player scans for first at the table — and the model's enum order is free to
- * change for its own reasons without silently reordering this screen.
+ * The "absent when empty" rule from [toInventoryUiState]'s KDoc, in one place for all four
+ * non-container sections.
+ *
+ * The weight is a **client sum over exactly the rows shown**, which is what keeps a folded Gear
+ * header honest: fold two containers into it and its figure grows by what actually arrived, with
+ * no rollup to disagree with. Container headers keep the server's rollup for their own reasons —
+ * see [toInventoryUiState].
+ *
+ * [key] is a parameter rather than derived from [kind] because [InventorySectionKind.CONTAINER]
+ * has no single key; see [InventoryLayoutKeys] for why the persisted vocabulary is not the enum's
+ * names.
  */
-private val CARRIED_SECTION_ORDER = listOf(
-    InventorySectionKind.WEAPONS,
-    InventorySectionKind.ARMOR,
-    InventorySectionKind.GEAR,
-)
+private fun List<InventoryItem>.toSection(
+    kind: InventorySectionKind,
+    key: String,
+    equippableOverrides: Set<String>,
+    isLocal: Boolean,
+): InventorySectionState? = takeIf { it.isNotEmpty() }?.let { items ->
+    InventorySectionState(
+        kind = kind,
+        key = key,
+        weight = formatAmount(items.sumOf { it.totalWeightLb }),
+        rows = items.map { it.toRow(equippableOverrides, isLocal) },
+    )
+}
 
-private fun InventoryItem.toRow(equippableOverrides: Set<String>): InventoryRowState =
+private fun InventoryItem.toRow(
+    equippableOverrides: Set<String>,
+    isLocal: Boolean,
+): InventoryRowState =
     InventoryRowState(
         propertyId = propertyId,
         name = name,
@@ -616,15 +1047,26 @@ private fun InventoryItem.toRow(equippableOverrides: Set<String>): InventoryRowS
         attuned = attuned,
         isEquippable = isEquippable,
         equippableOverridden = propertyId in equippableOverrides,
+        containerId = containerId,
+        // 12 decision 7's coin exclusion, computed from the item's own tags rather than from
+        // which section it landed in. `InventoryEngine` already routes every coin-tagged item
+        // into the wallet, so on a server board this is redundant today — and it is here
+        // anyway, because "no delete on coins" is a rule about the item and not about the
+        // board that happened to place it. See `InventoryRowState.isCoin`.
+        isCoin = CoinKind.fromTags(tags + libraryTags) != null,
+        isLocal = isLocal,
     )
 
-private fun InventoryContainer.toSection(equippableOverrides: Set<String>): InventorySectionState =
+private fun InventoryContainer.toSection(
+    equippableOverrides: Set<String>,
+    isLocal: Boolean,
+): InventorySectionState =
     InventorySectionState(
         kind = InventorySectionKind.CONTAINER,
-        key = "container:$propertyId",
+        key = InventoryLayoutKeys.container(propertyId),
         // Blank falls back to the generic title rather than rendering an empty header. A sheet
         // is allowed to have an unnamed property; a section with no heading is not.
         containerName = name.takeIf { it.isNotBlank() },
         weight = formatAmount(displayWeightLb),
-        rows = contents.map { it.toRow(equippableOverrides) },
+        rows = contents.map { it.toRow(equippableOverrides, isLocal) },
     )

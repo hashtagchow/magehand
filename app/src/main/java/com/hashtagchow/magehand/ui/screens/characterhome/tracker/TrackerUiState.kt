@@ -714,6 +714,18 @@ fun TrackerWrite.describe(): String = when (kind) {
     // quiver on the sheet for the first time are different events, and the history sheet is
     // read to answer "what did I do?". Only one of the two can be undone, too.
     TrackerWriteKind.ITEM_CREATE -> "New item: $amount × $targetName"
+    // FR-9. "Deleted" and not "Removed": the sheet's own vocabulary for a soft-removed
+    // property is `removed`, and reusing that word here would invite the reading that the item
+    // is somewhere the player could go and look at. It is off the sheet, and the only route
+    // back is the UNDO this entry offers (on a DiceCloud character — see
+    // `OpenCharacter.removeItem` for why a local delete files the same sentence with no
+    // button). `amount` is 1 and says nothing: you delete the item, not some of it.
+    TrackerWriteKind.ITEM_DELETE -> "Deleted $targetName"
+    TrackerWriteKind.ITEM_RESTORE -> "Restored $targetName"
+    // The destination is deliberately absent. It is resolved inside `:core:data` against the
+    // live sheet — this layer never learns the folder's name — and "Moved Belt Pouch" is the
+    // fact a player is scanning the history for anyway. The undo puts it back regardless.
+    TrackerWriteKind.ITEM_MOVE -> "Moved $targetName"
     TrackerWriteKind.TOGGLE -> "Toggled $targetName"
     TrackerWriteKind.SHORT_REST -> "Short rest"
     TrackerWriteKind.LONG_REST -> "Long rest"

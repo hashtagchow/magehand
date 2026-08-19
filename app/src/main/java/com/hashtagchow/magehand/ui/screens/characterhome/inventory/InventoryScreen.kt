@@ -75,6 +75,22 @@ data class InventoryActions(
 
     /** A row was tapped: open its detail sheet (10 decision 7). */
     val onRowTap: (propertyId: String) -> Unit = {},
+
+    /**
+     * The detail sheet's Delete, **after** its destructive confirm (FR-9, 12 decision 7).
+     *
+     * Not on the list, and for a stronger version of the reason the quantity stepper is not:
+     * a stepper on every row is clutter, a delete on every row is a mis-tap that costs the
+     * player an item. It is two deliberate taps deep — open the item, confirm — which is the
+     * ratio decision 7's "destructive confirm" is asking for.
+     */
+    val onDelete: (propertyId: String) -> Unit = {},
+
+    /**
+     * A destination was picked in "Move to…" (12 decision 8). `containerId` is `null` for the
+     * carried root — see `InventoryMoveTargetState`.
+     */
+    val onMove: (propertyId: String, containerId: String?) -> Unit = { _, _ -> },
 )
 
 /**
@@ -137,44 +153,54 @@ fun InventoryTab(
         ) {
             item(key = "summary") { InventorySummary(state) }
 
-            // Always present, always four rows, even on a sheet carrying no coins at all
-            // (10 decision 5). "You have no silver" and "this app could not find your silver"
-            // look identical when the row is simply missing, and only one of them is true.
-            // FR-11 collapses the *steppers*, never the section: the header and its summary
-            // are always on screen, so the money is never a thing the player has to go find.
-            item(key = "wallet-header") {
-                WalletHeader(
-                    wallet = state.wallet,
-                    expanded = walletExpanded,
-                    onToggle = { walletExpanded = !walletExpanded },
-                )
-            }
-            if (walletExpanded) {
-                item(key = "wallet") {
-                    WalletRows(
-                        wallet = state.wallet,
-                        canWrite = state.canWrite,
-                        onDelta = actions.onCoinDelta,
-                    )
-                }
-            }
+            // 12 decisions 1 and 3: the order is the player's, and so is whether the wallet is
+            // on the tab at all — so this walks one list rather than drawing the wallet and then
+            // the sections. See `InventoryBlock`.
+            state.blocks.forEach { block ->
+                when (block) {
+                    // Always four rows, even on a sheet carrying no coins at all (10 decision 5):
+                    // "you have no silver" and "this app could not find your silver" look
+                    // identical when the row is simply missing, and only one of them is true.
+                    // FR-11 collapses the *steppers*, never the block: while the wallet is on the
+                    // tab, its header and summary are always on screen.
+                    is InventoryBlock.Wallet -> {
+                        item(key = "wallet-header") {
+                            WalletHeader(
+                                wallet = state.wallet,
+                                expanded = walletExpanded,
+                                onToggle = { walletExpanded = !walletExpanded },
+                            )
+                        }
+                        if (walletExpanded) {
+                            item(key = "wallet") {
+                                WalletRows(
+                                    wallet = state.wallet,
+                                    canWrite = state.canWrite,
+                                    onDelta = actions.onCoinDelta,
+                                )
+                            }
+                        }
+                    }
 
-            state.sections.forEach { section ->
-                item(key = "${section.key}-header") {
-                    SectionHeader(
-                        title = section.containerName
-                            ?: stringResource(section.kind.titleRes),
-                        weight = section.weight,
-                        testTag = "inventory:section:${section.key}",
-                    )
-                }
-                items(section.rows, key = { "${section.key}-${it.propertyId}" }) { row ->
-                    InventoryRow(
-                        row = row,
-                        canWrite = state.canWrite,
-                        onEquip = actions.onEquip,
-                        onTap = actions.onRowTap,
-                    )
+                    is InventoryBlock.Items -> {
+                        val section = block.section
+                        item(key = "${section.key}-header") {
+                            SectionHeader(
+                                title = section.containerName
+                                    ?: stringResource(section.kind.titleRes),
+                                weight = section.weight,
+                                testTag = "inventory:section:${section.key}",
+                            )
+                        }
+                        items(section.rows, key = { "${section.key}-${it.propertyId}" }) { row ->
+                            InventoryRow(
+                                row = row,
+                                canWrite = state.canWrite,
+                                onEquip = actions.onEquip,
+                                onTap = actions.onRowTap,
+                            )
+                        }
+                    }
                 }
             }
 
@@ -432,9 +458,11 @@ private fun InventoryRow(
     onTap: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val equipDescription = stringResource(
-        if (row.equipped) R.string.inventory_unequip else R.string.inventory_equip,
-        row.name,
+    // 12 decision 2. The rule — which verb, and that the state fragment appears only when the
+    // item is equipped — lives on the row where a test can call it; this resolves the copy.
+    val equipDescription = row.spokenEquipLabel(
+        equippedLabel = stringResource(R.string.inventory_chip_equipped),
+        action = stringResource(row.equipActionRes),
     )
     val openDescription = stringResource(R.string.inventory_open_detail, row.name)
 
@@ -487,7 +515,10 @@ private fun InventoryRow(
                 selected = row.equipped,
                 onClick = { onEquip(row.propertyId, !row.equipped) },
                 enabled = canWrite,
-                label = { Text(stringResource(R.string.inventory_section_equipped), maxLines = 1) },
+                // "Equip" while it is off, "Equipped" while it is on (12 decision 2). The chip
+                // used to read one word in both states and leave the difference to its tint,
+                // which is legible only when the two are side by side.
+                label = { Text(stringResource(row.equipChipLabelRes), maxLines = 1) },
                 modifier = Modifier
                     .semantics { contentDescription = equipDescription }
                     .testTag("inventory:row:${row.propertyId}:equip"),

@@ -24,8 +24,11 @@ import com.hashtagchow.magehand.core.data.characters.RoomCharacterCache
 import com.hashtagchow.magehand.core.data.db.AccountEntity
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
 import com.hashtagchow.magehand.core.data.fake.FakeEquippableOverrideStore
+import com.hashtagchow.magehand.core.data.fake.FakeInventoryLayoutStore
 import com.hashtagchow.magehand.core.data.fake.FakeSelectedRollStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.db.ThemePrefEntity
 import com.hashtagchow.magehand.core.data.db.TrackerPrefEntity
@@ -71,6 +74,7 @@ class DefaultAccountRepositoryTest {
      */
     private val selectedRolls = FakeSelectedRollStore()
     private val equippableOverrides = FakeEquippableOverrideStore()
+    private val inventoryLayouts = FakeInventoryLayoutStore()
 
     @Before
     fun setUp() {
@@ -99,6 +103,7 @@ class DefaultAccountRepositoryTest {
             themePrefDao = database.themePrefDao(),
             selectedRollStore = selectedRolls,
             equippableOverrideStore = equippableOverrides,
+            inventoryLayoutStore = inventoryLayouts,
             now = { clock },
             newId = { "acct-${++idCounter}" },
         )
@@ -364,6 +369,13 @@ class DefaultAccountRepositoryTest {
             "the equippability overrides must be gone: ${equippableOverrides.keys}",
             equippableOverrides.keys.isEmpty(),
         )
+        // FR-14 (12 decision 5). The third per-character store to be reaped here, and the reason
+        // it is asserted beside the other two rather than trusted: the store is wired in one line
+        // that nothing else would notice the absence of.
+        assertTrue(
+            "the inventory layout must be gone: ${inventoryLayouts.keys}",
+            inventoryLayouts.keys.isEmpty(),
+        )
     }
 
     @Test
@@ -393,6 +405,11 @@ class DefaultAccountRepositoryTest {
             setOf(EquippableOverrideStore.serverKey(bob.id, CREATURE_ID)),
             equippableOverrides.keys,
         )
+        assertEquals(
+            "nor is bob's inventory layout",
+            setOf(InventoryLayoutStore.serverKey(bob.id, CREATURE_ID)),
+            inventoryLayouts.keys,
+        )
     }
 
     /** One row in every per-account store, so a missed `deleteForAccount` cannot pass. */
@@ -411,6 +428,10 @@ class DefaultAccountRepositoryTest {
             EquippableOverrideStore.serverKey(accountId, CREATURE_ID),
             "prop-1",
             overridden = true,
+        )
+        inventoryLayouts.setLayout(
+            InventoryLayoutStore.serverKey(accountId, CREATURE_ID),
+            listOf(InventoryLayoutEntry("wallet", hidden = true)),
         )
     }
 

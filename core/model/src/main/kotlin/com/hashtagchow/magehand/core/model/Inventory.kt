@@ -441,6 +441,40 @@ data class InventoryBoard(
 }
 
 /**
+ * Where "Move to…" can put an item (docs/design/12-inventory-layout.md decision 8).
+ *
+ * ### Why this is not a `parentRef`
+ *
+ * The wire shape the move ends up as is `organize.organizeDoc {docRef, parentRef, order}`, and
+ * `parentRef` is `{id, collection}` — DiceCloud's vocabulary, including the collection name.
+ * Handing that to `:app` would put a piece of the DDP schema in the composable that draws the
+ * picker, which is exactly the seam `WritePostureTest` exists to hold shut: the UI names an
+ * *intent* and a target the player can see, and `:core:data` turns it into a method call.
+ *
+ * So the two cases here are the two things the player is actually choosing between — a
+ * container on their sheet, or "loose in my pack" — and the collection, the folder id behind
+ * "Carried" and the `order` are all resolved against the live sheet at call time by
+ * `InventoryEngine.moveTarget`. That resolution is the same one `insertTarget` already does
+ * for a newly added item, re-used rather than re-derived, because `equip` moves items between
+ * those same tagged folders and a remembered id would go stale (10 decision 6).
+ */
+sealed interface InventoryMoveTarget {
+
+    /**
+     * The carried root — the `carried`-tagged folder, or whatever `insertTarget`'s preference
+     * order resolves to on a sheet that has none.
+     *
+     * Deliberately **not** modelled as `Container(null)`: "no container" and "the container
+     * whose id I could not determine" would then be the same value, and only one of them is a
+     * destination anybody chose.
+     */
+    data object Carried : InventoryMoveTarget
+
+    /** A `container` property on the sheet, by its `creatureProperties._id`. */
+    data class Container(val propertyId: String) : InventoryMoveTarget
+}
+
+/**
  * A new item to create — the catalog's "add" and the custom form's "save", as one type.
  *
  * The two paths differ only in where the fields came from, so they are one spec rather than

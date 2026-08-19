@@ -8,6 +8,7 @@ import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.InventoryBoard
+import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.WalletRow
@@ -95,6 +96,21 @@ class FakeOpenCharacter(
 
     override fun addItem(spec: NewItemSpec) {
         writes += "add ${spec.name} ${spec.quantity}"
+    }
+
+    override fun removeItem(propertyId: String, targetName: String) {
+        writes += "remove $propertyId"
+    }
+
+    override fun moveItem(propertyId: String, targetParent: InventoryMoveTarget, targetName: String) {
+        // The destination is spelled out rather than `toString()`d so a test reading these
+        // strings can tell "the carried root" from "a container that happens to be named
+        // Carried" — which is the one distinction the two branches exist to keep apart.
+        val where = when (targetParent) {
+            is InventoryMoveTarget.Carried -> "carried"
+            is InventoryMoveTarget.Container -> targetParent.propertyId
+        }
+        writes += "move $propertyId $where"
     }
 
     override fun adjustCoins(row: WalletRow, delta: Int) {
