@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
@@ -45,6 +46,10 @@ import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.ui.navigation.CharacterHomeTab
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryActions
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryTab
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.ItemDetailSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpNumberPadDialog
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.RestConfirmDialog
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ShakeSignal
@@ -55,6 +60,7 @@ import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerHistoryS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerTab
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.describe
 import com.hashtagchow.magehand.ui.theme.MageHandTheme
+import com.hashtagchow.magehand.ui.theme.mageHandIconButtonColors
 import com.hashtagchow.magehand.ui.webview.SheetWebViewHost
 import com.hashtagchow.magehand.ui.webview.rememberSheetWebViewState
 
@@ -89,6 +95,10 @@ fun CharacterHomeScreen(
     var customizeOpen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var hpPadOpen by rememberSaveable { mutableStateOf(false) }
+    var addItemOpen by rememberSaveable { mutableStateOf(false) }
+    // The *id* of the item whose detail sheet is open, not the row — see `InventoryUiState.row`.
+    // `rememberSaveable` so a rotation mid-read does not shut the sheet.
+    var detailItemId by rememberSaveable { mutableStateOf<String?>(null) }
     // Survives the sheet going live under it on purpose: the sheet then renders its LIVE
     // copy rather than vanishing mid-read. See TrackerConnectionSheet.
     var connectionOpen by rememberSaveable { mutableStateOf(false) }
@@ -209,6 +219,24 @@ fun CharacterHomeScreen(
                                 )
                             }
                         }
+                        // FR-8's add affordance lives in the app bar, beside the tracker's
+                        // rest/history/customize actions, for the reason those are there:
+                        // it belongs to *one tab* and the bar is where this screen already
+                        // puts per-tab actions. A FAB would have floated over the last
+                        // Carried row on every scroll, on the one tab that is a long list.
+                        if (selectedTab == CharacterHomeTab.Inventory) {
+                            IconButton(
+                                onClick = { addItemOpen = true },
+                                enabled = uiState.inventory.canWrite,
+                                colors = mageHandIconButtonColors(),
+                                modifier = Modifier.testTag("inventory:add"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Add,
+                                    contentDescription = stringResource(R.string.inventory_add),
+                                )
+                            }
+                        }
                         IconButton(onClick = onSettingsClick) {
                             Icon(
                                 imageVector = Icons.Filled.Settings,
@@ -248,6 +276,16 @@ fun CharacterHomeScreen(
                             onConnectionDetails = { connectionOpen = true },
                         ),
                         shake = shake,
+                    )
+
+                    CharacterHomeTab.Inventory -> InventoryTab(
+                        state = uiState.inventory,
+                        actions = InventoryActions(
+                            onEquip = viewModel::setEquipped,
+                            onCoinDelta = viewModel::adjustCoins,
+                            onQuantityDelta = viewModel::adjustItemQuantity,
+                            onRowTap = { detailItemId = it },
+                        ),
                     )
 
                     CharacterHomeTab.Sheet ->
@@ -296,6 +334,33 @@ fun CharacterHomeScreen(
                     state = uiState.tracker,
                     onConfirm = { viewModel.rest(kind) },
                     onDismiss = { restToConfirm = null },
+                )
+            }
+
+            // Re-resolved from the *current* state every recomposition, so a sync landing
+            // under an open sheet updates it. See `InventoryUiState.row`.
+            val detailRow = detailItemId?.let { uiState.inventory.row(it) }
+            if (detailItemId != null && detailRow == null) {
+                // The item stopped existing underneath an open sheet — another client
+                // removed it. Closing in an effect rather than inline: writing state during
+                // composition is how a recomposition loop starts, and this path is rare
+                // enough that nobody would ever reproduce the loop to find it.
+                LaunchedEffect(detailItemId) { detailItemId = null }
+            }
+            detailRow?.let { row ->
+                ItemDetailSheet(
+                    row = row,
+                    canWrite = uiState.inventory.canWrite,
+                    onQuantityDelta = viewModel::adjustItemQuantity,
+                    onEquip = viewModel::setEquipped,
+                    onDismiss = { detailItemId = null },
+                )
+            }
+
+            if (addItemOpen) {
+                AddItemSheet(
+                    onAdd = viewModel::addItem,
+                    onDismiss = { addItemOpen = false },
                 )
             }
 

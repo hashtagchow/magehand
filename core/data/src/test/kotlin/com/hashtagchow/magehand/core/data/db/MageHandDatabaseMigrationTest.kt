@@ -335,10 +335,231 @@ class MageHandDatabaseMigrationTest {
 
         dao.save(
             LocalCharacterEntity(
-                "local-1", "Brambles", null, 10, 10, 10, 10, 10, 10, 10, 10, 10, 1, 1,
+                id = "local-1",
+                name = "Brambles",
+                level = null,
+                strength = 10,
+                dexterity = 10,
+                constitution = 10,
+                intelligence = 10,
+                wisdom = 10,
+                charisma = 10,
+                maxHp = 10,
+                currentHp = 10,
+                armorClass = 10,
+                createdAt = 1,
+                updatedAt = 1,
             ),
             listOf(LocalTrackerRowEntity("row-1", "local-1", "resource", "Rage", 3, 3, "longRest", 0)),
         )
+        assertEquals(1, dao.getRows("local-1").size)
+
+        dao.delete("local-1")
+
+        assertNull(dao.find("local-1"))
+        assertTrue("rows outlived their character", dao.getRows("local-1").isEmpty())
+    }
+
+    // --- v3 → v4 (FR-8) -----------------------------------------------------
+
+    /**
+     * The upgrade every 1.2.x install will take, against the schema that is actually in the
+     * field — and the first migration in this app's life that **alters existing tables**
+     * rather than adding new ones.
+     *
+     * That is what makes populating them first non-optional: 1→2 and 2→3 could not lose data
+     * because they named no existing table, while this one names both local tables. "Additive"
+     * is a claim about what did not happen, and the only way to test it is to have a character
+     * and their rows sitting there that could have been lost.
+     */
+    @Test
+    fun `migrating v3 to v4 preserves every local character and every tracker row`() = runTest {
+        createDatabaseAtVersion(3).use { v3 ->
+            v3.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', 3, 8, 14, 12, 16, 10, 13, 22, 17, 15, 100, 200)",
+            )
+            v3.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, resetRule, sortIndex) " +
+                    "VALUES ('row-1', 'local-1', 'slot', '1st Level', 4, 2, 'longRest', 0)",
+            )
+            v3.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, resetRule, sortIndex) " +
+                    "VALUES ('row-2', 'local-1', 'item', 'Healing Potion', 3, 3, 'none', 1)",
+            )
+        }
+
+        val db = openCurrent()
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
+
+        val dao = db.localCharacterDao()
+        with(dao.find("local-1")!!) {
+            assertEquals("Brambles", name)
+            assertEquals(3, level)
+            assertEquals(8, strength)
+            assertEquals(16, intelligence)
+            assertEquals(22, maxHp)
+            // Play state, not form state: an upgrade that silently healed the character back
+            // to full would be a data loss nobody would report as one.
+            assertEquals(17, currentHp)
+            assertEquals(15, armorClass)
+            assertEquals(100L, createdAt)
+            assertEquals(200L, updatedAt)
+        }
+
+        val rows = dao.getRows("local-1")
+        assertEquals(listOf("row-1", "row-2"), rows.map { it.id })
+        with(rows.first()) {
+            assertEquals("1st Level", label)
+            assertEquals(4, total)
+            assertEquals(2, current) // two slots already spent — still spent after the upgrade
+            assertEquals("longRest", resetRule)
+        }
+    }
+
+    /**
+     * The new columns take their defaults on every row that already existed, which is what
+     * `ALTER TABLE … ADD COLUMN … NOT NULL DEFAULT 0` buys — SQLite refuses the statement
+     * without a default, so this is pinning a load-bearing clause rather than a nicety.
+     *
+     * The nullable columns take `NULL`, which is the correct reading of "the player never
+     * gave this row a weight" — true of every row that predates FR-8.
+     */
+    @Test
+    fun `the new v4 columns default correctly on rows that predate them`() = runTest {
+        createDatabaseAtVersion(3).use { v3 ->
+            v3.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 10, 10, 1, 1)",
+            )
+            v3.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, resetRule, sortIndex) " +
+                    "VALUES ('row-1', 'local-1', 'item', 'Torch', 5, 5, 'none', 0)",
+            )
+        }
+
+        val dao = openCurrent().localCharacterDao()
+
+        with(dao.find("local-1")!!) {
+            assertEquals("a pre-FR-8 character is broke, which they are", 0, pp)
+            assertEquals(0, gp)
+            assertEquals(0, sp)
+            assertEquals(0, cp)
+        }
+
+        with(dao.getRows("local-1").single()) {
+            assertNull("a blank weight is an absence, not a zero", weight)
+            assertNull(value)
+            assertNull(description)
+            assertEquals(false, equipped)
+        }
+    }
+
+    /** Round-trips the new columns through the real DAO on a migrated database. */
+    @Test
+    fun `the migrated database stores coins and item details`() = runTest {
+        createDatabaseAtVersion(3).close()
+        val db = openCurrent()
+        val dao = db.localCharacterDao()
+
+        dao.save(
+            LocalCharacterEntity(
+                id = "local-1",
+                name = "Brambles",
+                level = 3,
+                strength = 8,
+                dexterity = 14,
+                constitution = 12,
+                intelligence = 16,
+                wisdom = 10,
+                charisma = 13,
+                maxHp = 22,
+                currentHp = 22,
+                armorClass = 15,
+                pp = 1,
+                gp = 109,
+                sp = 57,
+                cp = 351,
+                createdAt = 100,
+                updatedAt = 100,
+            ),
+            listOf(
+                LocalTrackerRowEntity(
+                    id = "row-1",
+                    characterId = "local-1",
+                    kind = "item",
+                    label = "Quarterstaff",
+                    total = 1,
+                    current = 1,
+                    resetRule = "none",
+                    sortIndex = 0,
+                    weight = 4.0,
+                    value = 0.2,
+                    description = "A simple melee weapon.",
+                    equipped = true,
+                ),
+            ),
+        )
+
+        with(dao.find("local-1")!!) {
+            assertEquals(1, pp)
+            assertEquals(109, gp)
+            assertEquals(57, sp)
+            assertEquals(351, cp)
+        }
+        with(dao.getRows("local-1").single()) {
+            assertEquals(4.0, weight)
+            assertEquals(0.2, value)
+            assertEquals("A simple melee weapon.", description)
+            assertEquals(true, equipped)
+        }
+    }
+
+    /**
+     * The full chain in one open. A device still on v1 must cross three migrations, and the
+     * chained result has to satisfy the same validator the single-step path does — which is
+     * the assertion `openCurrent()` makes on every test here just by succeeding.
+     */
+    @Test
+    fun `migrating from v1 crosses all three migrations and keeps the account`() = runTest {
+        createVersion1Database().use { v1 ->
+            v1.execSQL(
+                "INSERT INTO accounts (id, serverUrl, userId, username, addedAt, lastUsedAt) " +
+                    "VALUES ('acc-1', 'https://dnd.example.com', 'user', 'name', 1, 2)",
+            )
+        }
+
+        val db = openCurrent()
+
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
+        assertEquals(1, db.accountDao().getAll().size)
+        assertTrue("local_characters" in tableNames(db))
+    }
+
+    /**
+     * The foreign key must survive an `ALTER TABLE` on the child table.
+     *
+     * SQLite rebuilds nothing on `ADD COLUMN`, so it should — but "should" is how a migration
+     * that silently starts leaking orphan rows gets shipped. The same assertion the v2→v3 test
+     * makes, re-made after the table has been altered.
+     */
+    @Test
+    fun `the cascade still works after the v4 columns are added`() = runTest {
+        createDatabaseAtVersion(3).use { v3 ->
+            v3.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 10, 10, 1, 1)",
+            )
+            v3.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, resetRule, sortIndex) " +
+                    "VALUES ('row-1', 'local-1', 'resource', 'Rage', 3, 3, 'longRest', 0)",
+            )
+        }
+
+        val dao = openCurrent().localCharacterDao()
         assertEquals(1, dao.getRows("local-1").size)
 
         dao.delete("local-1")
@@ -399,6 +620,6 @@ class MageHandDatabaseMigrationTest {
 
     private companion object {
         /** Keep in step with `@Database(version = …)`. */
-        const val CURRENT_VERSION = 3
+        const val CURRENT_VERSION = 4
     }
 }

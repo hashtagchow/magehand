@@ -27,13 +27,18 @@ import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
+import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
+import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryUiState
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.toInventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.CustomizeSection
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerCustomizeState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerOverridePlan
@@ -52,6 +57,10 @@ import javax.inject.Inject
  * @param tracker the Tracker tab's whole rendered state (04 §3).
  * @param customize the customize bottom sheet's state (04 §5 + §6). Built from the
  *   *unhidden* board, so hidden rows can be brought back.
+ * @param inventory FR-8's tab (docs/design/10-inventory.md). Built from the character's own
+ *   `inventory` flow, **not** from the tracker board: the two answer different questions and
+ *   the tracker's hide/pin override layer has no business reaching the inventory — see
+ *   [CharacterHomeViewModel.adjustItemQuantity].
  */
 data class CharacterHomeUiState(
     val creatureId: String = "",
@@ -60,6 +69,7 @@ data class CharacterHomeUiState(
     val session: SheetSession? = null,
     val tracker: TrackerUiState = TrackerUiState(),
     val customize: TrackerCustomizeState = TrackerCustomizeState(),
+    val inventory: InventoryUiState = InventoryUiState(),
 ) {
     /** The accent seeds the whole character-home subtree, both tabs (04 §Theming). */
     val accentColor: String? get() = tracker.accentColor
@@ -228,6 +238,35 @@ class CharacterHomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * FR-8's tab state (docs/design/10-inventory.md).
+     *
+     * Its own `combine` rather than a field folded into [trackerState], because the two are
+     * built from different sources — `character.inventory` and `character.board` — and folding
+     * them would make every wallet stepper re-derive the whole tracker and every pip tap
+     * re-derive the whole inventory. Four flows, comfortably inside the typed arity.
+     */
+    private val inventoryState: Flow<InventoryUiState> = open.flatMapLatest { character ->
+        if (character == null) {
+            flowOf(InventoryUiState(creatureId = creatureId))
+        } else {
+            combine(
+                character.inventory,
+                character.connectionState,
+                character.isShowingSnapshot,
+                character.canWrite,
+            ) { board, connection, showingSnapshot, canWrite ->
+                toInventoryUiState(
+                    creatureId = creatureId,
+                    board = board,
+                    connection = connection,
+                    isShowingSnapshot = showingSnapshot,
+                    canWrite = canWrite,
+                )
+            }
+        }
+    }
+
     private val customizeState: Flow<TrackerCustomizeState> = open.flatMapLatest { character ->
         if (character == null) {
             flowOf(TrackerCustomizeState())
@@ -248,7 +287,8 @@ class CharacterHomeViewModel @Inject constructor(
         sheetSessionFactory.sessions { SheetSessionFactory.characterPath(creatureId) },
         trackerState,
         customizeState,
-    ) { listState, session, tracker, customize ->
+        inventoryState,
+    ) { listState, session, tracker, customize, inventory ->
         CharacterHomeUiState(
             creatureId = creatureId,
             // The name comes from the list the user just came from. The
@@ -259,6 +299,7 @@ class CharacterHomeViewModel @Inject constructor(
             session = session,
             tracker = tracker,
             customize = customize,
+            inventory = inventory,
         )
     }.stateIn(
         viewModelScope,
@@ -291,6 +332,89 @@ class CharacterHomeViewModel @Inject constructor(
     /** A consumable's − / + stepper. */
     fun adjustItem(propertyId: String, delta: Int) = withRow(propertyId) { character, row ->
         character.adjustItem(row, delta)
+    }
+
+    // --- inventory tab (docs/design/10-inventory.md) --------------------------------
+
+    /**
+     * The row's one-tap equip control (10 decision 4).
+     *
+     * Resolved against the **inventory** board rather than the tracker's, so `currentlyEquipped`
+     * is read from the same list the player is looking at. That argument is what lets
+     * `:core:data` build a correct inverse for undo; passing the composable's idea of the
+     * current state straight through would let one stale frame file an undo entry that puts
+     * the item back the way it already was.
+     *
+     * The server reparents the item and the undo does not restore the folder — stated in full
+     * on `WriteOp.Equip`, and invisible here because 10 decision 2 renders sections by state
+     * and never renders the tree.
+     */
+    fun setEquipped(propertyId: String, equipped: Boolean) {
+        val character = open.value ?: return
+        val item = character.inventory.value.allItems
+            .firstOrNull { it.propertyId == propertyId } ?: return
+        character.setEquipped(
+            propertyId = propertyId,
+            equipped = equipped,
+            currentlyEquipped = item.equipped,
+            targetName = item.name,
+        )
+    }
+
+    /**
+     * The detail sheet's quantity stepper.
+     *
+     * ### Why this does not reuse `withRow`
+     *
+     * Because `withRow` searches `board.allItems`, and that list is **override-filtered**:
+     * `TrackerEngine.order` drops anything the player hid from the tracker. An item hidden
+     * there is still an item they own, so it is still on the inventory tab — and resolving
+     * through the tracker would have made its stepper a control that silently did nothing,
+     * on exactly the rows a player is most likely to have forgotten about. The inventory
+     * board carries no hide layer, so it is the honest place to look.
+     *
+     * The [TrackedResource] is built here rather than carried on the state because
+     * `adjustItem` needs one and `:core:model` is shared: an inventory item and a tracked
+     * item are the same property seen twice, and `value == total` is what a
+     * `TrackerKind.ITEM` row means (see [TrackedResource.total]).
+     */
+    fun adjustItemQuantity(propertyId: String, delta: Int) {
+        val character = open.value ?: return
+        val item = character.inventory.value.allItems
+            .firstOrNull { it.propertyId == propertyId } ?: return
+        character.adjustItem(
+            TrackedResource(
+                propertyId = item.propertyId,
+                kind = TrackerKind.ITEM,
+                name = item.name,
+                value = item.quantity,
+                total = item.quantity,
+            ),
+            delta,
+        )
+    }
+
+    /**
+     * A wallet stepper (10 decision 5).
+     *
+     * Re-resolved from the live wallet so the intent receives the row's real
+     * `propertyId` — including the `null` that means "this sheet has no such coin yet", which
+     * is what turns the first `+` into an insert rather than an adjust. Passing a row captured
+     * at composition would send an id that a sync has since filled in.
+     */
+    fun adjustCoins(coin: CoinKind, delta: Int) {
+        val character = open.value ?: return
+        character.adjustCoins(character.inventory.value.wallet.row(coin), delta)
+    }
+
+    /**
+     * The add-item flow's one call (10 decision 6), for both the catalog and the custom form.
+     *
+     * Not undoable — see `OpenCharacter.addItem`. The screen says so before the tap rather
+     * than leaving the player to notice the missing UNDO on the snackbar.
+     */
+    fun addItem(spec: NewItemSpec) {
+        open.value?.addItem(spec)
     }
 
     /** A condition chip (or the concentration banner's ✕, which is the same write). */

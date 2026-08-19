@@ -1,10 +1,12 @@
 package com.hashtagchow.magehand.core.data.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.hashtagchow.magehand.core.model.AbilityScores
+import com.hashtagchow.magehand.core.model.CoinPurse
 import com.hashtagchow.magehand.core.model.LocalCharacter
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.LocalTrackerRow
@@ -53,6 +55,22 @@ data class LocalCharacterEntity(
     val maxHp: Int,
     val currentHp: Int,
     val armorClass: Int,
+    /**
+     * The four coin columns schema **version 4** adds (docs/design/10-inventory.md decision
+     * 10). Platinum, gold, silver, copper.
+     *
+     * `defaultValue` is declared rather than left to the Kotlin default, and that is what
+     * makes [MIGRATION_3_4] honest: SQLite requires a `DEFAULT` when adding a `NOT NULL`
+     * column to a table that already has rows, so the migrated column *will* carry one. If
+     * the entity did not, a fresh install's `CREATE TABLE` would carry none and the two
+     * schemas would differ in a way Room's validator happens to tolerate — a difference that
+     * is invisible until it is not. Declaring it makes the exported v4 schema and the
+     * migration say the same thing, which is the claim the migration test checks.
+     */
+    @ColumnInfo(defaultValue = "0") val pp: Int = 0,
+    @ColumnInfo(defaultValue = "0") val gp: Int = 0,
+    @ColumnInfo(defaultValue = "0") val sp: Int = 0,
+    @ColumnInfo(defaultValue = "0") val cp: Int = 0,
     val createdAt: Long,
     val updatedAt: Long,
 )
@@ -89,6 +107,18 @@ data class LocalTrackerRowEntity(
      */
     val resetRule: String,
     val sortIndex: Int,
+    /**
+     * The four inventory columns schema **version 4** adds (10 decision 10).
+     *
+     * `weight` and `value` are `REAL?` and `description` is `TEXT?`, because a form field the
+     * player left blank is an absence rather than a zero — see [LocalTrackerRow.weightLb].
+     * `equipped` is `NOT NULL DEFAULT 0`, with the same `defaultValue` discipline the coin
+     * columns get and for the same reason.
+     */
+    val weight: Double? = null,
+    val value: Double? = null,
+    val description: String? = null,
+    @ColumnInfo(defaultValue = "0") val equipped: Boolean = false,
 ) {
     companion object {
         const val RESET_NONE: String = "none"
@@ -112,6 +142,7 @@ fun LocalCharacterEntity.toDomain(): LocalCharacter = LocalCharacter(
     maxHp = maxHp,
     currentHp = currentHp,
     armorClass = armorClass,
+    coins = CoinPurse(platinum = pp, gold = gp, silver = sp, copper = cp),
     createdAt = createdAt,
     updatedAt = updatedAt,
 )
@@ -129,6 +160,10 @@ fun LocalCharacter.toEntity(): LocalCharacterEntity = LocalCharacterEntity(
     maxHp = maxHp,
     currentHp = currentHp,
     armorClass = armorClass,
+    pp = coins.platinum,
+    gp = coins.gold,
+    sp = coins.silver,
+    cp = coins.copper,
     createdAt = createdAt,
     updatedAt = updatedAt,
 )
@@ -149,6 +184,10 @@ fun LocalTrackerRowEntity.toDomain(): LocalTrackerRow? {
         current = current,
         reset = ResetRule.fromWire(resetRule),
         sortIndex = sortIndex,
+        weightLb = weight,
+        valueGp = value,
+        description = description,
+        equipped = equipped,
     )
 }
 
@@ -161,4 +200,8 @@ fun LocalTrackerRow.toEntity(): LocalTrackerRowEntity = LocalTrackerRowEntity(
     current = current,
     resetRule = reset?.wireValue ?: LocalTrackerRowEntity.RESET_NONE,
     sortIndex = sortIndex,
+    weight = weightLb,
+    value = valueGp,
+    description = description,
+    equipped = equipped,
 )

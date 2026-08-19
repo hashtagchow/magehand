@@ -32,8 +32,12 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CharacterSummary
+import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.InventoryBoard
+import com.hashtagchow.magehand.core.model.InventoryItem
+import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.RollModifier
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -43,6 +47,8 @@ import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
 import com.hashtagchow.magehand.core.model.TrackerWriteKind
+import com.hashtagchow.magehand.core.model.Wallet
+import com.hashtagchow.magehand.core.model.WalletRow
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConnectionTone
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.CustomizeSection
 import com.hashtagchow.magehand.ui.webview.SheetSessionFactory
@@ -566,6 +572,159 @@ class CharacterHomeViewModelTest {
 
         assertFalse(vm.uiState.value.tracker.canWrite)
     }
+
+    // --- FR-8: the inventory tab (docs/design/10-inventory.md) -----------------
+
+    private fun inventoryItem(
+        id: String,
+        name: String,
+        quantity: Int = 1,
+        equipped: Boolean = false,
+    ) = InventoryItem(
+        propertyId = id,
+        name = name,
+        quantity = quantity,
+        weightLb = 1.0,
+        valueGp = 1.0,
+        description = null,
+        equipped = equipped,
+    )
+
+    @Test
+    fun `the inventory board flows into its own tab state`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        character.inventory.value = InventoryBoard(
+            equipped = listOf(inventoryItem("i1", "Longsword", equipped = true)),
+            carried = listOf(inventoryItem("i2", "Torch", quantity = 3)),
+            carriedWeightLb = 4.0,
+            capacityLb = 225,
+        )
+        character.connectionState.value = ConnectionState.LIVE
+        advanceUntilIdle()
+
+        val inventory = vm.uiState.value.inventory
+        assertEquals(listOf("Longsword", "Torch"), inventory.sections.flatMap { s -> s.rows.map { it.name } })
+        assertEquals("4", inventory.carriedWeight)
+        assertEquals("225", inventory.capacityWeight)
+    }
+
+    @Test
+    fun `the equip control sends the requested state and the current one`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        character.inventory.value = InventoryBoard(
+            carried = listOf(inventoryItem("i2", "Torch", equipped = false)),
+        )
+        advanceUntilIdle()
+
+        vm.setEquipped("i2", equipped = true)
+        advanceUntilIdle()
+
+        assertEquals(listOf("equip i2 true"), character.writes)
+    }
+
+    @Test
+    fun `an equip aimed at an item the board does not have is dropped, not written blind`() =
+        runTest(dispatcher) {
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            advanceUntilIdle()
+
+            // The row was on screen a frame ago and a re-sync has since removed it.
+            vm.setEquipped("gone", equipped = true)
+            advanceUntilIdle()
+
+            assertTrue(character.writes.isEmpty())
+        }
+
+    @Test
+    fun `the quantity stepper resolves against the inventory board, not the tracker's`() =
+        runTest(dispatcher) {
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            advanceUntilIdle()
+
+            // Deliberately absent from `board.allItems`: that list is override-filtered, so
+            // an item the player hid from the tracker is not in it. It is still an item they
+            // own, so its stepper has to work.
+            character.board.value = TrackerBoard.EMPTY
+            character.inventory.value = InventoryBoard(
+                carried = listOf(inventoryItem("hidden-item", "Rations (1 day)", quantity = 5)),
+            )
+            advanceUntilIdle()
+
+            vm.adjustItemQuantity("hidden-item", -1)
+            advanceUntilIdle()
+
+            assertEquals(listOf("item hidden-item -1"), character.writes)
+        }
+
+    @Test
+    fun `a wallet stepper is re-resolved from the live wallet before it is sent`() =
+        runTest(dispatcher) {
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            advanceUntilIdle()
+
+            character.inventory.value = InventoryBoard(
+                wallet = Wallet(
+                    listOf(
+                        WalletRow(CoinKind.PLATINUM, 0, null),
+                        WalletRow(CoinKind.GOLD, 5, "coin-gp"),
+                        WalletRow(CoinKind.SILVER, 0, null),
+                        WalletRow(CoinKind.COPPER, 0, null),
+                    ),
+                ),
+            )
+            advanceUntilIdle()
+
+            vm.adjustCoins(CoinKind.GOLD, +1)
+            // An absent denomination reaches the intent too — that is the insert path, and
+            // nothing on screen distinguishes it.
+            vm.adjustCoins(CoinKind.SILVER, +1)
+            advanceUntilIdle()
+
+            assertEquals(listOf("coins GOLD 1", "coins SILVER 1"), character.writes)
+        }
+
+    @Test
+    fun `the add flow hands the spec straight to the intent`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        vm.addItem(NewItemSpec(name = "Silvered dagger", quantity = 2))
+        advanceUntilIdle()
+
+        assertEquals(listOf("add Silvered dagger 2"), character.writes)
+    }
+
+    @Test
+    fun `no character open means every inventory intent is a no-op rather than a crash`() =
+        runTest(dispatcher) {
+            val (vm, _) = viewModel(character = null)
+            collecting(vm)
+            advanceUntilIdle()
+
+            vm.setEquipped("i1", equipped = true)
+            vm.adjustItemQuantity("i1", 1)
+            vm.adjustCoins(CoinKind.GOLD, 1)
+            vm.addItem(NewItemSpec(name = "Torch"))
+            advanceUntilIdle()
+
+            assertFalse(vm.uiState.value.inventory.canWrite)
+        }
 
     private fun historyEntry(id: Long, undoable: Boolean = true, undone: Boolean = false) =
         TrackerWrite(

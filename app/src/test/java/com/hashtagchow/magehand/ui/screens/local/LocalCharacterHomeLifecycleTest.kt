@@ -153,6 +153,14 @@ private object EmptyLocalCharacterDao : LocalCharacterDao {
     override suspend fun setRowSortIndex(characterId: String, rowId: String, sortIndex: Int) =
         unreachable()
 
+    // FR-8's three. `maxSortIndex` is a read, so it answers like the other reads rather than
+    // throwing: "no rows" is the honest answer from a DAO that has none.
+    override suspend fun setCoins(id: String, pp: Int, gp: Int, sp: Int, cp: Int, at: Long) =
+        unreachable()
+
+    override suspend fun setRowEquipped(rowId: String, equipped: Boolean) = unreachable()
+    override suspend fun maxSortIndex(characterId: String): Int? = null
+
     override suspend fun refillRows(characterId: String, rules: List<String>) = unreachable()
 
     private fun unreachable(): Nothing =

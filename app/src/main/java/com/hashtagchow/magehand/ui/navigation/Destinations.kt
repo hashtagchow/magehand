@@ -78,8 +78,32 @@ data class LocalCharacterHome(val characterId: String) : Destination
 @Serializable
 data class LocalCharacterEditor(val characterId: String? = null) : Destination
 
-/** The tabs inside [CharacterHome]. Tab state is local, not a nav destination. */
+/**
+ * The tabs inside [CharacterHome]. Tab state is local, not a nav destination.
+ *
+ * **Declaration order is the on-screen order** (both `PrimaryTabRow` and the content `when`
+ * key off it), so FR-8's Inventory sits between Tracker and Sheet by being written there —
+ * docs/design/10-inventory.md decision 1. That placement is not arbitrary: Tracker and
+ * Inventory are both native surfaces the player touches mid-turn, and the Sheet tab is the
+ * WebView fallback for everything neither of them models. Putting Inventory after Sheet would
+ * have filed the app's own screen behind the escape hatch.
+ */
 enum class CharacterHomeTab(val titleResId: Int) {
     Tracker(com.hashtagchow.magehand.R.string.tab_tracker),
+    Inventory(com.hashtagchow.magehand.R.string.tab_inventory),
     Sheet(com.hashtagchow.magehand.R.string.tab_sheet),
+}
+
+/**
+ * The tabs inside [LocalCharacterHome] (10 decision 1: "Tracker · Inventory").
+ *
+ * A separate enum from [CharacterHomeTab] rather than a filtered view of it, for the same
+ * reason the two home screens are separate: a local character has no `SheetSession` for a
+ * Sheet tab to render, and 09 decision 8 requires that the WebView is never instantiated on
+ * this screen. Sharing the enum would make "no Sheet tab" a `filterNot` that a future edit
+ * could drop, instead of a type with no such constant in it.
+ */
+enum class LocalCharacterHomeTab(val titleResId: Int) {
+    Tracker(com.hashtagchow.magehand.R.string.tab_tracker),
+    Inventory(com.hashtagchow.magehand.R.string.tab_inventory),
 }

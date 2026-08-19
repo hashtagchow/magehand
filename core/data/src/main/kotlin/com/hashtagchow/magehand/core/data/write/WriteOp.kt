@@ -1,14 +1,22 @@
 package com.hashtagchow.magehand.core.data.write
 
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.put
 import com.hashtagchow.magehand.core.model.ConditionToggle
+import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerWriteKind
+
+/** How many the insert body asks for, for the history entry's "Added 20 × Arrows". */
+private fun JsonObject.quantityOrZero(): Int =
+    (this["quantity"] as? JsonPrimitive)?.intOrNull ?: 0
 
 /** The three kinds that mean "the row went down" — see [intentForMergedValue]. */
 private val CONSUMPTION_KINDS = setOf(
@@ -303,6 +311,168 @@ sealed class WriteOp {
     }
 
     /**
+     * `creatureProperties.equip {_id, equipped}` — the one-tap equip control (10 decision 4).
+     *
+     * ### The method name
+     *
+     * **`equip`, not `equipItem`.** docs/design/02-ddp-and-api.md named the latter from the
+     * start and nothing had ever called it; the 2026-08-19 probe against the live server
+     * established the real name, and the doc line is corrected in the same cycle (10 decision
+     * 12's ride-along). The parameter shape the doc gave was right.
+     *
+     * ### What the server does with it, honestly stated
+     *
+     * **It reparents the property.** Equipping moves the item under the `equipment`-tagged
+     * folder and unequipping moves it under `carried`; the original parent is not recorded
+     * anywhere and is not restored. That is DiceCloud's own web UI's behaviour, verified live,
+     * and users of that UI already live with it.
+     *
+     * So [inverse] is the opposite `equip` call **and nothing else**. Un-equipping an item
+     * that lived in a backpack puts it in `carried`, not back in the backpack, and undoing
+     * that puts it in `equipment`. The undo returns the *equipped state* the user changed; it
+     * cannot return the tree, because restoring a parent needs `organizeDoc` and a memory of
+     * where the item was, both of which are FR-9's territory (10 decision 12). Recording this
+     * limit rather than quietly shipping a half-undo is the point of this paragraph — and
+     * 10 decision 2's state-based sections are what make it invisible in practice: the
+     * inventory tab never renders the folder an item sits in, so the round trip looks exactly
+     * like nothing happened.
+     *
+     * ### Rate class
+     *
+     * [SLOW_SPACING_MILLIS] — the 5-calls-per-5-seconds class, the same one `adjustQuantity`,
+     * `flipToggle`, `update` and `rest` are in (02 §Method catalog). Only
+     * `creatureProperties.damage` gets the fast 20/5 s class, and equip is emphatically not
+     * damage. The queue enforces spacing **per method name**, so equip taps and quantity taps
+     * do not slow each other down even though they share a class — which is the correct
+     * reading of a server that rate-limits per method.
+     */
+    data class Equip(
+        val propertyId: String,
+        /** The state to put the item into. */
+        val equipped: Boolean,
+        /**
+         * The state it was in before this op — what [inverse] targets.
+         *
+         * Carried rather than derived from `!equipped` so that a **coalesced burst** still
+         * inverts to where it started: four taps merge into one call, and the inverse of that
+         * call is the state before the first tap, not before the last.
+         */
+        val previousEquipped: Boolean,
+        override val targetName: String = "",
+    ) : WriteOp() {
+        override val method: String get() = "creatureProperties.equip"
+        override val targetId: String get() = propertyId
+        override val params: List<JsonElement>
+            get() = listOf(
+                buildJsonObject {
+                    put("_id", propertyId)
+                    put("equipped", equipped)
+                },
+            )
+        override val minSpacingMillis: Long get() = SLOW_SPACING_MILLIS
+
+        override val coalesceKey: String get() = "equip:$propertyId"
+
+        /**
+         * No prediction. The overlay's vocabulary ([OptimisticChange]) covers values and
+         * toggles, and an item's equipped state is neither — it decides which *section* the
+         * row renders in, which is a move rather than a change of one field. Teaching the
+         * overlay to relocate rows between board sections for a call the server answers in
+         * well under a second would be a lot of machinery for a flicker; 10 decision 4 asks
+         * for one tap, not for latency compensation. Wave B dims the control while the write
+         * is outstanding instead.
+         */
+        override val optimistic: OptimisticChange get() = OptimisticChange.None(propertyId)
+
+        override val intent: TrackerWriteKind
+            get() = if (equipped) TrackerWriteKind.EQUIP else TrackerWriteKind.UNEQUIP
+
+        override val magnitude: Int get() = 1
+
+        override val inverse: WriteOp
+            get() = Equip(propertyId, equipped = previousEquipped, previousEquipped = equipped, targetName = targetName)
+
+        /**
+         * A later equip on the same item **supersedes** this one — the last state wins, and
+         * the pair keeps this op's starting point so the undo stays honest.
+         *
+         * A round trip (on → off, or off → on) leaves nothing to say to the server, exactly
+         * like a double [FlipToggle], so it collapses to a [Noop]; a third tap merges back
+         * out of the Noop and N taps cost N mod 2 calls. This matters more here than it does
+         * for a toggle: equip *reparents*, so two calls where one would do is two moves
+         * through the folder tree rather than none.
+         */
+        override fun coalesceWith(other: WriteOp): WriteOp? {
+            if (other !is Equip || other.propertyId != propertyId) return null
+            val merged = other.copy(previousEquipped = previousEquipped)
+            return if (merged.equipped == merged.previousEquipped) Noop(coalesceKey) else merged
+        }
+
+        override val description: String get() = "equip $equipped on $propertyId"
+    }
+
+    /**
+     * `creatureProperties.insert {creatureProperty, parentRef}` — the catalog and custom-form
+     * add path (10 decision 6), and the wallet's first increment on a coin the sheet lacks
+     * (10 decision 5).
+     *
+     * ### `order` is mandatory
+     *
+     * Probe-verified failure mode, 2026-08-19: the server rejects an insert whose
+     * `creatureProperty` body carries no `order`. It is not defaulted and it is not optional,
+     * so [Companion.insertItem] always supplies one and this type takes it as a non-null
+     * constructor parameter rather than as a nullable field with a fallback — a shape that
+     * cannot be built wrong beats one that is validated late.
+     *
+     * ### Not undoable
+     *
+     * [inverse] is `null`. The inverse of creating a property is soft-removing it, and item
+     * deletion is fenced out of this release entirely (10 decision 12 — it is FR-9, along with
+     * container reorganization and parent restoration). Offering an UNDO that called a method
+     * this app has decided not to ship would be worse than offering none.
+     *
+     * The history entry therefore reads as a fact rather than as an offer, which is the shape
+     * [Rest] already established. The one difference from a rest: creating an item invalidates
+     * **nothing** that came before it, so this is not a [isBarrier] and does not clear the
+     * undo stack. Undoing a spend from before an add is still perfectly correct.
+     *
+     * ### No optimistic layer
+     *
+     * The new property's `_id` is minted **by the server**, so there is nothing to key a
+     * prediction on until the call returns — and the subscription delivers the real document
+     * within the same round trip anyway.
+     */
+    data class InsertProperty(
+        /** The property document to create, already shaped for the wire. */
+        val body: JsonObject,
+        /** `{id, collection}` — where it goes. See [Companion.insertItem]. */
+        val parentRef: JsonObject,
+        /** The parent's id, so coalescing's same-target rule has something real to compare. */
+        override val targetId: String,
+        override val targetName: String = "",
+    ) : WriteOp() {
+        override val method: String get() = "creatureProperties.insert"
+        override val params: List<JsonElement>
+            get() = listOf(
+                buildJsonObject {
+                    put("creatureProperty", body)
+                    put("parentRef", parentRef)
+                },
+            )
+        override val minSpacingMillis: Long get() = SLOW_SPACING_MILLIS
+
+        /** Never merged: two adds are two items, and there is no sense in which they sum. */
+        override val coalesceKey: String? get() = null
+
+        override val optimistic: OptimisticChange? get() = null
+        override val inverse: WriteOp? get() = null
+        override val intent: TrackerWriteKind get() = TrackerWriteKind.ITEM_CREATE
+        override val magnitude: Int get() = body.quantityOrZero()
+
+        override val description: String get() = "insert item under $targetId"
+    }
+
+    /**
      * `creature.methods.rest {creatureId, restType}`.
      *
      * **Not undoable** ([inverse] is `null`) and never coalesced: the server applies every
@@ -518,6 +688,103 @@ sealed class WriteOp {
             delta < 0 -> TrackerWriteKind.SPEND
             else -> TrackerWriteKind.RESTORE
         }
+
+        /**
+         * Put an item on or take it off (10 decision 4).
+         *
+         * @param currentlyEquipped the item's state *now*, which is what makes a correct
+         *   inverse possible — the same reason every other factory here captures the row's
+         *   current value.
+         */
+        fun equip(
+            propertyId: String,
+            equipped: Boolean,
+            currentlyEquipped: Boolean,
+            targetName: String = "",
+        ): WriteOp = Equip(
+            propertyId = propertyId,
+            equipped = equipped,
+            previousEquipped = currentlyEquipped,
+            targetName = targetName,
+        )
+
+        /**
+         * Create an item from a [NewItemSpec], parented under [parentId].
+         *
+         * ### The body
+         *
+         * `type`, `name`, `quantity` and **`order`** always; `weight`, `value`, `description`
+         * and `tags` only when the spec states them. Omitting rather than zero-filling is
+         * deliberate and visible on the sheet: DiceCloud renders a `weight: 0` item as
+         * weighing nothing, which is a claim, while an item with no weight field renders as
+         * having none recorded — and a custom item the player did not weigh has not been
+         * weighed. [NewItemSpec.catalogId] is never sent: it is this app's vocabulary and
+         * would be meaningless to anyone opening the sheet in DiceCloud's web UI.
+         *
+         * `description` is sent as **`{text: "…"}`**, not as a plain string.
+         *
+         * This was a bare string until the 1.3.0 pre-release probe, on the reasoning that the
+         * `{text, value, hash, inlineCalculations}` wrapper the server carries is an *output* of
+         * its calculation pass and not an input this app is entitled to fabricate. The reasoning
+         * was wrong and the server says so: `creatureProperties.insert` with a string
+         * description is rejected outright with **`400: Description must be of type Object`**
+         * (probe, 2026-08-19, dicecloud.com). The wrapper is the schema's input type; the
+         * computed siblings are what the server fills in around `text`, which is why supplying
+         * `text` alone is enough.
+         *
+         * Nothing on the read side changes: `InventoryEngine.descriptionText` already prefers
+         * `text` inside the wrapper and falls back to a bare string, so an item created this way
+         * reads back identically to one made in DiceCloud's own UI.
+         *
+         * Only the wallet's coin inserts escaped this — [NewItemSpec.ofCoin] states no
+         * description — which is why the bug survived a green suite: the one live test that
+         * sends a description is this class's own probe, and the probe is opt-in.
+         *
+         * ### `order`
+         *
+         * Mandatory (see [InsertProperty]) and supplied by the caller, because the only
+         * source of a sensible value is the sheet — [DefaultOpenCharacter] passes one past
+         * the current maximum so a new item lands at the end of its section rather than in the
+         * middle of the list the player was just reading.
+         *
+         * ### The parent
+         *
+         * `{id, collection: "creatureProperties"}`, pointing at the `inventory`- or
+         * `carried`-tagged folder (10 decision 6). A tag rather than a remembered id, resolved
+         * against the sheet at call time — see `DefaultOpenCharacter.addItem`.
+         */
+        fun insertItem(
+            spec: NewItemSpec,
+            parentId: String,
+            order: Int,
+            parentCollection: String = COLLECTION_CREATURE_PROPERTIES,
+        ): WriteOp = InsertProperty(
+            body = buildJsonObject {
+                put("type", "item")
+                put("name", spec.name)
+                put("quantity", spec.quantity)
+                // Probe-verified mandatory — the server rejects the insert without it.
+                put("order", order)
+                spec.weightLb?.let { put("weight", it) }
+                spec.valueGp?.let { put("value", it) }
+                spec.description?.takeIf { it.isNotBlank() }?.let {
+                    // Probe-verified: the server rejects a bare string here. See the KDoc.
+                    put("description", buildJsonObject { put("text", it) })
+                }
+                if (spec.tags.isNotEmpty()) {
+                    put("tags", JsonArray(spec.tags.map { JsonPrimitive(it) }))
+                }
+            },
+            parentRef = buildJsonObject {
+                put("id", parentId)
+                put("collection", parentCollection)
+            },
+            targetId = parentId,
+            targetName = spec.name,
+        )
+
+        /** The DDP collection name a `parentRef` names when the parent is a property. */
+        const val COLLECTION_CREATURE_PROPERTIES: String = "creatureProperties"
 
         fun rest(creatureId: String, restType: RestType): WriteOp = Rest(creatureId, restType)
 

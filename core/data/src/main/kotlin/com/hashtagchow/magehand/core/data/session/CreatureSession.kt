@@ -23,11 +23,14 @@ import com.hashtagchow.magehand.core.data.db.TrackerPrefEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
 import com.hashtagchow.magehand.core.data.tracker.CreatureSheet
+import com.hashtagchow.magehand.core.data.tracker.InventoryEngine
 import com.hashtagchow.magehand.core.data.tracker.TrackerEngine
+import com.hashtagchow.magehand.core.data.tracker.isTrue
 import com.hashtagchow.magehand.core.data.write.OptimisticOverlay
 import com.hashtagchow.magehand.core.data.write.WriteQueue
 import com.hashtagchow.magehand.core.data.write.WriteQueueConfig
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import kotlin.time.Duration
@@ -246,10 +249,33 @@ class CreatureSession(
      * The engine's input: the mirror when it holds anything, the Room snapshot otherwise.
      * 06's "mirror state always wins over snapshot", in one place so the two boards below
      * cannot disagree about which source they are reading.
+     *
+     * **"Holds anything" means anything *live*.** The test was `properties.isNotEmpty()`,
+     * which counts soft-deleted documents — and DiceCloud delivers those (10's probe facts;
+     * `CreatureSheet.livePropertyList`). A mirror carrying nothing but `removed:true` docs
+     * would therefore win against a perfectly good cached snapshot and render an empty
+     * tracker. Narrow, but the failure mode is the worst shape available: a blank screen
+     * where the offline path had real data, with no error to explain it.
      */
-    private val sheet: Flow<CreatureSheet> = combine(liveSheet, _snapshot) { live, snapshot ->
-        if (live.properties.isNotEmpty()) live else snapshot ?: CreatureSheet.EMPTY
-    }
+    private val sheet: StateFlow<CreatureSheet> = combine(liveSheet, _snapshot) { live, snapshot ->
+        if (live.hasLiveProperties) live else snapshot ?: CreatureSheet.EMPTY
+    }.stateIn(scope, SharingStarted.Eagerly, CreatureSheet.EMPTY)
+
+    /**
+     * The sheet as it stands right now, for the writes that have to *read* it before they can
+     * be built — `creatureProperties.insert` needs a parent id and an `order`, and both are
+     * facts about the current tree rather than about the row that was tapped.
+     *
+     * A `StateFlow` rather than the cold `Flow` this used to be, so there is a `.value` to
+     * ask at all. `Eagerly` matches [board], which was already collecting the same upstream,
+     * so this shares that work rather than doubling it.
+     */
+    internal val currentSheet: CreatureSheet get() = sheet.value
+
+    /** What the inventory tab renders (docs/design/10-inventory.md). */
+    val inventory: StateFlow<InventoryBoard> = sheet
+        .map { InventoryEngine.build(it) }
+        .stateIn(scope, SharingStarted.Eagerly, InventoryBoard.EMPTY)
 
     /** What the tracker renders. */
     val board: StateFlow<TrackerBoard> = combine(
@@ -274,12 +300,19 @@ class CreatureSession(
         TrackerEngine.build(sheet, prefs.map { it.copy(hidden = false) })
     }.stateIn(scope, SharingStarted.WhileSubscribed(UNHIDDEN_BOARD_GRACE_MILLIS), TrackerBoard.EMPTY)
 
-    /** True while the board is coming from Room rather than the live mirror. */
+    /**
+     * True while the board is coming from Room rather than the live mirror.
+     *
+     * Counts only *live* documents, for the same reason [sheet] does and so that the two
+     * cannot disagree: this flag's whole job is to say which of those two branches was taken,
+     * and a mirror of nothing but soft-deleted docs would make it claim "live" over a board
+     * that came from the snapshot.
+     */
     val isShowingSnapshot: StateFlow<Boolean> = combine(
         feed.documents(CreatureSheet.CREATURE_PROPERTIES),
         _snapshot,
     ) { properties, snapshot ->
-        properties.isEmpty() && snapshot != null
+        properties.values.none { !it.isTrue(CreatureSheet.REMOVED) } && snapshot != null
     }.stateIn(scope, SharingStarted.Eagerly, false)
 
     /**
@@ -324,6 +357,13 @@ class CreatureSession(
      *
      * Returns `false` when the mirror is empty, so a background event that arrives before
      * the subscription is ready cannot overwrite a good snapshot with nothing.
+     *
+     * "Empty" again means *no live documents*: overwriting a real snapshot with a body
+     * holding only soft-deleted properties is precisely the "overwrite a good snapshot with
+     * nothing" this guard exists to prevent, and the unfiltered count let it through. The
+     * body that gets stored is still the whole mirror, soft-deletes included — a snapshot is
+     * a faithful copy of the source, and filtering it on the way to disk would make the
+     * cached sheet disagree with the REST body it is standing in for.
      */
     suspend fun captureSnapshot(): Boolean {
         val sheet = CreatureSheet.fromMirror(
@@ -332,7 +372,7 @@ class CreatureSession(
             variables = feed.documents(CreatureSheet.CREATURE_VARIABLES).value,
             creatureId = creatureId,
         )
-        if (sheet.properties.isEmpty()) return false
+        if (!sheet.hasLiveProperties) return false
         val stored = snapshotStore.store(accountId, creatureId, sheet.toSnapshotBody())
         _snapshot.value = sheet
         _lastSyncedAt.value = stored.fetchedAt

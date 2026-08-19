@@ -36,9 +36,62 @@ data class LocalCharacter(
      */
     val currentHp: Int,
     val armorClass: Int,
+    /**
+     * The four coin counts (docs/design/10-inventory.md decision 10).
+     *
+     * Four integers on the character rather than four item rows, because locally there is no
+     * tag machinery to discover them *with*: a server sheet expresses currency as items
+     * carrying a `platinum`/`gold`/`silver`/`copper` tag, and reproducing that indirection
+     * over a table this app owns outright would be modelling DiceCloud's limitation instead
+     * of the money. Defaulted so every existing construction — the form, the repository, the
+     * tests — keeps compiling and every pre-FR-8 character reads as broke, which they are.
+     */
+    val coins: CoinPurse = CoinPurse.EMPTY,
     val createdAt: Long,
     val updatedAt: Long,
 )
+
+/**
+ * A local character's money: four counts, no items, no tags.
+ *
+ * The local half of [Wallet]. They are different types on purpose and for the reason 09
+ * decision 1 gives about [LocalCharacter] itself: a [WalletRow] carries a nullable
+ * `propertyId` because a server sheet may simply *not have* a gold item, and that nullability
+ * is the whole signal driving the insert path. Here the column always exists, so zero means
+ * zero and there is nothing to create. Giving this type a nullable id to look like the other
+ * one would be inventing an absence that cannot happen.
+ */
+data class CoinPurse(
+    val platinum: Int = 0,
+    val gold: Int = 0,
+    val silver: Int = 0,
+    val copper: Int = 0,
+) {
+    fun count(coin: CoinKind): Int = when (coin) {
+        CoinKind.PLATINUM -> platinum
+        CoinKind.GOLD -> gold
+        CoinKind.SILVER -> silver
+        CoinKind.COPPER -> copper
+    }
+
+    /** [count] set to [quantity], floored at zero — you cannot owe silver. */
+    fun with(coin: CoinKind, quantity: Int): CoinPurse {
+        val next = quantity.coerceAtLeast(0)
+        return when (coin) {
+            CoinKind.PLATINUM -> copy(platinum = next)
+            CoinKind.GOLD -> copy(gold = next)
+            CoinKind.SILVER -> copy(silver = next)
+            CoinKind.COPPER -> copy(copper = next)
+        }
+    }
+
+    /** The same "total in gp" line the server path prints, from the same per-coin values. */
+    val totalGp: Double get() = CoinKind.entries.sumOf { count(it) * it.valueGp }
+
+    companion object {
+        val EMPTY: CoinPurse = CoinPurse()
+    }
+}
 
 /** The six 5e ability scores. 09 decision 4: 3–30, default 10. */
 data class AbilityScores(
@@ -191,6 +244,28 @@ data class LocalTrackerRow(
     val reset: ResetRule?,
     /** The player's order, and the *only* ordering mechanism for local rows (09 decision 8). */
     val sortIndex: Int,
+    /**
+     * Weight of one unit in pounds, or `null` when the player did not give one
+     * (docs/design/10-inventory.md decision 10).
+     *
+     * Nullable for the same reason [InventoryItem.weightLb] is: a form field left blank is
+     * not a claim that the thing is weightless. Meaningless on a slot or a resource, and the
+     * form does not offer it there — an unused field on a shared row type is cheaper than a
+     * second row type, and every consumer already switches on [kind].
+     */
+    val weightLb: Double? = null,
+    /** Value of one unit in gold pieces, or `null` when the player did not give one. */
+    val valueGp: Double? = null,
+    /** The player's own note about the item, or `null`. */
+    val description: String? = null,
+    /**
+     * Whether the item is worn or wielded (10 decision 10).
+     *
+     * **A plain flag.** The server path's equip *reparents* the property; there are no folders
+     * here to move between, so this is exactly the boolean it looks like — which is also why
+     * the local equip has a complete undo where the server's has an honest partial one.
+     */
+    val equipped: Boolean = false,
 )
 
 /** The row as the shared tracker renders it. */

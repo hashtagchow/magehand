@@ -36,7 +36,48 @@ class CreatureSheet(
 ) {
     val creatureId: String? get() = creature?.string("_id")
 
+    /**
+     * **Every** property document, soft-deleted ones included.
+     *
+     * Deliberately unfiltered: this is the raw source, and [toSnapshotBody] has to round-trip
+     * the REST body verbatim or the cached snapshot would silently diverge from what the
+     * server sent. Discovery is where the filtering belongs — but that means *every* caller
+     * that lists, sums or counts properties has to remember, and the one that forgot is
+     * exactly the bug 10 decision 3 sent this wave hunting. Prefer [livePropertyList].
+     */
     val propertyList: List<JsonObject> get() = properties.values.toList()
+
+    /**
+     * The property documents that still exist — `removed: true` dropped.
+     *
+     * **DiceCloud soft-deletes.** A deleted property keeps its document, gains `removed: true`
+     * and a `removedAt`, and is **still delivered to clients**: the REST body carries it
+     * (the live capture holds one), and the 2026-08-19 probe confirmed the subscription can
+     * too. Nothing about the transport removes it; only a filter does.
+     *
+     * This accessor exists so that filter has a *name*. Before it, the rule lived nine times
+     * over inside `TrackerEngine`'s private discovery functions — correct in all nine, but
+     * invisible to any new consumer reading `propertyList` and reasonably assuming a sheet's
+     * properties are the sheet's properties. The inventory tab is the first such consumer and
+     * it sums weights, where a stale item is not a cosmetic error but a wrong number.
+     *
+     * The engine's own rules keep their inline checks rather than being rewritten onto this:
+     * they filter `inactive` in the same breath and one of them ([TrackerEngine] toggles)
+     * deliberately does not, so folding them together here would change behaviour to save a
+     * line. This is the accessor for everything *new*.
+     */
+    val livePropertyList: List<JsonObject> get() = properties.values.filterNot { it.isTrue(REMOVED) }
+
+    /**
+     * True when the sheet holds at least one property that has not been soft-deleted.
+     *
+     * The distinction from `properties.isNotEmpty()` is load-bearing wherever "does this
+     * source have anything in it?" decides between two sources — see `CreatureSession`'s
+     * mirror-wins rule. A mirror holding nothing but soft-deleted documents is a mirror with
+     * nothing to render, and answering "yes" for it beats a perfectly good cached snapshot
+     * and blanks the screen.
+     */
+    val hasLiveProperties: Boolean get() = properties.values.any { !it.isTrue(REMOVED) }
 
     /** A named entry from the one fat `creatureVariables` document, or `null`. */
     fun variable(name: String): JsonElement? = variables?.get(name)
@@ -82,6 +123,9 @@ class CreatureSheet(
         const val CREATURES = "creatures"
         const val CREATURE_PROPERTIES = "creatureProperties"
         const val CREATURE_VARIABLES = "creatureVariables"
+
+        /** DiceCloud's soft-delete flag. See [livePropertyList]. */
+        const val REMOVED = "removed"
 
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 

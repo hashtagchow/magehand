@@ -72,6 +72,8 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.theme.DisabledContent
+import com.hashtagchow.magehand.ui.theme.mageHandIconButtonColors
 
 /**
  * Everything the tracker can ask of the ViewModel.
@@ -523,6 +525,10 @@ private fun ConcentrationBanner(
             IconButton(
                 onClick = onDrop,
                 enabled = canDrop,
+                // BUG-3: this ✕ is disabled whenever the banner's source is not a flippable
+                // toggle, which is the common case — the same raised disabled tint the
+                // customize sheet's chevrons now use.
+                colors = mageHandIconButtonColors(),
                 modifier = Modifier
                     .size(48.dp)
                     .testTag("tracker:concentration:drop"),
@@ -1192,7 +1198,7 @@ private fun EmptyBoard(modifier: Modifier = Modifier) {
  * while the queue sat idle.
  */
 @Composable
-private fun StepperButton(
+internal fun StepperButton(
     glyph: String,
     contentDescription: String,
     enabled: Boolean,
@@ -1243,8 +1249,8 @@ private fun StepperButton(
 }
 
 /** U+2212 MINUS SIGN — not a hyphen; it matches the `+` optically at this size. */
-private const val MINUS = "\u2212"
-private const val PLUS = "+"
+internal const val MINUS = "\u2212"
+internal const val PLUS = "+"
 
 private const val PIP_TARGET_DP = 48
 private const val PIP_DOT_DP = 28
@@ -1255,8 +1261,15 @@ private const val DOT_DP = 10
 private const val DOT_DISC_DP = 24
 private const val DOT_MARGIN_DP = 8
 
-/** Material's own disabled-content alpha; used where a control is drawn by hand. */
-private const val DISABLED_ALPHA = 0.38f
+/**
+ * Material's own disabled-content alpha; used where a control is drawn by hand.
+ *
+ * Deliberately **not** BUG-3's raised icon alpha. These are pips and typed glyphs rather than
+ * icons, and each sits beside a live sibling that makes the disabled one legible by
+ * comparison — see [DisabledContent.ICON_ALPHA] for the full argument. Named through the
+ * shared object so the two figures are stated in one file rather than drifting in two.
+ */
+private const val DISABLED_ALPHA = DisabledContent.MATERIAL_ALPHA
 
 /** How far a rolled-back row travels, in layout pixels, and for how long. */
 private const val SHAKE_DP = 18f

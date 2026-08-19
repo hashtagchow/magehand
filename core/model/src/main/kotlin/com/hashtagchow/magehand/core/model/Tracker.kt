@@ -393,6 +393,23 @@ enum class TrackerWriteKind {
     ITEM_USE,
     ITEM_ADD,
     ITEM_SET,
+
+    /** An item put on (FR-8). Its inverse is [UNEQUIP] — the same method, the other value. */
+    EQUIP,
+
+    /** An item taken off. See [EQUIP]. */
+    UNEQUIP,
+
+    /**
+     * A brand-new item added to the sheet (FR-8's catalog and custom form).
+     *
+     * **Not invertible**, and deliberately: the inverse would be a soft-remove, which
+     * docs/design/10-inventory.md decision 12 fences out of this release along with the rest
+     * of item deletion. So the history entry says what happened and offers no UNDO, the same
+     * shape a rest already has — with the one difference that creating an item invalidates
+     * nothing before it, so it does not clear the stack.
+     */
+    ITEM_CREATE,
     TOGGLE,
     SHORT_REST,
     LONG_REST,
@@ -400,7 +417,7 @@ enum class TrackerWriteKind {
 
     /**
      * What the undoing write is, so a rolled-back or undone op can still be described.
-     * `null` where there is no inverse (absolute sets and rests).
+     * `null` where there is no inverse (absolute sets, rests, and item creation).
      */
     fun inverted(): TrackerWriteKind? = when (this) {
         SPEND -> RESTORE
@@ -409,8 +426,10 @@ enum class TrackerWriteKind {
         HEAL -> TAKE_DAMAGE
         ITEM_USE -> ITEM_ADD
         ITEM_ADD -> ITEM_USE
+        EQUIP -> UNEQUIP
+        UNEQUIP -> EQUIP
         TOGGLE -> TOGGLE
-        SET_VALUE, ITEM_SET, SHORT_REST, LONG_REST -> null
+        SET_VALUE, ITEM_SET, ITEM_CREATE, SHORT_REST, LONG_REST -> null
     }
 }
 

@@ -124,3 +124,56 @@ val MIGRATION_2_3: Migration = object : Migration(2, 3) {
         )
     }
 }
+
+/**
+ * v3 → v4: the inventory tab's local columns (docs/design/10-inventory.md decision 10).
+ *
+ * ```
+ * local_characters    += pp, gp, sp, cp        INTEGER NOT NULL DEFAULT 0
+ * local_tracker_rows  += weight, value         REAL
+ *                     += description           TEXT
+ *                     += equipped              INTEGER NOT NULL DEFAULT 0
+ * ```
+ *
+ * **Purely additive, and additive in the narrower sense the previous two were not**: those
+ * created new tables and touched nothing existing, while this one alters two tables that
+ * already hold player data. `ALTER TABLE … ADD COLUMN` is the whole of it — no table is
+ * re-created, so there is no copy step that could drop a row, no temporary table, and no
+ * window in which the foreign key on `local_tracker_rows` does not exist. The commonly
+ * written "create new, copy, drop old, rename" dance is what loses data on a failed upgrade,
+ * and none of these four changes needs it.
+ *
+ * ### Why every `NOT NULL` column names a `DEFAULT`
+ *
+ * SQLite refuses `ADD COLUMN … NOT NULL` without one on a table that already has rows — there
+ * would be no value to put in them. The defaults here are therefore load-bearing, not
+ * decorative, and the matching `@ColumnInfo(defaultValue = "0")` on
+ * [LocalCharacterEntity] / [LocalTrackerRowEntity] is what makes the exported v4 schema say
+ * the same thing (see the KDoc there). The nullable columns take no default: `NULL` is the
+ * correct reading of "the player never gave a weight", which is true of every row that
+ * existed before this migration.
+ *
+ * As with [MIGRATION_1_2] and [MIGRATION_2_3], this is proven rather than trusted:
+ * `MageHandDatabaseMigrationTest` builds a real v3 database from the **committed** v3 JSON,
+ * populates both local tables, runs this migration, and lets Room's own validator compare the
+ * result against the compiled v4 expectation.
+ */
+val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // 10 decision 10: four integer columns, not four item rows — a local character has no
+        // tag machinery to discover currency with, and inventing some would be modelling
+        // DiceCloud's limitation rather than the money.
+        for (coin in listOf("pp", "gp", "sp", "cp")) {
+            db.execSQL(
+                "ALTER TABLE `local_characters` ADD COLUMN `$coin` INTEGER NOT NULL DEFAULT 0",
+            )
+        }
+
+        db.execSQL("ALTER TABLE `local_tracker_rows` ADD COLUMN `weight` REAL")
+        db.execSQL("ALTER TABLE `local_tracker_rows` ADD COLUMN `value` REAL")
+        db.execSQL("ALTER TABLE `local_tracker_rows` ADD COLUMN `description` TEXT")
+        db.execSQL(
+            "ALTER TABLE `local_tracker_rows` ADD COLUMN `equipped` INTEGER NOT NULL DEFAULT 0",
+        )
+    }
+}

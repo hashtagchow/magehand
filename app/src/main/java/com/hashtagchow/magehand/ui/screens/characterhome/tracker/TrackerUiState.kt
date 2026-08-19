@@ -706,6 +706,14 @@ fun TrackerWrite.describe(): String = when (kind) {
     TrackerWriteKind.ITEM_USE -> "Used $amount × $targetName"
     TrackerWriteKind.ITEM_ADD -> "Added $amount × $targetName"
     TrackerWriteKind.ITEM_SET -> "Set the number of $targetName"
+    // FR-8. `amount` is 1 for an equip and says nothing worth printing — the interesting
+    // fact is which way the item went, which the verb already carries.
+    TrackerWriteKind.EQUIP -> "Equipped $targetName"
+    TrackerWriteKind.UNEQUIP -> "Unequipped $targetName"
+    // Not "Added", which is [ITEM_ADD]'s sentence: picking up two more arrows and putting a
+    // quiver on the sheet for the first time are different events, and the history sheet is
+    // read to answer "what did I do?". Only one of the two can be undone, too.
+    TrackerWriteKind.ITEM_CREATE -> "New item: $amount × $targetName"
     TrackerWriteKind.TOGGLE -> "Toggled $targetName"
     TrackerWriteKind.SHORT_REST -> "Short rest"
     TrackerWriteKind.LONG_REST -> "Long rest"

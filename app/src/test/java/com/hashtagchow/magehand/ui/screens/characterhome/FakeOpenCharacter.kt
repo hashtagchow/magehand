@@ -7,7 +7,10 @@ import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.InventoryBoard
+import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
+import com.hashtagchow.magehand.core.model.WalletRow
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerOverride
@@ -77,6 +80,25 @@ class FakeOpenCharacter(
 
     override fun adjustItem(item: TrackedResource, delta: Int) {
         writes += "item ${item.propertyId} $delta"
+    }
+
+    override val inventory = MutableStateFlow(InventoryBoard.EMPTY)
+
+    override fun setEquipped(
+        propertyId: String,
+        equipped: Boolean,
+        currentlyEquipped: Boolean,
+        targetName: String,
+    ) {
+        writes += "equip $propertyId $equipped"
+    }
+
+    override fun addItem(spec: NewItemSpec) {
+        writes += "add ${spec.name} ${spec.quantity}"
+    }
+
+    override fun adjustCoins(row: WalletRow, delta: Int) {
+        writes += "coins ${row.coin} $delta"
     }
 
     override fun toggle(condition: ConditionToggle) {

@@ -13,7 +13,66 @@
 
     <!-- Character home tabs -->
     <string name="tab_tracker">Tracker</string>
+    <string name="tab_inventory">Inventory</string>
     <string name="tab_sheet">Sheet</string>
+
+    <!-- FR-8: inventory tab (docs/design/10-inventory.md) -->
+    <string name="inventory_section_wallet">Wallet</string>
+    <string name="inventory_section_equipped">Equipped</string>
+    <string name="inventory_section_carried">Carried</string>
+    <!-- Only ever read for a container property whose name field is blank. -->
+    <string name="inventory_section_container">Container</string>
+    <!-- The top line. Two forms because capacity is nullable: a sheet that expresses no
+         Strength gets no denominator rather than an invented one (10 decision 8). -->
+    <string name="inventory_carried">%1$s lb carried</string>
+    <string name="inventory_carried_of">%1$s / %2$s lb</string>
+    <string name="inventory_over_capacity">Over capacity</string>
+    <!-- 10 decision 9. Rendered only when the sheet says anything at all about attunement. -->
+    <string name="inventory_attuned">Attuned %1$d/%2$d</string>
+    <string name="inventory_weight">%1$s lb</string>
+    <string name="inventory_value">%1$s gp</string>
+    <string name="inventory_quantity">×%1$d</string>
+    <!-- An em dash: the source gave no number, which is not the same as zero. -->
+    <string name="inventory_unknown">—</string>
+    <string name="inventory_wallet_total">%1$s gp total</string>
+    <string name="inventory_coin_add">Add one %1$s</string>
+    <string name="inventory_coin_remove">Remove one %1$s</string>
+    <string name="inventory_equip">Equip %1$s</string>
+    <string name="inventory_unequip">Unequip %1$s</string>
+    <string name="inventory_open_detail">%1$s — open details</string>
+    <string name="inventory_empty">Nothing carried yet</string>
+    <string name="inventory_empty_hint">Coins are always here. Tap + to put something else on this sheet.</string>
+
+    <!-- Item detail sheet (10 decision 7) -->
+    <string name="inventory_detail_quantity">Quantity</string>
+    <string name="inventory_detail_weight">Weight, each</string>
+    <string name="inventory_detail_value">Value, each</string>
+    <string name="inventory_detail_stack">%1$s lb · %2$s gp for all %3$d</string>
+    <string name="inventory_detail_description">Description</string>
+    <string name="inventory_detail_attunement">Attunement</string>
+    <string name="inventory_attunement_requires">Requires attunement</string>
+    <string name="inventory_attunement_attuned">Attuned</string>
+    <string name="inventory_attunement_not_attuned">Not attuned</string>
+
+    <!-- Add-item flow (10 decision 6) -->
+    <string name="inventory_add">Add item</string>
+    <string name="inventory_add_title">Add an item</string>
+    <string name="inventory_add_search">Search the list</string>
+    <string name="inventory_add_none">Nothing in the list matches. Tap “Custom item” to type one in.</string>
+    <string name="inventory_add_custom">Custom item</string>
+    <string name="inventory_add_from_list">Back to the list</string>
+    <!-- 10 decision 12 fences item deletion out of this release, so an add has no inverse
+         and the snackbar offers no UNDO. Said here rather than discovered afterwards. -->
+    <string name="inventory_add_not_undoable">Adding an item can\'t be undone in this version.</string>
+    <string name="inventory_custom_name">Name</string>
+    <string name="inventory_custom_quantity">Quantity</string>
+    <string name="inventory_custom_weight">Weight, each (lb)</string>
+    <string name="inventory_custom_value">Value, each (gp)</string>
+    <string name="inventory_custom_description">Description</string>
+    <string name="inventory_error_name">Give the item a name.</string>
+    <string name="inventory_error_quantity">Must be %1$d–%2$d.</string>
+    <string name="inventory_error_weight">Must be %1$s or less, or blank.</string>
+    <string name="inventory_error_value">Must be %1$s or less, or blank.</string>
 
     <!-- Screen 3: tracker tab -->
     <string name="tracker_section_defenses">Defenses</string>

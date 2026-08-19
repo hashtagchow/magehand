@@ -25,12 +25,16 @@ import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
 import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
+import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.LocalRowKind
+import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
+import com.hashtagchow.magehand.core.model.WalletRow
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWrite
@@ -306,6 +310,120 @@ class LocalOpenCharacter(
         }
     }
 
+    override val inventory: StateFlow<InventoryBoard> =
+        combine(characterFlow, rowsFlow) { character, rows -> LocalInventoryBoard.build(character, rows) }
+            .stateIn(scope, SharingStarted.Eagerly, InventoryBoard.EMPTY)
+
+    /**
+     * Local equip: a **plain flag** (10 decision 10).
+     *
+     * The server path's `creatureProperties.equip` reparents the property and its undo cannot
+     * put the folder back (see `WriteOp.Equip`). There are no folders here, so there is
+     * nothing to lose and the undo is complete rather than partial — the same shape
+     * [setHitPoints] already has, and for the same reason: the local path genuinely knows
+     * more, so it honestly offers more.
+     *
+     * [currentlyEquipped] and [targetName] are the interface's, and are re-read rather than
+     * trusted: the state is taken from the committed row inside the write's own critical
+     * section, exactly as [spend] re-reads. A caller's idea of the current state can be one
+     * frame stale; the row cannot.
+     */
+    override fun setEquipped(
+        propertyId: String,
+        equipped: Boolean,
+        currentlyEquipped: Boolean,
+        targetName: String,
+    ) {
+        dispatch {
+            val stored = dao.findRow(propertyId) ?: return@dispatch
+            if (stored.equipped == equipped) return@dispatch
+            dao.setRowEquipped(stored.id, equipped)
+            dao.touch(creatureId, now())
+            journal(
+                kind = if (equipped) TrackerWriteKind.EQUIP else TrackerWriteKind.UNEQUIP,
+                targetName = stored.label,
+                amount = 1,
+                undo = Undoable.Equipped(stored.id, stored.equipped),
+            )
+        }
+    }
+
+    /**
+     * Adds an item row (10 decisions 6 and 10). The catalog and the custom form, one path.
+     *
+     * **Not undoable, and that is a decision rather than a limitation.** This implementation
+     * knows perfectly well how to reverse the write — delete the row it just inserted — and
+     * that is precisely why it must not: item deletion is fenced out of this release entirely
+     * (10 decision 12 puts it in FR-9), and an UNDO button that deleted a row would ship the
+     * fenced capability through the one door nobody was watching. The server path reaches the
+     * same answer from the other direction (its inverse would be a `softRemove` it does not
+     * call), so the two behave identically at the edge — which is the whole of 09 decision 5's
+     * "same screen" claim.
+     *
+     * The row is a [LocalRowKind.ITEM] with `total == current == quantity`, matching what the
+     * tracker's own item rows are and what `setRowQuantity` maintains.
+     */
+    override fun addItem(spec: NewItemSpec) {
+        if (!spec.isValid) return
+        dispatch {
+            // Fails closed on a character deleted underneath an open screen: the FK would
+            // reject the insert anyway, and checking is cheaper than catching.
+            dao.find(creatureId) ?: return@dispatch
+            val sortIndex = (dao.maxSortIndex(creatureId) ?: -1) + 1
+            dao.upsertRows(
+                listOf(
+                    LocalTrackerRowEntity(
+                        id = newRowId(),
+                        characterId = creatureId,
+                        kind = LocalRowKind.ITEM.storedValue,
+                        label = spec.name,
+                        total = spec.quantity,
+                        current = spec.quantity,
+                        resetRule = LocalTrackerRowEntity.RESET_NONE,
+                        sortIndex = sortIndex,
+                        weight = spec.weightLb,
+                        value = spec.valueGp,
+                        description = spec.description?.takeIf { it.isNotBlank() },
+                        equipped = false,
+                    ),
+                ),
+            )
+            dao.touch(creatureId, now())
+            journal(TrackerWriteKind.ITEM_CREATE, spec.name, spec.quantity, undo = null)
+        }
+    }
+
+    /**
+     * The wallet stepper (10 decision 10): four integer columns, no items and no tags.
+     *
+     * [WalletRow.propertyId] is never `null` for a local character — the column exists whether
+     * it reads zero or not — so the server path's "first increment creates the item" branch has
+     * no counterpart here. The row is identified by its [WalletRow.coin] rather than by that
+     * id, because the id is a synthetic minted by `LocalInventoryBoard` and the column is the
+     * real thing.
+     *
+     * Clamped against a **fresh read** inside the critical section, like every other write in
+     * this class: a press-and-hold on "−" must stop at zero against committed truth, not
+     * against a board Room has not re-emitted yet.
+     */
+    override fun adjustCoins(row: WalletRow, delta: Int) {
+        if (delta == 0) return
+        dispatch {
+            val character = dao.find(creatureId)?.toDomain() ?: return@dispatch
+            val previous = character.coins.count(row.coin)
+            val next = (previous + delta).coerceAtLeast(0)
+            if (next == previous) return@dispatch
+            val purse = character.coins.with(row.coin, next)
+            dao.setCoins(creatureId, purse.platinum, purse.gold, purse.silver, purse.copper, now())
+            journal(
+                kind = if (delta < 0) TrackerWriteKind.ITEM_USE else TrackerWriteKind.ITEM_ADD,
+                targetName = row.coin.itemName,
+                amount = kotlin.math.abs(next - previous),
+                undo = Undoable.Coins(row.coin, previous),
+            )
+        }
+    }
+
     /**
      * No-op. 09 decision 4: local characters have no toggles — the form offers no field for
      * one, so [board] carries none and nothing can be tapped to reach this. It is here
@@ -369,6 +487,18 @@ class LocalOpenCharacter(
             }
             is Undoable.HitPoints -> dao.find(creatureId)?.let { character ->
                 dao.setCurrentHp(creatureId, entry.previous.coerceIn(0, character.maxHp), now())
+            }
+            // No clamp: a boolean has no ceiling to drift against, which is the one case the
+            // class KDoc's "absolute previous value" story is trivially true for.
+            is Undoable.Equipped -> dao.findRow(entry.rowId)?.let { row ->
+                dao.setRowEquipped(row.id, entry.previous)
+            }
+            // Floored, not clamped to a ceiling: coins have no maximum, exactly as items have
+            // none (see [adjustItem]), so inventing one for an undo would be a limit the write
+            // path does not have.
+            is Undoable.Coins -> dao.find(creatureId)?.toDomain()?.let { character ->
+                val purse = character.coins.with(entry.coin, entry.previous)
+                dao.setCoins(creatureId, purse.platinum, purse.gold, purse.silver, purse.copper, now())
             }
         }
         dao.touch(creatureId, now())
@@ -546,7 +676,30 @@ class LocalOpenCharacter(
             Undoable, Pending {
             override fun withWriteId(id: Long) = copy(writeId = id)
         }
+
+        /** An item's equipped flag before the write (10 decision 10). */
+        data class Equipped(val rowId: String, val previous: Boolean, override val writeId: Long = 0) :
+            Undoable, Pending {
+            override fun withWriteId(id: Long) = copy(writeId = id)
+        }
+
+        /** One denomination's count before the write. */
+        data class Coins(val coin: CoinKind, val previous: Int, override val writeId: Long = 0) :
+            Undoable, Pending {
+            override fun withWriteId(id: Long) = copy(writeId = id)
+        }
     }
+
+    /**
+     * A fresh row id.
+     *
+     * A UUID for the same reason [LocalCharacter.id] is one: it has to be unique against rows
+     * this instance cannot see (another character's, or one added on another screen), and a
+     * counter or a timestamp would collide the first time two of those happened close
+     * together. Never a Meteor-shaped id, so a local row can never be mistaken for a server
+     * property in a log or a crash report.
+     */
+    private fun newRowId(): String = java.util.UUID.randomUUID().toString()
 
     companion object {
         /** See [accountId]: an id no account can hold, so a query keyed on it fails closed. */

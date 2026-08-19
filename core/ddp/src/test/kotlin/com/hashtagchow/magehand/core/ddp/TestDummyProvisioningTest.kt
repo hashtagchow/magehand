@@ -190,9 +190,17 @@ class TestDummyProvisioningTest {
          * as MAGEHAND_PARTY_IDS when running live probes against a real table's
          * server, so the guard protects the actual party. The baked fallback only
          * keeps the assertion exercised in ungated runs.
+         *
+         * `takeIf { it.isNotEmpty() }` is what makes `MAGEHAND_PARTY_IDS=""` fall back to
+         * the sentinel rather than to an empty set. Without it, exporting the variable
+         * *empty* — the natural thing to do when the real ids are not to hand — produced a
+         * non-null, empty set, so [refuseKnownPartyIds] passed everything and the guard was
+         * silently off. `InventoryWriteLiveIntegrationTest` carries the same contract; the
+         * two must not disagree about what an empty export means.
          */
         val PARTY_IDS: Set<String> =
-            System.getenv("MAGEHAND_PARTY_IDS")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
+            System.getenv("MAGEHAND_PARTY_IDS")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
+                ?.takeIf { it.isNotEmpty() }?.toSet()
                 ?: setOf("FakeCreature23456")
 
         fun refuseKnownPartyIds(id: String) = assertTrue(

@@ -27,11 +27,16 @@ import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
+import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
+import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryUiState
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.toInventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.CustomizeSection
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerCustomizeState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerOverridePlan
@@ -48,6 +53,10 @@ import javax.inject.Inject
  *   as a header over nothing.
  * @param tracker the same [TrackerUiState] the DiceCloud tracker renders (09 decision 5), with
  *   `hasConnection = false` (decision 8).
+ * @param inventory the same [InventoryUiState] the DiceCloud inventory tab renders
+ *   (docs/design/10-inventory.md decision 10). The board differs — no containers, no
+ *   attunement, a wallet backed by four columns rather than tagged items — but the *type* does
+ *   not, so the tab is reused rather than forked exactly as the tracker was.
  */
 data class LocalCharacterHomeUiState(
     val characterId: String = "",
@@ -55,6 +64,7 @@ data class LocalCharacterHomeUiState(
     val reference: LocalReferenceState? = null,
     val tracker: TrackerUiState = TrackerUiState(hasConnection = false),
     val customize: TrackerCustomizeState = TrackerCustomizeState(reorderOnly = true),
+    val inventory: InventoryUiState = InventoryUiState(),
 )
 
 /**
@@ -219,6 +229,32 @@ class LocalCharacterHomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * FR-8's tab for a local character (10 decision 10).
+     *
+     * `connection = LIVE` and `isShowingSnapshot = false` are not a pretence: the board comes
+     * off Room synchronously, so there is no cold-open gap for a spinner to fill and
+     * `isLoading` is correctly false the moment the screen composes. A character that has not
+     * loaded yet renders `InventoryBoard.EMPTY`, which is the same four zero coin rows a real
+     * empty character has — and briefly showing the truth about nothing is better than a
+     * spinner that never had anything to wait for.
+     */
+    private val inventoryState: Flow<InventoryUiState> = open.flatMapLatest { local ->
+        if (local == null) {
+            flowOf(InventoryUiState(creatureId = characterId))
+        } else {
+            combine(local.inventory, local.canWrite) { board, canWrite ->
+                toInventoryUiState(
+                    creatureId = characterId,
+                    board = board,
+                    connection = ConnectionState.LIVE,
+                    isShowingSnapshot = false,
+                    canWrite = canWrite,
+                )
+            }
+        }
+    }
+
     private val customizeState: Flow<TrackerCustomizeState> = open.flatMapLatest { local ->
         if (local == null) {
             flowOf(TrackerCustomizeState(reorderOnly = true))
@@ -244,13 +280,15 @@ class LocalCharacterHomeViewModel @Inject constructor(
         character,
         trackerState,
         customizeState,
-    ) { character, tracker, customize ->
+        inventoryState,
+    ) { character, tracker, customize, inventory ->
         LocalCharacterHomeUiState(
             characterId = characterId,
             characterName = character?.name,
             reference = LocalReferenceState.from(character),
             tracker = tracker,
             customize = customize,
+            inventory = inventory,
         )
     }.stateIn(
         viewModelScope,
@@ -283,6 +321,65 @@ class LocalCharacterHomeViewModel @Inject constructor(
     /** 09 decision 7. The confirm dialog is the screen's job and has already been answered. */
     fun rest(kind: RestKind) {
         open.value?.rest(kind)
+    }
+
+    // --- inventory tab: the same four intents, against the same interface ------------
+
+    /**
+     * 10 decision 4's one-tap equip. Locally a plain flag — there are no folders to move
+     * between — so the undo is complete rather than partial. See `LocalOpenCharacter.setEquipped`.
+     *
+     * Resolved against the inventory board for the same reason the DiceCloud path is: the
+     * current state has to come from the list the player is looking at.
+     */
+    fun setEquipped(propertyId: String, equipped: Boolean) {
+        val character = open.value ?: return
+        val item = character.inventory.value.allItems
+            .firstOrNull { it.propertyId == propertyId } ?: return
+        character.setEquipped(
+            propertyId = propertyId,
+            equipped = equipped,
+            currentlyEquipped = item.equipped,
+            targetName = item.name,
+        )
+    }
+
+    /**
+     * The detail sheet's quantity stepper.
+     *
+     * Resolved against the inventory board rather than through [withRow], matching the
+     * DiceCloud path — and here the reason is the same one in miniature: `LocalTrackerBoard`
+     * applies the hide override too, so a hidden item row would resolve to nothing.
+     */
+    fun adjustItemQuantity(propertyId: String, delta: Int) {
+        val character = open.value ?: return
+        val item = character.inventory.value.allItems
+            .firstOrNull { it.propertyId == propertyId } ?: return
+        character.adjustItem(
+            TrackedResource(
+                propertyId = item.propertyId,
+                kind = TrackerKind.ITEM,
+                name = item.name,
+                value = item.quantity,
+                total = item.quantity,
+            ),
+            delta,
+        )
+    }
+
+    /**
+     * A wallet stepper. Locally the four denominations are integer columns, so
+     * `WalletRow.propertyId` is never null and there is no insert branch — see
+     * `LocalOpenCharacter.adjustCoins`. The screen cannot tell, which is the point.
+     */
+    fun adjustCoins(coin: CoinKind, delta: Int) {
+        val character = open.value ?: return
+        character.adjustCoins(character.inventory.value.wallet.row(coin), delta)
+    }
+
+    /** The add-item flow. Not undoable here either, and deliberately so — see the impl. */
+    fun addItem(spec: NewItemSpec) {
+        open.value?.addItem(spec)
     }
 
     fun undoLastWrite() {

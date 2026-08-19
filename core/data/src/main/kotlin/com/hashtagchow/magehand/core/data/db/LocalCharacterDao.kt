@@ -88,6 +88,30 @@ interface LocalCharacterDao {
     @Query("UPDATE local_characters SET updatedAt = :at WHERE id = :id")
     suspend fun touch(id: String, at: Long)
 
+    /**
+     * The wallet, all four columns at once (docs/design/10-inventory.md decision 10).
+     *
+     * One statement rather than four per-coin updates: the wallet is one value to the player,
+     * and a stepper that could leave three of the four columns from one write and the fourth
+     * from another is a partial state nothing needs. Values arrive already floored at zero —
+     * see this DAO's write-posture note; the clamp lives in `LocalOpenCharacter`.
+     */
+    @Query("UPDATE local_characters SET pp = :pp, gp = :gp, sp = :sp, cp = :cp, updatedAt = :at WHERE id = :id")
+    suspend fun setCoins(id: String, pp: Int, gp: Int, sp: Int, cp: Int, at: Long)
+
+    /** 10 decision 10: local equip is a plain flag — there are no folders to move between. */
+    @Query("UPDATE local_tracker_rows SET equipped = :equipped WHERE id = :rowId")
+    suspend fun setRowEquipped(rowId: String, equipped: Boolean)
+
+    /**
+     * The highest `sortIndex` in use, or `null` for a character with no rows.
+     *
+     * The inventory's add path needs it for the same reason the server path needs an `order`:
+     * a new item belongs at the end of the list, not wherever an index collision puts it.
+     */
+    @Query("SELECT MAX(sortIndex) FROM local_tracker_rows WHERE characterId = :characterId")
+    suspend fun maxSortIndex(characterId: String): Int?
+
     @Query("UPDATE local_tracker_rows SET sortIndex = :sortIndex WHERE characterId = :characterId AND id = :rowId")
     suspend fun setRowSortIndex(characterId: String, rowId: String, sortIndex: Int)
 

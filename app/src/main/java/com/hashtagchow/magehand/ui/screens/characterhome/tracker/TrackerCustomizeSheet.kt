@@ -53,6 +53,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.ui.theme.AccentPalette
+import com.hashtagchow.magehand.ui.theme.mageHandIconButtonColors
 
 /**
  * The tracker customize sheet (docs/design/04-screens-ux.md §5) plus §6's per-character
@@ -329,13 +330,27 @@ private fun CustomizeRowItem(
                 },
             )
         }
-        IconButton(onClick = onMoveUp, enabled = canMoveUp, modifier = Modifier.size(48.dp)) {
+        // BUG-3: both of these are disabled on the first and last row of every section, and
+        // Material's 38% disabled tint made them all but vanish on the dark scheme. The
+        // raised tint lives in the theme so every disable-able icon button in the app gets
+        // it — see `mageHandIconButtonColors`.
+        IconButton(
+            onClick = onMoveUp,
+            enabled = canMoveUp,
+            colors = mageHandIconButtonColors(),
+            modifier = Modifier.size(48.dp),
+        ) {
             Icon(
                 Icons.Filled.KeyboardArrowUp,
                 contentDescription = stringResource(R.string.customize_move_up, row.name),
             )
         }
-        IconButton(onClick = onMoveDown, enabled = canMoveDown, modifier = Modifier.size(48.dp)) {
+        IconButton(
+            onClick = onMoveDown,
+            enabled = canMoveDown,
+            colors = mageHandIconButtonColors(),
+            modifier = Modifier.size(48.dp),
+        ) {
             Icon(
                 Icons.Filled.KeyboardArrowDown,
                 contentDescription = stringResource(R.string.customize_move_down, row.name),

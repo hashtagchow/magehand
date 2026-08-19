@@ -11,13 +11,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -45,7 +48,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.core.model.RestKind
+import com.hashtagchow.magehand.ui.navigation.LocalCharacterHomeTab
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryActions
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryTab
+import com.hashtagchow.magehand.ui.screens.characterhome.inventory.ItemDetailSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpNumberPadDialog
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.RestConfirmDialog
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerActions
@@ -53,6 +61,7 @@ import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerCustomiz
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerHistorySheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerTab
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.describe
+import com.hashtagchow.magehand.ui.theme.mageHandIconButtonColors
 
 /**
  * A local character's home (docs/design/09-local-characters.md decisions 5–8).
@@ -66,11 +75,15 @@ import com.hashtagchow.magehand.ui.screens.characterhome.tracker.describe
  *
  * ### What is different, and why each one
  *
- * - **No tabs row at all.** 09 decision 8 allows "Tracker only, or the Sheet tab absent". A
- *   `PrimaryTabRow` with one tab is a control that cannot do anything: it costs a row of the
- *   vertical space this screen spends on pips, and it invites a tap that changes nothing. The
- *   screen is the tracker, so the tracker fills it — and there is no `SheetSession` on
- *   [LocalCharacterHomeUiState] for a second tab to render even if one were added.
+ * - **Two tabs, not three: Tracker · Inventory** (docs/design/10-inventory.md decision 1).
+ *   Until FR-8 this screen had *no* tab row, and the reason was stated plainly: a
+ *   `PrimaryTabRow` with one tab is a control that cannot do anything, costing a row of the
+ *   vertical space this screen spends on pips. That argument was correct and it expired the
+ *   moment there was a second destination — the row now goes somewhere, so it earns its
+ *   height. What has **not** changed is the reason there is no third tab: there is no
+ *   `SheetSession` on [LocalCharacterHomeUiState] for one to render, so 09 decision 8's "the
+ *   Sheet tab absent" stays structural rather than conditional. `LocalCharacterHomeTab` has no
+ *   Sheet constant, which is where that guarantee lives.
  * - **No connection dot, ever.** Pinned on the state, not left to arithmetic — see
  *   `TrackerUiState.hasConnection`. There is therefore also no connection sheet and no
  *   `onConnectionDetails` action.
@@ -93,11 +106,15 @@ fun LocalCharacterHomeScreen(
     viewModel: LocalCharacterHomeViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    var selectedTab by rememberSaveable { mutableStateOf(LocalCharacterHomeTab.Tracker) }
     var customizeOpen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var hpPadOpen by rememberSaveable { mutableStateOf(false) }
+    var addItemOpen by rememberSaveable { mutableStateOf(false) }
+    var detailItemId by rememberSaveable { mutableStateOf<String?>(null) }
     var restToConfirm by rememberSaveable { mutableStateOf<RestKind?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
+    val tabs = remember { LocalCharacterHomeTab.entries }
 
     // The undo snackbar, identical to the DiceCloud tracker's — `showSnackbar` suspends until
     // the snackbar goes away, so a burst of taps queues rather than stacking.
@@ -148,34 +165,50 @@ fun LocalCharacterHomeScreen(
                     }
                 },
                 actions = {
-                    // Unconditional, unlike the DiceCloud bar's — there is no second tab for
-                    // these to be irrelevant on.
-                    TextButton(
-                        onClick = { restToConfirm = RestKind.SHORT },
-                        modifier = Modifier.testTag("tracker:rest:short"),
-                    ) {
-                        Text(stringResource(R.string.tracker_short_rest))
+                    // Per-tab, exactly as the DiceCloud bar is. These were unconditional
+                    // while this screen had one tab; now that it has two, a "Customize
+                    // tracker" button sitting over the inventory list would be a control
+                    // pointing at a screen the player is not looking at.
+                    if (selectedTab == LocalCharacterHomeTab.Tracker) {
+                        TextButton(
+                            onClick = { restToConfirm = RestKind.SHORT },
+                            modifier = Modifier.testTag("tracker:rest:short"),
+                        ) {
+                            Text(stringResource(R.string.tracker_short_rest))
+                        }
+                        TextButton(
+                            onClick = { restToConfirm = RestKind.LONG },
+                            modifier = Modifier.testTag("tracker:rest:long"),
+                        ) {
+                            Text(stringResource(R.string.tracker_long_rest))
+                        }
+                        IconButton(
+                            onClick = { historyOpen = true },
+                            modifier = Modifier.testTag("tracker:history:open"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.List,
+                                contentDescription = stringResource(R.string.tracker_history_title),
+                            )
+                        }
+                        IconButton(onClick = { customizeOpen = true }) {
+                            Icon(
+                                imageVector = Icons.Filled.Build,
+                                contentDescription = stringResource(R.string.customize_title),
+                            )
+                        }
                     }
-                    TextButton(
-                        onClick = { restToConfirm = RestKind.LONG },
-                        modifier = Modifier.testTag("tracker:rest:long"),
-                    ) {
-                        Text(stringResource(R.string.tracker_long_rest))
-                    }
-                    IconButton(
-                        onClick = { historyOpen = true },
-                        modifier = Modifier.testTag("tracker:history:open"),
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.List,
-                            contentDescription = stringResource(R.string.tracker_history_title),
-                        )
-                    }
-                    IconButton(onClick = { customizeOpen = true }) {
-                        Icon(
-                            imageVector = Icons.Filled.Build,
-                            contentDescription = stringResource(R.string.customize_title),
-                        )
+                    if (selectedTab == LocalCharacterHomeTab.Inventory) {
+                        IconButton(
+                            onClick = { addItemOpen = true },
+                            colors = mageHandIconButtonColors(),
+                            modifier = Modifier.testTag("inventory:add"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Add,
+                                contentDescription = stringResource(R.string.inventory_add),
+                            )
+                        }
                     }
                     IconButton(
                         onClick = { onEdit(uiState.characterId) },
@@ -195,22 +228,70 @@ fun LocalCharacterHomeScreen(
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
+            // Above the tabs, not inside one: level, the six scores and AC are reference for
+            // *both* tabs — Strength is what the inventory's capacity line is computed from —
+            // so hanging it off the tracker would have made the number vanish exactly where
+            // it explains something.
             uiState.reference?.let { ReferenceStrip(it) }
 
-            TrackerTab(
-                state = uiState.tracker,
-                actions = TrackerActions(
-                    onSpend = viewModel::spend,
-                    onRestore = viewModel::restore,
-                    onHpDelta = viewModel::changeHitPoints,
-                    onHpTap = { hpPadOpen = true },
-                    onItemDelta = viewModel::adjustItem,
-                    // A local board carries no toggles (09 decision 4), so nothing can reach
-                    // this; there is also no connection sheet to open.
-                    onToggle = {},
-                    onSelectRoll = viewModel::selectRoll,
-                    onConnectionDetails = {},
-                ),
+            PrimaryTabRow(selectedTabIndex = selectedTab.ordinal) {
+                tabs.forEach { tab ->
+                    Tab(
+                        selected = tab == selectedTab,
+                        onClick = { selectedTab = tab },
+                        text = { Text(stringResource(tab.titleResId)) },
+                    )
+                }
+            }
+
+            when (selectedTab) {
+                LocalCharacterHomeTab.Tracker -> TrackerTab(
+                    state = uiState.tracker,
+                    actions = TrackerActions(
+                        onSpend = viewModel::spend,
+                        onRestore = viewModel::restore,
+                        onHpDelta = viewModel::changeHitPoints,
+                        onHpTap = { hpPadOpen = true },
+                        onItemDelta = viewModel::adjustItem,
+                        // A local board carries no toggles (09 decision 4), so nothing can
+                        // reach this; there is also no connection sheet to open.
+                        onToggle = {},
+                        onSelectRoll = viewModel::selectRoll,
+                        onConnectionDetails = {},
+                    ),
+                )
+
+                LocalCharacterHomeTab.Inventory -> InventoryTab(
+                    state = uiState.inventory,
+                    actions = InventoryActions(
+                        onEquip = viewModel::setEquipped,
+                        onCoinDelta = viewModel::adjustCoins,
+                        onQuantityDelta = viewModel::adjustItemQuantity,
+                        onRowTap = { detailItemId = it },
+                    ),
+                )
+            }
+        }
+
+        // Same live-lookup + close-in-an-effect shape as the DiceCloud screen's; see there.
+        val detailRow = detailItemId?.let { uiState.inventory.row(it) }
+        if (detailItemId != null && detailRow == null) {
+            LaunchedEffect(detailItemId) { detailItemId = null }
+        }
+        detailRow?.let { row ->
+            ItemDetailSheet(
+                row = row,
+                canWrite = uiState.inventory.canWrite,
+                onQuantityDelta = viewModel::adjustItemQuantity,
+                onEquip = viewModel::setEquipped,
+                onDismiss = { detailItemId = null },
+            )
+        }
+
+        if (addItemOpen) {
+            AddItemSheet(
+                onAdd = viewModel::addItem,
+                onDismiss = { addItemOpen = false },
             )
         }
 

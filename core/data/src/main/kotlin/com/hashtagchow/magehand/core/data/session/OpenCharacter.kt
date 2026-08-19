@@ -1,7 +1,9 @@
 package com.hashtagchow.magehand.core.data.session
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -15,6 +17,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import com.hashtagchow.magehand.core.data.account.AccountRepository
 import com.hashtagchow.magehand.core.data.characters.CharacterCache
 import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
@@ -23,13 +26,20 @@ import com.hashtagchow.magehand.core.data.db.ThemePrefEntity
 import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
 import com.hashtagchow.magehand.core.data.db.toEntity
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
+import com.hashtagchow.magehand.core.data.tracker.InventoryEngine
 import com.hashtagchow.magehand.core.data.write.WriteFailure
 import com.hashtagchow.magehand.core.data.write.WriteOp
+import com.hashtagchow.magehand.core.data.write.WriteOperation
 import com.hashtagchow.magehand.core.data.write.WriteQueue
 import com.hashtagchow.magehand.core.ddp.DdpError
+import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.InventoryBoard
+import com.hashtagchow.magehand.core.model.InventoryItem
+import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
+import com.hashtagchow.magehand.core.model.WalletRow
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerOverride
@@ -126,6 +136,67 @@ interface OpenCharacter {
 
     /** Move a pinned item's quantity by [delta] (the consumable steppers). */
     fun adjustItem(item: TrackedResource, delta: Int)
+
+    /** What the inventory tab renders (docs/design/10-inventory.md). */
+    val inventory: StateFlow<InventoryBoard>
+
+    /**
+     * Put an item on or take it off — the inventory row's one-tap equip control
+     * (10 decision 4).
+     *
+     * Takes a [propertyId] rather than a row type because both boards can name the target and
+     * neither type is the obvious one: an [InventoryItem] is what the inventory tab holds, a
+     * [TrackedResource] is what the tracker holds, and the id is the whole of what the write
+     * needs. [currentlyEquipped] is what makes a correct inverse possible — see
+     * `WriteOp.equip`.
+     *
+     * **The server reparents the item**, and the undo does not put the folder back. That
+     * limit is stated in full on `WriteOp.Equip`; it is invisible on this screen because
+     * 10 decision 2 renders sections by state and never renders the tree.
+     */
+    fun setEquipped(propertyId: String, equipped: Boolean, currentlyEquipped: Boolean, targetName: String = "")
+
+    /**
+     * Create an item on the sheet — the catalog pick and the custom form, as one call
+     * (10 decision 6).
+     *
+     * **Not undoable.** The inverse would be a soft-remove and item deletion is fenced out of
+     * this release (10 decision 12), so the history entry records the add and offers no UNDO.
+     * See `WriteOp.InsertProperty`.
+     */
+    fun addItem(spec: NewItemSpec)
+
+    /**
+     * Move one denomination of coin by [delta] — the wallet steppers (10 decision 5).
+     *
+     * Rides the *same* `adjustQuantity` path the consumable steppers use, because coins are
+     * ordinary items on this server and the rate limit, the coalescing and the undo entry
+     * should all behave identically. It is a separate intent only because of the one case
+     * `adjustItem` cannot express: **[WalletRow.propertyId] may be `null`**, meaning the sheet
+     * carries no item for this denomination at all, and the first increment then has to
+     * *create* one rather than adjust it. A `TrackedResource` has no way to say "there is no
+     * property yet".
+     *
+     * A decrement on an absent row does nothing: there are no coins to spend.
+     *
+     * ### Two limits, stated rather than hidden
+     *
+     * **A burst on an absent denomination creates exactly one item.** Holding the stepper on a
+     * coin the sheet lacks does not file one `insert` per repeat; the implementation keeps a
+     * single insert on the wire and folds the rest of the hold into it, so the sheet gains one
+     * coin item carrying the whole count. This matters more than it sounds: item deletion is
+     * fenced out of this release (10 decision 12), so a duplicate created here could not be
+     * cleaned up from inside the app.
+     *
+     * **A decrement can only spend the head stack.** Where a sheet carries several items with
+     * one denomination's tag, [WalletRow.quantity] is their sum but [WalletRow.propertyId]
+     * names the first, and a single `adjustQuantity` cannot reach past it. Spending is
+     * therefore clamped at [WalletRow.headQuantity] — asking for more than the head holds
+     * empties the head and stops. The row's total then still counts the other stacks, which is
+     * the truth: the money is on the sheet, this app just has no v1 write that can reach it.
+     * Multi-stack spending is FR-9 territory, with container reorganization.
+     */
+    fun adjustCoins(row: WalletRow, delta: Int)
 
     /** Flip a condition toggle (a chip tapped). */
     fun toggle(condition: ConditionToggle)
@@ -313,6 +384,248 @@ internal class DefaultOpenCharacter(
         session.writeQueue.submit(WriteOp.adjust(item, bounded))
     }
 
+    override val inventory: StateFlow<InventoryBoard> get() = session.inventory
+
+    override fun setEquipped(
+        propertyId: String,
+        equipped: Boolean,
+        currentlyEquipped: Boolean,
+        targetName: String,
+    ) {
+        // Already in the requested state: nothing to say to the server, and sending it anyway
+        // would burn one of the five calls the 5 s window allows and file a history entry for
+        // a change that did not happen.
+        if (equipped == currentlyEquipped) return
+        session.writeQueue.submit(WriteOp.equip(propertyId, equipped, currentlyEquipped, targetName))
+    }
+
+    /**
+     * Resolves the parent and the `order` against the sheet **as it is at tap time**, then
+     * queues the insert.
+     *
+     * Resolution happens here rather than inside [WriteOp] because it is a read of live state,
+     * and `WriteOp`'s whole contract is that an op is a value that already knows everything it
+     * needs — see the factories' "they capture the row's current value" note. A sheet with no
+     * creature in it yet (the screen is still loading) has nowhere to put an item, and the tap
+     * is dropped rather than guessed at.
+     */
+    override fun addItem(spec: NewItemSpec) {
+        if (!spec.isValid) return
+        val target = InventoryEngine.insertTarget(session.currentSheet) ?: return
+        session.writeQueue.submit(
+            WriteOp.insertItem(spec, target.parentId, target.order, target.parentCollection),
+        )
+    }
+
+    /**
+     * One outstanding `creatureProperties.insert` for a denomination, and the taps that have
+     * arrived since. [pending] is a signed net, because a hold on `+` followed by a tap on `−`
+     * inside the same window is a perfectly ordinary thing to do.
+     */
+    private class CoinInsert(var pending: Int = 0)
+
+    private val coinLock = Any()
+
+    /**
+     * The insert-outstanding latch, one slot per denomination — the fix for the duplicate-coin
+     * bug described on [adjustCoins] and analysed on [insertCoin].
+     *
+     * Keyed per [CoinKind] rather than held globally so that adding gold does not block adding
+     * silver: they are different items and there is no reason one should wait for the other.
+     */
+    private val coinInserts = HashMap<CoinKind, CoinInsert>()
+
+    /** What [adjustCoins] decided to do, resolved under [coinLock] and acted on outside it. */
+    private enum class CoinAction { INSERT, ACCUMULATED, ADJUST, DROP }
+
+    /**
+     * The wallet stepper, both halves (10 decision 5).
+     *
+     * When the sheet already has the coin item this is an ordinary `adjustQuantity` — the
+     * identical call the consumable steppers make, with the identical sign convention
+     * (`increment` is a *consumption* amount, so a `+1` in the UI is a `-1` on the wire; see
+     * `WriteOp.adjust`).
+     *
+     * When it does not, an increment **creates** the item instead, tagged and priced per
+     * [CoinKind]. That is the only path in the app where a stepper can insert, and it is why
+     * this intent exists separately from [adjustItem]. A decrement on an absent row is
+     * dropped: there is no such thing as spending coins you do not have, and creating a coin
+     * item with a negative quantity to represent it would be worse than doing nothing.
+     *
+     * ### The three-way branch, and why the latch is checked first
+     *
+     * The latch is consulted **before** [WalletRow.propertyId], not after. Once the insert
+     * lands, the mirror learns the new id and the row this method is handed stops being absent
+     * — but the flush of the accumulated taps has not happened yet, and letting those last taps
+     * take the ordinary adjust path would double-count them against the flush. While a slot is
+     * held, every tap for that denomination goes into it and nothing else happens.
+     */
+    override fun adjustCoins(row: WalletRow, delta: Int) {
+        if (delta == 0) return
+
+        val action = synchronized(coinLock) {
+            val outstanding = coinInserts[row.coin]
+            when {
+                outstanding != null -> {
+                    outstanding.pending += delta
+                    CoinAction.ACCUMULATED
+                }
+
+                row.propertyId != null -> CoinAction.ADJUST
+                delta < 0 -> CoinAction.DROP
+                else -> {
+                    coinInserts[row.coin] = CoinInsert()
+                    CoinAction.INSERT
+                }
+            }
+        }
+
+        when (action) {
+            CoinAction.ACCUMULATED, CoinAction.DROP -> Unit
+            CoinAction.INSERT -> insertCoin(row.coin, delta)
+            CoinAction.ADJUST -> adjustExistingCoin(row, delta)
+        }
+    }
+
+    /**
+     * `adjustQuantity` against the stack [WalletRow.propertyId] names.
+     *
+     * ### The clamp is against the head, not the total
+     *
+     * [WalletRow.quantity] is the **sum across every stack** of this denomination, while
+     * [WalletRow.propertyId] names the **first**. Clamping a spend against the sum and sending
+     * it at the head is how a wallet reading 105 gp — a 5 gp stack followed by a 100 gp stack —
+     * turned "spend 50" into a head stack of `−45` on the server: the clamp saw 105, allowed
+     * the whole 50, and the item it actually hit only had 5 in it. Negative quantities are not
+     * a state DiceCloud's own UI can produce, and nothing in this release can put one back.
+     *
+     * So the clamp reads [WalletRow.headQuantity] and the spend stops there. The row's total
+     * goes on counting the stacks this app cannot reach, which is honest — the money is on the
+     * sheet — and reaching them needs the multi-property write FR-9 owns.
+     */
+    private fun adjustExistingCoin(row: WalletRow, delta: Int) {
+        val propertyId = row.propertyId ?: return
+        if (delta < 0 && row.headQuantity <= 0) return
+        val bounded = if (delta < 0) -minOf(-delta, row.headQuantity) else delta
+        session.writeQueue.submit(
+            WriteOp.AdjustQuantity(
+                propertyId = propertyId,
+                operation = WriteOperation.INCREMENT,
+                value = -bounded,
+                targetName = row.coin.itemName,
+                intent = if (bounded < 0) TrackerWriteKind.ITEM_USE else TrackerWriteKind.ITEM_ADD,
+            ),
+        )
+    }
+
+    /**
+     * Creates the coin item, with the latch for [coin] already held by the caller.
+     *
+     * ### Why a latch and not a coalesce key
+     *
+     * A stepper hold accelerates to a repeat every 60 ms, and `creatureProperties.insert`
+     * carries no [WriteOp.coalesceKey] — so the pre-fix code filed one insert per repeat and a
+     * two-second hold on an absent denomination put a dozen separate coin items on the sheet.
+     * Irreversible from inside the app: item deletion is fenced out of this release
+     * (10 decision 12).
+     *
+     * Giving `InsertProperty` a coalesce key would not have fixed it, and the reason is worth
+     * writing down because it is the non-obvious half. `WriteQueue.takeCoalescedHead` merges
+     * the head with entries **still sitting in the queue**; it removes the head and claims it
+     * as `inFlight` *before* the call goes out, so nothing submitted during the server round
+     * trip can merge into it. A keyed burst would therefore collapse to **two** calls — the one
+     * already on the wire, plus one merged batch of everything that piled up behind it — and
+     * two inserts are two coin items. Worse, every queued insert was built when the row was
+     * still absent, so the second one would be a duplicate of an item that by then exists. The
+     * queue's coalescing is the right machinery for repeated *adjustments*; it cannot close an
+     * in-flight window, and creation is exactly the case where that window is the bug.
+     *
+     * ### What the latch does instead
+     *
+     * One insert per denomination is on the wire at a time. Every tap that arrives while it is
+     * outstanding is summed into [CoinInsert.pending], and once the insert has landed **and**
+     * the mirror has published the new property, the accumulated remainder is applied as a
+     * single ordinary `adjustQuantity` (via [adjustCoins] re-entering its own ADJUST branch, so
+     * the head-stack clamp and the intent labelling stay in one place). A double-tap and a
+     * two-second hold both end at one item holding the right number.
+     *
+     * A sheet with nowhere to put the item releases the latch immediately rather than stranding
+     * it — a latch nobody will ever clear would silently disable the denomination's stepper for
+     * the rest of the session.
+     */
+    private fun insertCoin(coin: CoinKind, delta: Int) {
+        val target = InventoryEngine.insertTarget(session.currentSheet)
+        if (target == null) {
+            synchronized(coinLock) { coinInserts.remove(coin) }
+            return
+        }
+        val insert = session.writeQueue.submit(
+            WriteOp.insertItem(
+                NewItemSpec.ofCoin(coin, delta),
+                target.parentId,
+                target.order,
+                target.parentCollection,
+            ),
+        )
+        scope.launch { settleCoinInsert(coin, insert) }
+    }
+
+    /**
+     * Waits out the insert, then releases the latch and flushes whatever piled up behind it.
+     *
+     * ### Why it waits for the mirror and not just for the method
+     *
+     * The flush is an `adjustQuantity`, which needs the new property's id — and the id is
+     * minted by the server. Waiting for the *row* rather than for the call is what makes the
+     * re-entry provably take [adjustCoins]'s ADJUST branch: [awaitCreatedCoinRow] only ever
+     * returns a row that is no longer absent, so the flush can never start a second insert.
+     * In practice the wait is already over when it starts — [WriteQueue] completes a submission
+     * on `result` **and** `updated`, and DDP guarantees the document push precedes `updated` —
+     * so this is a `StateFlow` catching up, not a network wait.
+     *
+     * ### What is dropped, and why that is the safe direction
+     *
+     * A failed insert (server rejection, a refusal off-LIVE) drops the accumulated taps. No
+     * item was created, and re-sending an insert whose outcome we never saw is precisely the
+     * duplicate this latch exists to prevent — the same rule [WriteQueue] applies when a call
+     * loses its connection. A mirror that never publishes the row inside the timeout drops them
+     * too; the item exists with the count the insert carried, the wallet will show it, and the
+     * next tap adjusts it.
+     */
+    private suspend fun settleCoinInsert(coin: CoinKind, insert: Deferred<Unit>) {
+        // The slot is released on **every** exit, including a cancellation landing between
+        // `await` and the flush. Unreachable today — the only thing that cancels this
+        // coroutine is `close()` cancelling the character scope, which discards the map along
+        // with the object — but "unreachable because of a fact about another method" is the
+        // kind of reasoning that stops being true quietly. A stranded slot would disable this
+        // denomination's stepper for the rest of the session with nothing to show for it.
+        var slotReleased = false
+        try {
+            var created = false
+            try {
+                insert.await()
+                created = true
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // `created` stays false and the accumulation is dropped — see the KDoc.
+            }
+
+            val row = if (created) awaitCreatedCoinRow(coin) else null
+            val pending = synchronized(coinLock) { coinInserts.remove(coin)?.pending ?: 0 }
+            slotReleased = true
+            if (row != null && pending != 0) adjustCoins(row, pending)
+        } finally {
+            if (!slotReleased) synchronized(coinLock) { coinInserts.remove(coin) }
+        }
+    }
+
+    /** The denomination's row once it stops being absent, or `null` if it never does. */
+    private suspend fun awaitCreatedCoinRow(coin: CoinKind): WalletRow? =
+        withTimeoutOrNull(COIN_INSERT_SETTLE_MILLIS) {
+            session.inventory.map { it.wallet.row(coin) }.first { !it.isAbsent }
+        }
+
     override fun toggle(condition: ConditionToggle) {
         session.writeQueue.submit(WriteOp.flip(condition))
     }
@@ -382,3 +695,15 @@ internal fun WriteFailure.toDomain(): TrackerWriteFailure {
 }
 
 private val FAILURE_IDS = java.util.concurrent.atomic.AtomicLong(0)
+
+/**
+ * How long the coin-insert latch waits for the mirror to publish the property the server just
+ * created, before giving up on flushing the taps that accumulated behind it.
+ *
+ * Generous on purpose, and not a network timeout: by the time this wait starts the method has
+ * already been acknowledged with `updated`, so what is being waited for is a `StateFlow` two
+ * `map`s downstream of the mirror. Two seconds is long enough that it never fires on a working
+ * connection and short enough that a wedged one releases the stepper rather than disabling the
+ * denomination for the rest of the session.
+ */
+private const val COIN_INSERT_SETTLE_MILLIS: Long = 2_000

@@ -54,7 +54,12 @@ class WritePostureTest {
         "creatureProperties.adjustQuantity",
         "creatureProperties.flipToggle",
         "creatureProperties.update",
-        "creatureProperties.equipItem",
+        // FR-8: the real name, from the 2026-08-19 probe. The doc said `equipItem` and
+        // nothing had ever called it; `creatureProperties.equip` is what the server answers
+        // to, and docs/design/02-ddp-and-api.md is corrected in the same cycle. This string
+        // is also a strict superset of the old one as a substring test, so the scan below
+        // still catches `equipItem` if it ever reappears.
+        "creatureProperties.equip",
         "creatureProperties.insert",
         "creature.methods.rest",
         "creatures.insertCreature",
@@ -68,6 +73,14 @@ class WritePostureTest {
         "changeHitPoints",
         "setHitPoints",
         "adjustItem",
+        // FR-8's three, added deliberately per this list's own rule. Each is an *intent*, not
+        // a method: `setEquipped` and `addItem` name what the player did, and `adjustCoins`
+        // exists separately from `adjustItem` only because a wallet row may have no backing
+        // property yet (docs/design/10-inventory.md decision 5). None of them lets `:app`
+        // name a DDP method — the first two assertions above are what prove that.
+        "setEquipped",
+        "addItem",
+        "adjustCoins",
         "toggle",
         "rest",
         "undoLastWrite",
