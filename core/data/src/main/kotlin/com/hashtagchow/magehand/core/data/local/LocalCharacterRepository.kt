@@ -6,6 +6,7 @@ import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
 import com.hashtagchow.magehand.core.data.db.LocalCharacterEntity
 import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.LocalCharacter
 import com.hashtagchow.magehand.core.model.LocalRowKind
@@ -21,14 +22,16 @@ import java.util.UUID
  * reason: a save asserted against a wall clock or a random UUID is a test that asserts
  * nothing.
  *
- * [selectedRollStore] is here for [delete] alone, and deliberately has **no default**: a
- * character's FR-7 roll selection lives outside the database, so a construction site that
- * could quietly omit the store would be a construction site whose deletes leak keys. Same
- * argument `DataModule` makes for handing the store to `DefaultAccountRepository.signOut`.
+ * [selectedRollStore] and [equippableOverrideStore] are here for [delete] alone, and
+ * deliberately have **no default**: a character's FR-7 roll selection and its FR-10
+ * equippability overrides both live outside the database, so a construction site that could
+ * quietly omit either would be a construction site whose deletes leak keys. Same argument
+ * `DataModule` makes for handing the stores to `DefaultAccountRepository.signOut`.
  */
 class LocalCharacterRepository(
     private val dao: LocalCharacterDao,
     private val selectedRollStore: SelectedRollStore,
+    private val equippableOverrideStore: EquippableOverrideStore,
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) {
@@ -200,6 +203,10 @@ class LocalCharacterRepository(
      */
     suspend fun delete(id: String) {
         selectedRollStore.setSelectedRollId(SelectedRollStore.localKey(id), null)
+        // 11 decision 2's overrides, reaped here for word-for-word the same reason: another
+        // DataStore key in the local namespace, outside the sign-out sweep on purpose, keyed
+        // by a UUID that will never recur. Before the row, like everything else above it.
+        equippableOverrideStore.clearForCharacter(EquippableOverrideStore.localKey(id))
         dao.delete(id)
     }
 }

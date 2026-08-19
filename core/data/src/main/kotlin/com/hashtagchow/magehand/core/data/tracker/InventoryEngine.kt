@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.core.data.tracker
 
 import kotlinx.serialization.json.JsonObject
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.core.model.EquipGroup
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryContainer
 import com.hashtagchow.magehand.core.model.InventoryItem
@@ -71,6 +72,123 @@ object InventoryEngine {
 
     private const val ATTR_ABILITY = "ability"
     private const val VAR_STRENGTH = "strength"
+
+    private const val FIELD_TAGS = "tags"
+    private const val FIELD_LIBRARY_TAGS = "libraryTags"
+
+    // -----------------------------------------------------------------------
+    // Equippability (docs/design/11-inventory-polish.md decision 1)
+    // -----------------------------------------------------------------------
+
+    /**
+     * The tags that make an item a weapon. Matched **case-insensitively and whole**.
+     *
+     * Whole-tag equality rather than a `contains("weapon")` substring, because the sheet's
+     * taxonomy also carries `spellcasting focus`, `weapon proficiency` and skill tags like
+     * `simpleRangedWeapon` that a substring test would sweep in — and the FR-10 probe's 0
+     * false positives on two real sheets is a claim about *this* set, not about the word.
+     */
+    val WEAPON_TAGS: Set<String> = setOf(
+        "melee weapon",
+        "ranged weapon",
+        "martial weapon",
+        "simple weapon",
+    )
+
+    /**
+     * The tags that make an item armor, shields included.
+     *
+     * **Data defect 1, and the reason this set is enumerated rather than reduced to the bare
+     * word `armor`:** the SRD's *Half Plate* carries `medium armor` and does **not** carry
+     * `armor`. A rule keyed on the bare tag would therefore refuse an equip control to a suit
+     * of armor — the single most equippable object in the game. Every category is listed, and
+     * `armor` is kept alongside them for the entries that do carry it. Nothing here may be
+     * collapsed back into one tag, however tidy that looks.
+     *
+     * The probe also found one malformed barding tag on the reference sheet. It is left
+     * unmatched on purpose: barding is worn by a mount, not by the character holding the
+     * phone, so a miss there costs nothing and a special case would cost a line of judgment.
+     */
+    val ARMOR_TAGS: Set<String> = setOf(
+        "armor",
+        "light armor",
+        "medium armor",
+        "heavy armor",
+        "shield",
+    )
+
+    /**
+     * The whole equippable taxonomy — 11 decision 1's set, verbatim from the FR-10 mini-probe
+     * (0 false positives, 0 false negatives on both real sheets).
+     *
+     * **Data defect 2, and why the rule's other disjunct is load-bearing:** the reference sheet
+     * carries four *hand-made* items the player has already equipped — "A Small Knife", "A
+     * quill", a cloak, a set of clothes — and three of them are tagged with nothing this set
+     * contains. `equipped == true` is what keeps the **unequip** control on them. Without it,
+     * equipping a home-made item would be a one-way door: the control that put it on would
+     * vanish the moment it went on.
+     *
+     * That disjunct has a known residual, and it is a false *negative* rather than a wrong
+     * answer: once such an item is unequipped it stops matching either half of the rule and
+     * loses its control until the player turns it back on by hand. That is precisely what the
+     * per-item override of 11 decision 2 exists for — and it is why the fix is an override and
+     * never a name heuristic, which would guess at "knife" and be wrong about "A Little Bag of
+     * Sand" on the same sheet.
+     */
+    val EQUIPPABLE_TAGS: Set<String> = WEAPON_TAGS + ARMOR_TAGS
+
+    /**
+     * 11 decision 1's rule, whole: **live AND (equipped OR a tag in [EQUIPPABLE_TAGS])**.
+     *
+     * The `live` half is not tested here and cannot be — [build] filters `removed` and
+     * `inactive` at the single point of entry, so an item that reaches this function is live by
+     * construction. Restating it as a third condition would be a second answer to a question
+     * already settled one call up.
+     *
+     * @param tags the union of the item's own `tags` and its `libraryTags`, already unioned by
+     *   the caller. See [InventoryItem.libraryTags] for why the source keeps them apart.
+     */
+    private fun isEquippable(tags: List<String>, equipped: Boolean): Boolean =
+        equipped || tags.any { it.normalizedTag() in EQUIPPABLE_TAGS }
+
+    /**
+     * Which of Carried's three subsections the item belongs to (11 decision 3).
+     *
+     * Weapon **before** armor, because it is a precedence and not a partition: an item tagged
+     * both ways exists only if a sheet author typed both, and putting it under Weapons is the
+     * reading that matches what such an item almost always is. `equipped` deliberately plays no
+     * part — an equipped item renders in the Equipped section, which 11 decision 3 leaves
+     * unchanged, so its group would never be read.
+     *
+     * Everything else is [EquipGroup.GEAR], including the equipped-but-untagged items the rule
+     * above rescues and the overridden ones 11 decision 2 adds. Decision 3 says so in as many
+     * words: an override buys the *control*, not a promotion to the Weapons list — this app
+     * still does not know what the thing is, and filing it under Weapons would be a claim.
+     */
+    private fun equipGroup(tags: List<String>): EquipGroup {
+        val normalized = tags.map { it.normalizedTag() }
+        return when {
+            normalized.any { it in WEAPON_TAGS } -> EquipGroup.WEAPON
+            normalized.any { it in ARMOR_TAGS } -> EquipGroup.ARMOR
+            else -> EquipGroup.GEAR
+        }
+    }
+
+    /**
+     * A sheet's tag, reduced to the form the sets above are written in.
+     *
+     * Lowercased because the taxonomy is free text a sheet author typed, and trimmed because
+     * `" simple weapon"` is the same tag as `"simple weapon"` to every human who reads it and a
+     * different one to `Set.contains`. Stray whitespace is ordinary in hand-typed and
+     * copy-pasted tags, and the cost of not trimming falls in exactly the wrong place: a real
+     * weapon silently loses its equip control, and the player has to reach for 11 decision 2's
+     * override to rescue an item this app could have classified correctly. The override exists
+     * for data the taxonomy genuinely does not cover, not for a space.
+     *
+     * Nothing further is normalized — no de-hyphenating, no singularising, no fuzzy matching.
+     * Those would be guesses at what an author meant; this only undoes what a text field did.
+     */
+    private fun String.normalizedTag(): String = trim().lowercase()
 
     /**
      * Builds the board.
@@ -214,22 +332,37 @@ object InventoryEngine {
      * already agrees. Two screens showing different item lists for one sheet would be the
      * bug, whichever list was "right".
      */
-    private fun JsonObject.toInventoryItem(): InventoryItem? = InventoryItem(
-        propertyId = string("_id") ?: return null,
-        name = string("name").orEmpty(),
-        // A missing quantity is one, not zero: the field is omitted on singletons often
-        // enough that reading it as zero would make half a sheet weigh nothing.
-        quantity = number(FIELD_QUANTITY) ?: 1,
-        weightLb = decimal(FIELD_WEIGHT),
-        valueGp = decimal(FIELD_VALUE),
-        description = descriptionText(),
-        equipped = isTrue(FIELD_EQUIPPED),
-        tags = strings("tags"),
-        requiresAttunement = bool(FIELD_REQUIRES_ATTUNEMENT),
-        attuned = bool(FIELD_ATTUNED),
-        containerId = parentId(),
-        sortOrder = number("order") ?: 0,
-    )
+    private fun JsonObject.toInventoryItem(): InventoryItem? {
+        val id = string("_id") ?: return null
+        val tags = strings(FIELD_TAGS)
+        val libraryTags = strings(FIELD_LIBRARY_TAGS)
+        // The union 11 decision 1 names, computed once and handed to both readers below so the
+        // grouping and the control can never be derived from different evidence.
+        val allTags = tags + libraryTags
+        val equipped = isTrue(FIELD_EQUIPPED)
+
+        return InventoryItem(
+            propertyId = id,
+            name = string("name").orEmpty(),
+            // A missing quantity is one, not zero: the field is omitted on singletons often
+            // enough that reading it as zero would make half a sheet weigh nothing.
+            // `TrackerEngine.item` reads it the same way — see MED-4 there, and the
+            // cross-engine agreement test that pins the two together.
+            quantity = number(FIELD_QUANTITY) ?: 1,
+            weightLb = decimal(FIELD_WEIGHT),
+            valueGp = decimal(FIELD_VALUE),
+            description = descriptionText(),
+            equipped = equipped,
+            tags = tags,
+            libraryTags = libraryTags,
+            requiresAttunement = bool(FIELD_REQUIRES_ATTUNEMENT),
+            attuned = bool(FIELD_ATTUNED),
+            containerId = parentId(),
+            sortOrder = number("order") ?: 0,
+            isEquippable = isEquippable(allTags, equipped),
+            equipGroup = equipGroup(allTags),
+        )
+    }
 
     /** One `container` property, with the already-bucketed items that name it as parent. */
     private fun JsonObject.toInventoryContainer(candidates: List<InventoryItem>): InventoryContainer? {

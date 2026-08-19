@@ -24,6 +24,7 @@ import com.hashtagchow.magehand.core.data.local.LocalCharacterRepository
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacter
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 
 /**
@@ -70,9 +71,14 @@ class LocalCharacterHomeLifecycleTest {
         val dao = EmptyLocalCharacterDao
         return LocalCharacterHomeViewModel(
             savedStateHandle = SavedStateHandle(mapOf("characterId" to characterId)),
-            repository = LocalCharacterRepository(dao, FakeSelectedRollStore),
+            repository = LocalCharacterRepository(
+                dao,
+                FakeSelectedRollStore,
+                FakeEquippableOverrideStore,
+            ),
             appSettingsStore = FakeAppSettingsStore,
             selectedRollStore = FakeSelectedRollStore,
+            equippableOverrideStore = FakeEquippableOverrideStore,
             factory = LocalOpenCharacterFactory(dao),
         )
     }
@@ -171,6 +177,18 @@ private object EmptyLocalCharacterDao : LocalCharacterDao {
 private object FakeSelectedRollStore : SelectedRollStore {
     override fun selectedRollId(characterKey: String): Flow<String?> = flowOf(null)
     override suspend fun setSelectedRollId(characterKey: String, rollId: String?) = Unit
+    override suspend fun deleteForAccount(accountId: String) = Unit
+}
+
+/** FR-10's store, likewise a constant: nothing here reads the inventory's shape either. */
+private object FakeEquippableOverrideStore : EquippableOverrideStore {
+    override fun overrides(characterKey: String): Flow<Set<String>> = flowOf(emptySet())
+    override suspend fun setOverridden(
+        characterKey: String,
+        propertyId: String,
+        overridden: Boolean,
+    ) = Unit
+    override suspend fun clearForCharacter(characterKey: String) = Unit
     override suspend fun deleteForAccount(accountId: String) = Unit
 }
 

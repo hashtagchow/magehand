@@ -16,6 +16,7 @@ import com.hashtagchow.magehand.core.data.db.ThemePrefDao
 import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
 import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.server.ServerUrlResult
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.server.normalizeServerUrl
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
@@ -44,6 +45,7 @@ class DefaultAccountRepository(
     private val trackerPrefDao: TrackerPrefDao,
     private val themePrefDao: ThemePrefDao,
     private val selectedRollStore: SelectedRollStore,
+    private val equippableOverrideStore: EquippableOverrideStore,
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) : AccountRepository {
@@ -203,6 +205,11 @@ class DefaultAccountRepository(
         // sign-in, so a row left behind is unreachable rather than merely stale. Its own
         // key namespace is what stops this reaching a local character's selection.
         selectedRollStore.deleteForAccount(accountId)
+        // FR-10's per-item equippability overrides (11 decision 2). The same store shape, the
+        // same file and the same argument as the line above: a preference keyed by character
+        // rather than by table, so it is neither a DAO nor cascadable, and an account id that
+        // will never be minted again makes anything left behind unreachable rather than stale.
+        equippableOverrideStore.deleteForAccount(accountId)
 
         // The token also rests in the WebView's localStorage, because that is how
         // Meteor SSO works (docs/design/05-security.md §"WebView SSO"). WP5 found it

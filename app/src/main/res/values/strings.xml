@@ -19,9 +19,21 @@
     <!-- FR-8: inventory tab (docs/design/10-inventory.md) -->
     <string name="inventory_section_wallet">Wallet</string>
     <string name="inventory_section_equipped">Equipped</string>
-    <string name="inventory_section_carried">Carried</string>
     <!-- Only ever read for a container property whose name field is blank. -->
     <string name="inventory_section_container">Container</string>
+    <!-- FR-10 (11 decision 3): what was one "Carried" section is now these three. -->
+    <string name="inventory_section_weapons">Weapons</string>
+    <string name="inventory_section_armor">Armor</string>
+    <string name="inventory_section_gear">Gear</string>
+    <!-- FR-11 (11 decision 4): the collapsed wallet. The summary itself is built in
+         WalletUiState, because it is numbers; this is the all-zero case, which is a word. -->
+    <string name="inventory_wallet_empty">Empty</string>
+    <string name="inventory_wallet_expand">Show the coin steppers</string>
+    <string name="inventory_wallet_collapse">Hide the coin steppers</string>
+    <!-- 11 decision 2: the per-item equippability override, shown only where this app could
+         not tell from the sheet's own tags. -->
+    <string name="inventory_detail_equippable">Can be equipped</string>
+    <string name="inventory_detail_equippable_hint">This sheet doesn\'t say what %1$s is. Turn this on to get an equip control for it.</string>
     <!-- The top line. Two forms because capacity is nullable: a sheet that expresses no
          Strength gets no denominator rather than an invented one (10 decision 8). -->
     <string name="inventory_carried">%1$s lb carried</string>

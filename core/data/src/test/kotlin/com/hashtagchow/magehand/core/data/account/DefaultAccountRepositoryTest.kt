@@ -23,7 +23,9 @@ import com.hashtagchow.magehand.core.data.characters.CharacterCache
 import com.hashtagchow.magehand.core.data.characters.RoomCharacterCache
 import com.hashtagchow.magehand.core.data.db.AccountEntity
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
+import com.hashtagchow.magehand.core.data.fake.FakeEquippableOverrideStore
 import com.hashtagchow.magehand.core.data.fake.FakeSelectedRollStore
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.db.ThemePrefEntity
 import com.hashtagchow.magehand.core.data.db.TrackerPrefEntity
@@ -68,6 +70,7 @@ class DefaultAccountRepositoryTest {
      * real file in `SelectedRollStoreTest`.
      */
     private val selectedRolls = FakeSelectedRollStore()
+    private val equippableOverrides = FakeEquippableOverrideStore()
 
     @Before
     fun setUp() {
@@ -95,6 +98,7 @@ class DefaultAccountRepositoryTest {
             trackerPrefDao = database.trackerPrefDao(),
             themePrefDao = database.themePrefDao(),
             selectedRollStore = selectedRolls,
+            equippableOverrideStore = equippableOverrides,
             now = { clock },
             newId = { "acct-${++idCounter}" },
         )
@@ -356,6 +360,10 @@ class DefaultAccountRepositoryTest {
             "the remembered roll selection must be gone: ${selectedRolls.keys}",
             selectedRolls.keys.isEmpty(),
         )
+        assertTrue(
+            "the equippability overrides must be gone: ${equippableOverrides.keys}",
+            equippableOverrides.keys.isEmpty(),
+        )
     }
 
     @Test
@@ -380,6 +388,11 @@ class DefaultAccountRepositoryTest {
             setOf(SelectedRollStore.serverKey(bob.id, CREATURE_ID)),
             selectedRolls.keys,
         )
+        assertEquals(
+            "nor are bob's equippability overrides",
+            setOf(EquippableOverrideStore.serverKey(bob.id, CREATURE_ID)),
+            equippableOverrides.keys,
+        )
     }
 
     /** One row in every per-account store, so a missed `deleteForAccount` cannot pass. */
@@ -393,6 +406,11 @@ class DefaultAccountRepositoryTest {
         selectedRolls.setSelectedRollId(
             SelectedRollStore.serverKey(accountId, CREATURE_ID),
             "roll-1",
+        )
+        equippableOverrides.setOverridden(
+            EquippableOverrideStore.serverKey(accountId, CREATURE_ID),
+            "prop-1",
+            overridden = true,
         )
     }
 

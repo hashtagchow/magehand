@@ -170,10 +170,29 @@ object TrackerEngine {
      *
      * `value == total == quantity`: an item has no maximum, and writes go through
      * `adjustQuantity`, not `damage`.
+     *
+     * ### MED-4: a missing `quantity` is **one**, not zero
+     *
+     * This read used to be `?: 0` while `InventoryEngine.toInventoryItem` used `?: 1`, so one
+     * property produced two different quantities depending on which tab was looking at it — a
+     * potion the inventory listed as "×1" was a consumable the tracker showed as 0, with its
+     * `−` greyed out. 11 decision 7 settles it in the inventory's favour, and not by coin-toss:
+     * DiceCloud omits the field on singletons, so an item without it is one of the thing. The
+     * weight argument already forced that reading once (a sheet of unquantified gear would
+     * otherwise weigh nothing), and a second engine reading the same absence as "none of it"
+     * was the disagreement, not a second opinion worth keeping.
+     *
+     * The knock-ons follow rather than needing their own edits: `OpenCharacter.adjustItem`
+     * clamps a decrement against `item.value`, and the consumable stepper's `−` is enabled on
+     * `quantity > 0`. Both now see 1 and both now behave — spending the potion is possible, and
+     * lands the same write the inventory tab's own stepper would.
+     *
+     * `TrackerEngineTest`'s cross-engine agreement test pins the two engines to one answer, so
+     * a future edit to either reopens the defect as a test failure rather than as a grey button.
      */
     private fun item(p: JsonObject): TrackedResource? {
         if (p.string("type") != TYPE_ITEM || p.isSkipped()) return null
-        val quantity = p.number("quantity") ?: 0
+        val quantity = p.number("quantity") ?: 1
         return TrackedResource(
             propertyId = p.string("_id") ?: return null,
             kind = TrackerKind.ITEM,

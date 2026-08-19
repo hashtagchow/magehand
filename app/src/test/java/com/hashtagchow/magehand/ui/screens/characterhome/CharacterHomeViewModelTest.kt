@@ -29,6 +29,7 @@ import com.hashtagchow.magehand.core.data.characters.CharacterListState
 import com.hashtagchow.magehand.core.data.connection.AccountConnection
 import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CharacterSummary
@@ -101,6 +102,7 @@ class CharacterHomeViewModelTest {
             sheetSessionFactory = SheetSessionFactory(StubAccountRepository, StubTokenStore),
             appSettingsStore = FakeAppSettingsStore(showToggles),
             selectedRollStore = selectedRolls,
+            equippableOverrideStore = equippableOverrides,
             openCharacterFactory = factory,
             connectionManager = connectionManager,
         )
@@ -111,6 +113,9 @@ class CharacterHomeViewModelTest {
 
     /** FR-7's per-character selection. In memory; the persistence itself is `:core:data`'s. */
     private val selectedRolls = FakeSelectedRollStore()
+
+    /** FR-10's per-item overrides. In memory, for the same reason as the selection above. */
+    private val equippableOverrides = FakeEquippableOverrideStore()
 
     /** `stateIn(WhileSubscribed)` never runs without a collector. */
     private fun kotlinx.coroutines.test.TestScope.collecting(vm: CharacterHomeViewModel) {
@@ -226,6 +231,67 @@ class CharacterHomeViewModelTest {
             advanceUntilIdle()
 
             assertTrue(selectedRolls.keys.isEmpty())
+        }
+
+    // --- FR-10: the per-item equippability override (11 decision 2) ------------
+
+    @Test
+    fun `an override is stored under the account-scoped key and reaches the tab`() =
+        runTest(dispatcher) {
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            advanceUntilIdle()
+
+            character.inventory.value = InventoryBoard(
+                carried = listOf(
+                    InventoryItem(
+                        propertyId = "knife",
+                        name = "A Small Knife",
+                        quantity = 1,
+                        weightLb = null,
+                        valueGp = null,
+                        description = null,
+                        equipped = false,
+                        // The 11 decision 1 residual: tagless and unequipped, so the engine
+                        // calls it non-equippable and the row carries no equip control.
+                        isEquippable = false,
+                    ),
+                ),
+            )
+            advanceUntilIdle()
+
+            assertFalse(vm.uiState.value.inventory.row("knife")!!.showsEquipControl)
+
+            vm.setEquippableOverride("knife", canEquip = true)
+            advanceUntilIdle()
+
+            // Account-scoped, matching the roll selection above and every other per-character
+            // store: two accounts reaching one shared creature must not share an override.
+            assertEquals(
+                setOf(EquippableOverrideStore.serverKey(character.accountId, creatureId)),
+                equippableOverrides.keys,
+            )
+            // …and it is a *live* read, not a write into a void: the tab re-renders with the
+            // control back on.
+            val row = vm.uiState.value.inventory.row("knife")!!
+            assertTrue(row.showsEquipControl)
+            assertTrue(row.equippableOverridden)
+        }
+
+    @Test
+    fun `an override set before the character opens is dropped, not stored under a wrong key`() =
+        runTest(dispatcher) {
+            // The roll selection's argument, unchanged: the key needs the account id, and only
+            // the opened character knows it. A key under an empty account id is one sign-out
+            // could never reach.
+            val (vm, _) = viewModel(character = null)
+            collecting(vm)
+
+            vm.setEquippableOverride("knife", canEquip = true)
+            advanceUntilIdle()
+
+            assertTrue(equippableOverrides.keys.isEmpty())
         }
 
     @Test
@@ -815,6 +881,40 @@ private class FakeSelectedRollStore : SelectedRollStore {
         entries.value = entries.value.toMutableMap().apply {
             if (rollId == null) remove(characterKey) else put(characterKey, rollId)
         }
+    }
+
+    override suspend fun deleteForAccount(accountId: String) = Unit
+}
+
+/**
+ * FR-10's store. Recording for the same reason as the one above: the claim worth asserting is
+ * that the view model writes the *account-scoped* key, which a constant could not show.
+ */
+private class FakeEquippableOverrideStore : EquippableOverrideStore {
+    private val entries = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
+
+    val keys: Set<String> get() = entries.value.keys
+
+    fun overridesFor(characterKey: String): Set<String> = entries.value[characterKey].orEmpty()
+
+    override fun overrides(characterKey: String): Flow<Set<String>> =
+        entries.map { it[characterKey].orEmpty() }
+
+    override suspend fun setOverridden(
+        characterKey: String,
+        propertyId: String,
+        overridden: Boolean,
+    ) {
+        entries.value = entries.value.toMutableMap().apply {
+            val next = this[characterKey].orEmpty().let {
+                if (overridden) it + propertyId else it - propertyId
+            }
+            if (next.isEmpty()) remove(characterKey) else put(characterKey, next)
+        }
+    }
+
+    override suspend fun clearForCharacter(characterKey: String) {
+        entries.value = entries.value - characterKey
     }
 
     override suspend fun deleteForAccount(accountId: String) = Unit

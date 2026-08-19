@@ -106,6 +106,96 @@ class SurfacePaletteTest {
         assertTrue(luminance(DarkSurfaceContainerLowest) > 0.0)
     }
 
+    // --- LOW-7: the legibility floor on every container role ---------------------------
+
+    /**
+     * WCAG AA for body text, and the reason this is a *different* number from [minSeparation].
+     *
+     * That one is surface-against-surface — whether a card's edge can be seen — and 4.5 there
+     * would mean a white menu in a dark app. This one is glyphs against the thing they are
+     * drawn on, which is the case WCAG's 4.5:1 was actually written for. Two floors because
+     * they are two questions; one number for both would have to be wrong about one of them.
+     */
+    private val minLegibility = 4.5
+
+    /**
+     * Every role a container is painted with, paired with the `onSurface` drawn over it.
+     *
+     * Named as a list rather than asserted role by role, because the failure this guards is a
+     * palette edit that darkens **one** step of the ramp — and a test naming five roles by hand
+     * is a test that stops covering the sixth the day one is added. A new role added to the
+     * ramp has to be added here, which is a visible omission in a diff rather than a silent gap.
+     *
+     * `surface` and `surfaceVariant` ride along: they are not "container" roles by Material's
+     * naming, and text lands on them constantly — the tab's own meta lines and section weights
+     * are `onSurfaceVariant` over one of them.
+     */
+    private fun containerRoles(dark: Boolean): List<Pair<String, Color>> = if (dark) {
+        listOf(
+            "surface" to DarkSurface,
+            "surfaceVariant" to DarkSurfaceVariant,
+            "surfaceContainerLowest" to DarkSurfaceContainerLowest,
+            "surfaceContainerLow" to DarkSurfaceContainerLow,
+            "surfaceContainer" to DarkSurfaceContainer,
+            "surfaceContainerHigh" to DarkSurfaceContainerHigh,
+            "surfaceContainerHighest" to DarkSurfaceContainerHighest,
+        )
+    } else {
+        listOf(
+            "surface" to LightSurface,
+            "surfaceVariant" to LightSurfaceVariant,
+            "surfaceContainerLowest" to LightSurfaceContainerLowest,
+            "surfaceContainerLow" to LightSurfaceContainerLow,
+            "surfaceContainer" to LightSurfaceContainer,
+            "surfaceContainerHigh" to LightSurfaceContainerHigh,
+            "surfaceContainerHighest" to LightSurfaceContainerHighest,
+        )
+    }
+
+    /**
+     * The ratios are **computed, not tabulated**.
+     *
+     * A test carrying the expected numbers would pass by being edited whenever the palette
+     * moved, which is precisely the moment it needs to fail. What is asserted is the *property*
+     * — text on any of these is legible — and the number in the failure message is whatever the
+     * palette actually produces, so a regression reports its own size.
+     */
+    @Test
+    fun `onSurface clears the legibility floor on every dark container role`() {
+        containerRoles(dark = true).forEach { (name, container) ->
+            val contrast = ratio(DarkOnSurface, container)
+            assertTrue(
+                "dark onSurface over $name is $contrast:1, below the $minLegibility floor — " +
+                    "text on it is not readable",
+                contrast >= minLegibility,
+            )
+        }
+    }
+
+    @Test
+    fun `onSurface clears the legibility floor on every light container role`() {
+        containerRoles(dark = false).forEach { (name, container) ->
+            val contrast = ratio(LightOnSurface, container)
+            assertTrue(
+                "light onSurface over $name is $contrast:1, below the $minLegibility floor — " +
+                    "text on it is not readable",
+                contrast >= minLegibility,
+            )
+        }
+    }
+
+    @Test
+    fun `the floor covers every role in the ramp, in both schemes`() {
+        // The list above is hand-written, so this is what stops it quietly shrinking: seven
+        // roles per scheme, and both schemes state the same seven. A palette that grew an
+        // eighth role and forgot to list it fails here rather than going untested.
+        assertTrue(containerRoles(dark = true).size == 7)
+        assertTrue(
+            containerRoles(dark = true).map { it.first } ==
+                containerRoles(dark = false).map { it.first },
+        )
+    }
+
     // --- BUG-3: the disabled icon tint -------------------------------------------------
 
     @Test

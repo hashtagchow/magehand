@@ -26,7 +26,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
+import com.hashtagchow.magehand.core.data.settings.DataStoreEquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreSelectedRollStore
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import java.io.File
 import com.hashtagchow.magehand.core.model.AbilityScores
@@ -66,6 +68,7 @@ class LocalCharacterRepositoryTest {
      */
     private lateinit var storeScope: CoroutineScope
     private lateinit var selectedRolls: SelectedRollStore
+    private lateinit var equippableOverrides: EquippableOverrideStore
 
     private var clock = 1_000L
     private var nextId = 0
@@ -83,9 +86,15 @@ class LocalCharacterRepositoryTest {
                 File(temp.root, "selected-rolls.preferences_pb")
             },
         )
+        equippableOverrides = DataStoreEquippableOverrideStore(
+            PreferenceDataStoreFactory.create(scope = storeScope) {
+                File(temp.root, "equippable-overrides.preferences_pb")
+            },
+        )
         repository = LocalCharacterRepository(
             dao = dao,
             selectedRollStore = selectedRolls,
+            equippableOverrideStore = equippableOverrides,
             now = { clock },
             newId = { "id-${++nextId}" },
         )
@@ -385,6 +394,37 @@ class LocalCharacterRepositoryTest {
             "and a DiceCloud character's selection least of all",
             "roll-3",
             selectedRolls.selectedRollId(serverCharacter).first(),
+        )
+    }
+
+    @Test
+    fun `deleting takes the character's equippability overrides with it, and only those`() = runTest {
+        val doomed = saveOrFail(form(name = "Brambles"))
+        val survivor = saveOrFail(form(name = "Thistle"))
+        val serverCharacter = EquippableOverrideStore.serverKey("acct-1", "creature-1")
+
+        equippableOverrides.setOverridden(EquippableOverrideStore.localKey(doomed), "prop-1", true)
+        equippableOverrides.setOverridden(EquippableOverrideStore.localKey(doomed), "prop-2", true)
+        equippableOverrides.setOverridden(EquippableOverrideStore.localKey(survivor), "prop-3", true)
+        equippableOverrides.setOverridden(serverCharacter, "prop-4", true)
+
+        repository.delete(doomed)
+
+        // 11 decision 2's second reaping path, and the same argument as the roll selection
+        // above: a DataStore key, not a row, in a namespace sign-out is forbidden to touch.
+        // The whole set goes, not one entry — the character it belonged to is gone.
+        assertTrue(
+            equippableOverrides.overrides(EquippableOverrideStore.localKey(doomed)).first().isEmpty(),
+        )
+        assertEquals(
+            "another on-device character's overrides are not this character's business",
+            setOf("prop-3"),
+            equippableOverrides.overrides(EquippableOverrideStore.localKey(survivor)).first(),
+        )
+        assertEquals(
+            "and a DiceCloud character's least of all",
+            setOf("prop-4"),
+            equippableOverrides.overrides(serverCharacter).first(),
         )
     }
 

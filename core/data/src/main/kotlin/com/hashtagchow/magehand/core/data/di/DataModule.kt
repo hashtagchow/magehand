@@ -48,7 +48,9 @@ import com.hashtagchow.magehand.core.data.session.DefaultOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreAppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.DataStoreEquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreSelectedRollStore
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
 import java.util.concurrent.TimeUnit
@@ -165,6 +167,22 @@ object DataModule {
         DataStoreSelectedRollStore(preferences(context))
 
     /**
+     * FR-10's per-item equippability overrides (11 decision 2).
+     *
+     * The same [preferences] file again, and now for a fourth interface — which is the point at
+     * which it is worth restating why that is not sprawl: DataStore's contract is per-*file*,
+     * so one more `.preferences_pb` would be one more thing to migrate, back up and reason
+     * about, while the interfaces over it stay separate because their *contracts* differ. This
+     * one and [SelectedRollStore] deliberately share both the file and the key-namespace shape,
+     * because they also share both reaping paths — see `EquippableOverrideStore`'s KDoc.
+     */
+    @Provides
+    @Singleton
+    fun provideEquippableOverrideStore(
+        @ApplicationContext context: Context,
+    ): EquippableOverrideStore = DataStoreEquippableOverrideStore(preferences(context))
+
+    /**
      * The snapshot store, character cache and two pref DAOs are here for
      * [DefaultAccountRepository.signOut] alone — it is the one path that knows an account
      * has ended, and each of these owns rows keyed by `accountId` that nothing else could
@@ -184,6 +202,7 @@ object DataModule {
         trackerPrefDao: TrackerPrefDao,
         themePrefDao: ThemePrefDao,
         selectedRollStore: SelectedRollStore,
+        equippableOverrideStore: EquippableOverrideStore,
     ): AccountRepository = DefaultAccountRepository(
         api = api,
         accountDao = accountDao,
@@ -195,6 +214,7 @@ object DataModule {
         trackerPrefDao = trackerPrefDao,
         themePrefDao = themePrefDao,
         selectedRollStore = selectedRollStore,
+        equippableOverrideStore = equippableOverrideStore,
     )
 
     // ---- WP5: live connection + character list -------------------------------
@@ -280,16 +300,19 @@ object DataModule {
      * one instance keeps the `now`/`newId` overrides in one place rather than letting a second
      * construction site quietly pick the defaults.
      *
-     * The [SelectedRollStore] is for the delete path: a local character's remembered roll is a
-     * DataStore key, not a row, so nothing cascades it and sign-out is forbidden from reaping
-     * it — see [LocalCharacterRepository.delete].
+     * The [SelectedRollStore] and the [EquippableOverrideStore] are for the delete path: a local
+     * character's remembered roll and its equippability overrides are DataStore keys, not rows,
+     * so nothing cascades them and sign-out is forbidden from reaping them — see
+     * [LocalCharacterRepository.delete].
      */
     @Provides
     @Singleton
     fun provideLocalCharacterRepository(
         dao: LocalCharacterDao,
         selectedRollStore: SelectedRollStore,
-    ): LocalCharacterRepository = LocalCharacterRepository(dao, selectedRollStore)
+        equippableOverrideStore: EquippableOverrideStore,
+    ): LocalCharacterRepository =
+        LocalCharacterRepository(dao, selectedRollStore, equippableOverrideStore)
 
     /**
      * Not `@Singleton`, for the same reason [provideOpenCharacterFactory] is not: each open

@@ -53,6 +53,22 @@ data class CatalogItem(
  * a price into a form while four other people wait. Anything rarer is exactly what the custom
  * form is for.
  *
+ * ### English in a data file, recorded as an ACCEPTED decision (LOW-10, 11 decision 8)
+ *
+ * Every `name` and `description` below is an English string compiled into the app, and no
+ * amount of `strings.xml` discipline elsewhere will translate them. That was raised as a
+ * localization defect and is **accepted rather than open**, on the grounds that these are not
+ * UI copy: "Rope, Hempen (50 feet)" is the name of a thing that will be written onto a
+ * DiceCloud sheet, read back by DiceCloud's own web UI, and shown to a table of players who
+ * may not all be running this app. Moving it to `strings.xml` would mean a French device
+ * creating an item a sheet's other readers cannot recognise — a localization that makes the
+ * shared artifact worse.
+ *
+ * The rule this settles on, so a future reader does not re-open it: **UI chrome is copy and
+ * lives in `strings.xml`; catalog entries are data and live here.** Revisit only as part of a
+ * real localization pass, which would have to answer the harder question first — what language
+ * a *sheet* is in — and not by moving these thirty-five strings.
+ *
  * ### Source and licence
  *
  * Every name, weight and price below is from the **System Reference Document 5.1** (Wizards

@@ -16,14 +16,22 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -103,6 +111,13 @@ fun InventoryTab(
     modifier: Modifier = Modifier,
     actions: InventoryActions = InventoryActions(),
 ) {
+    // FR-11 (11 decision 4). Collapsed by default and **ephemeral**, exactly like the tracker's
+    // inactive-conditions drawer: it is a glance, not a preference. A player who opened the
+    // steppers to hand over 15 gp does not want every character they open next week to start
+    // with four steppers between the top line and their gear. `rememberSaveable` so a rotation
+    // mid-count does not slam it shut.
+    var walletExpanded by rememberSaveable { mutableStateOf(false) }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -125,24 +140,23 @@ fun InventoryTab(
             // Always present, always four rows, even on a sheet carrying no coins at all
             // (10 decision 5). "You have no silver" and "this app could not find your silver"
             // look identical when the row is simply missing, and only one of them is true.
+            // FR-11 collapses the *steppers*, never the section: the header and its summary
+            // are always on screen, so the money is never a thing the player has to go find.
             item(key = "wallet-header") {
-                SectionHeader(
-                    title = stringResource(R.string.inventory_section_wallet),
-                    // No weight figure: coins *do* count towards the carried total (see
-                    // `Wallet.weightLb`), but a "2.2 lb" beside the purse invites the reader
-                    // to add the section figures up and find they do not match the top line,
-                    // which sums containers by the server's rollup. The one number that is
-                    // authoritative is the one at the top.
-                    weight = null,
-                    testTag = "inventory:section:wallet",
+                WalletHeader(
+                    wallet = state.wallet,
+                    expanded = walletExpanded,
+                    onToggle = { walletExpanded = !walletExpanded },
                 )
             }
-            item(key = "wallet") {
-                WalletRows(
-                    wallet = state.wallet,
-                    canWrite = state.canWrite,
-                    onDelta = actions.onCoinDelta,
-                )
+            if (walletExpanded) {
+                item(key = "wallet") {
+                    WalletRows(
+                        wallet = state.wallet,
+                        canWrite = state.canWrite,
+                        onDelta = actions.onCoinDelta,
+                    )
+                }
             }
 
             state.sections.forEach { section ->
@@ -224,6 +238,88 @@ private fun InventorySummary(state: InventoryUiState, modifier: Modifier = Modif
                 modifier = Modifier.testTag("inventory:attunement"),
             )
         }
+    }
+}
+
+/**
+ * The wallet's one always-visible row: the section title, its compact summary, and a chevron
+ * (FR-11, docs/design/11-inventory-polish.md decision 4).
+ *
+ * ### What collapsing actually buys
+ *
+ * Four stepper rows at 56 dp each is 224 dp — most of a phone's first screenful — spent on the
+ * one part of the inventory a player touches after a session rather than during one. Collapsed,
+ * the same information is one line ("2 pp · 15 gp · 3 sp"), and Equipped starts above the fold.
+ * The *reading* is therefore not lost, only the controls, which is the trade: at the table you
+ * glance at your money far more often than you change it.
+ *
+ * ### No weight figure, still
+ *
+ * Coins *do* count towards the carried total (see `Wallet.weightLb`), but a "2.2 lb" beside the
+ * purse invites the reader to add the section figures up and find they do not match the top
+ * line, which sums containers by the server's rollup. The one authoritative number is the one
+ * at the top — 10 decision 10's rule, and FR-11 does not change it.
+ *
+ * ### One spoken sentence, not three merged fragments
+ *
+ * This row is clickable, and a clickable **merges its descendants into one accessibility
+ * node**. A `contentDescription` naming only the action would therefore *replace* the title and
+ * the summary rather than adding to them, and a screen-reader user would be told the control
+ * exists without ever being told how much money they have — which is the one reading FR-11
+ * offers in exchange for hiding the steppers. [WalletUiState.spokenLabel] folds all three into
+ * a sentence; the copy is resolved here and the rule is pinned there.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun WalletHeader(
+    wallet: WalletUiState,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val title = stringResource(R.string.inventory_section_wallet)
+    val emptyLabel = stringResource(R.string.inventory_wallet_empty)
+    // The chevron is what a sighted user reads as "this opens"; the spoken sentence has to say
+    // it in words, because a title and a coin total do not say it between them.
+    val action = stringResource(
+        if (expanded) R.string.inventory_wallet_collapse else R.string.inventory_wallet_expand,
+    )
+    val spoken = wallet.spokenLabel(title = title, emptyLabel = emptyLabel, action = action)
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clickable(onClick = onToggle)
+            .semantics(mergeDescendants = true) { contentDescription = spoken }
+            .testTag("inventory:section:wallet"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            // Uppercased for the eye only — the spoken sentence above uses the title as
+            // written, because a screen reader may spell an all-caps word out letter by letter.
+            text = title.uppercase(),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+        )
+        Text(
+            text = wallet.summary ?: emptyLabel,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 12.dp)
+                .testTag("inventory:wallet:summary"),
+        )
+        Icon(
+            imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -359,33 +455,44 @@ private fun InventoryRow(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            // One line for both facts, and each half is absent rather than blank when the
-            // sheet does not say: a row reading "×1 · 0 lb" would be claiming a weight the
-            // source never gave. See InventoryRowState.showsQuantity / stackWeight.
+            // One line for both facts. The quantity half is absent at ×1 (see
+            // `showsQuantity`); the weight half is **always** printed, as a number or as an em
+            // dash — 11 decision 6, K10. Dropping the cell used to make an unweighed row read
+            // as "0 lb" to anyone not stopping to think about it, and lost the column's
+            // right-hand alignment wherever a sheet had been sloppy. See `stackWeightLabel`.
+            val weight = if (row.hasWeight) {
+                stringResource(R.string.inventory_weight, row.stackWeightLabel)
+            } else {
+                row.stackWeightLabel
+            }
             val meta = listOfNotNull(
                 row.quantity.takeIf { row.showsQuantity }
                     ?.let { stringResource(R.string.inventory_quantity, it) },
-                row.stackWeight?.let { stringResource(R.string.inventory_weight, it) },
+                weight,
             ).joinToString(" · ")
-            if (meta.isNotEmpty()) {
-                Text(
-                    text = meta,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.testTag("inventory:row:${row.propertyId}:meta"),
-                )
-            }
+            Text(
+                text = meta,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("inventory:row:${row.propertyId}:meta"),
+            )
         }
 
-        FilterChip(
-            selected = row.equipped,
-            onClick = { onEquip(row.propertyId, !row.equipped) },
-            enabled = canWrite,
-            label = { Text(stringResource(R.string.inventory_section_equipped), maxLines = 1) },
-            modifier = Modifier
-                .semantics { contentDescription = equipDescription }
-                .testTag("inventory:row:${row.propertyId}:equip"),
-        )
+        // 11 decision 3: only on rows this app is willing to call equippable. A tinderbox gets
+        // nothing — not a disabled chip, which would be a control the player could tap at
+        // forever, but no control at all. An overridden item gets one back (decision 2), which
+        // is why this reads the effective answer rather than the board's.
+        if (row.showsEquipControl) {
+            FilterChip(
+                selected = row.equipped,
+                onClick = { onEquip(row.propertyId, !row.equipped) },
+                enabled = canWrite,
+                label = { Text(stringResource(R.string.inventory_section_equipped), maxLines = 1) },
+                modifier = Modifier
+                    .semantics { contentDescription = equipDescription }
+                    .testTag("inventory:row:${row.propertyId}:equip"),
+            )
+        }
     }
 }
 
@@ -394,14 +501,21 @@ private fun InventoryRow(
  *
  * The two numbers are not the same sum and that is argued on [toInventoryUiState]: a
  * container prints the **server's** rollup so it cannot disagree with DiceCloud's own UI,
- * while Equipped and Carried print client sums so they cannot disagree with the
- * removed-filtered grand total above them.
+ * while Equipped and the three Carried subsections print client sums so they cannot disagree
+ * with the removed-filtered grand total above them. 11 decision 3 keeps every one of those
+ * weights — three smaller sections rather than one Carried figure, and each still says what
+ * its own rows come to.
+ *
+ * [weight] is non-null because **every** section rendered through here has one. The wallet is
+ * the deliberate exception (10 decision 10: the coins count towards the top line but print no
+ * section figure of their own), and it does not come through here at all — see [WalletHeader],
+ * which is a different control with a summary and a chevron.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun SectionHeader(
     title: String,
-    weight: String?,
+    weight: String,
     modifier: Modifier = Modifier,
     testTag: String? = null,
 ) {
@@ -420,13 +534,11 @@ private fun SectionHeader(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        weight?.let {
-            Text(
-                text = stringResource(R.string.inventory_weight, it),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        Text(
+            text = stringResource(R.string.inventory_weight, weight),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

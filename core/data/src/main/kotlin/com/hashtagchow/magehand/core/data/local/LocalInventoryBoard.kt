@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.core.data.local
 
 import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.core.model.EquipGroup
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryItem
 import com.hashtagchow.magehand.core.model.LocalCharacter
@@ -35,6 +36,26 @@ import com.hashtagchow.magehand.core.model.WalletRow
  *   `InventoryBoard.carriedWeightLb` is defined the way it is: locally it is the *only*
  *   available number, and the server path chose it too, so the two agree by construction
  *   rather than by coincidence.
+ *
+ * ### Equippability: every local item is equippable, and that is not the rule being ignored
+ *
+ * 11 decision 1's rule reads a **tag taxonomy** — `simple weapon`, `medium armor`, `shield` —
+ * and a local character has no tags at all. The form captures none, `LocalTrackerRow` stores
+ * none, and 11 decision 2 forbids the schema change that would add them.
+ *
+ * So the rule's second disjunct has no *input* here, which is a different thing from having a
+ * negative answer. Running it anyway would return `false` for every unequipped row and strip
+ * the equip control from the whole of a local character's inventory — a control they have had
+ * since FR-8 shipped, removed on the strength of data that was never collected. That is the
+ * mirror image of the mistake 10 decision 9 avoids with the attunement chip: an absent field
+ * is not a `false`, and this app does not answer questions its source never asked.
+ *
+ * The honest reading is therefore "unclassified", and the honest rendering of unclassified is
+ * the control the player already had — [InventoryItem.isEquippable] `= true` for every row,
+ * [EquipGroup.GEAR] for every row, and a Carried section that does not subdivide because there
+ * is nothing to subdivide it by. FR-10's own text puts the local half — a category on catalog
+ * entries and an "equippable" switch on the custom form — in a later wave, and this is the
+ * behaviour that leaves that wave something to improve rather than something to undo.
  *
  * ### The wallet
  *
@@ -106,10 +127,16 @@ object LocalInventoryBoard {
         // `CoinKind.fromTags` from ever matching a local row and pulling it into the wallet
         // alongside the columns.
         tags = emptyList(),
+        libraryTags = emptyList(),
         requiresAttunement = null,
         attuned = null,
         containerId = null,
         sortOrder = sortIndex,
+        // 11 decision 1's rule is *stated in terms of a tag taxonomy this source does not
+        // have*, and running it anyway would answer "no" for every unequipped row — which is
+        // not the rule's answer, it is the absence of an input. See the class KDoc.
+        isEquippable = true,
+        equipGroup = EquipGroup.GEAR,
     )
 
     /** The stable id of one local wallet row. */

@@ -745,4 +745,66 @@ class TrackerEngineTest {
         // A stringified total still parses.
         assertEquals(4, board.slots.single().total)
     }
+
+    // -----------------------------------------------------------------------
+    // MED-4: one property, one quantity (docs/design/11-inventory-polish.md decision 7)
+    // -----------------------------------------------------------------------
+
+    /** One synthetic sheet, so both engines below are demonstrably reading the same bytes. */
+    private fun sheetWith(vararg properties: String): CreatureSheet =
+        CreatureSheet.fromSnapshotJson(
+            """{"creatures":[{"_id":"c1","name":"Test"}],
+               "creatureProperties":[${properties.joinToString(",")}],
+               "creatureVariables":[{"_id":"v1"}]}""",
+        )
+
+    @Test
+    fun `an item with no quantity field reads as one, not as none`() {
+        // DiceCloud omits `quantity` on singletons. Reading it as 0 used to leave a potion
+        // showing an empty count with its `−` greyed out on the tracker while the inventory
+        // tab listed the same property as "×1".
+        val board = TrackerEngine.build(
+            sheetWith("""{"_id":"p","type":"item","name":"Potion of Healing"}"""),
+        )
+
+        val potion = board.allItems.single()
+        assertEquals(1, potion.value)
+        assertEquals("an item has no maximum: value == total", 1, potion.total)
+    }
+
+    @Test
+    fun `an explicit zero quantity is still zero - the default is for an absent field only`() {
+        // The distinction the fix turns on: a sheet that *says* zero is making a claim, and
+        // this app does not overwrite it with 1. Only the absence defaults.
+        val board = TrackerEngine.build(
+            sheetWith("""{"_id":"p","type":"item","name":"Empty Quiver","quantity":0}"""),
+        )
+
+        assertEquals(0, board.allItems.single().value)
+    }
+
+    @Test
+    fun `the same property never shows two quantities across the two engines`() {
+        // The cross-engine agreement test 11 decision 7 asks for. Not "both read 1" — that
+        // would pass if one engine were later changed to read 2 and the assertion updated to
+        // match. What is pinned is the *agreement*, over every shape of the field a sheet can
+        // carry: absent, explicit, and a `_calculation` wrapper.
+        val sheet = sheetWith(
+            """{"_id":"absent","type":"item","name":"Potion"}""",
+            """{"_id":"explicit","type":"item","name":"Arrows","quantity":20}""",
+            """{"_id":"zero","type":"item","name":"Empty Quiver","quantity":0}""",
+            """{"_id":"wrapped","type":"item","name":"Rations","quantity":{"value":15}}""",
+        )
+
+        val tracker = TrackerEngine.build(sheet).allItems.associate { it.propertyId to it.value }
+        val inventory = InventoryEngine.build(sheet).allItems.associate { it.propertyId to it.quantity }
+
+        assertEquals(
+            "two tabs showing one sheet must not disagree about how many of a thing it has",
+            inventory,
+            tracker,
+        )
+        // And the answer they agree on, stated once so the test also says what it is.
+        assertEquals(mapOf("absent" to 1, "explicit" to 20, "zero" to 0, "wrapped" to 15), tracker)
+    }
 }

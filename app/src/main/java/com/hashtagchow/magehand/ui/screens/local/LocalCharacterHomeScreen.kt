@@ -284,6 +284,7 @@ fun LocalCharacterHomeScreen(
                 canWrite = uiState.inventory.canWrite,
                 onQuantityDelta = viewModel::adjustItemQuantity,
                 onEquip = viewModel::setEquipped,
+                onEquippableOverride = viewModel::setEquippableOverride,
                 onDismiss = { detailItemId = null },
             )
         }

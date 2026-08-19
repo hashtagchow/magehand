@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.core.model.EquipGroup
 import com.hashtagchow.magehand.core.model.InventoryBoard
 
 /**
@@ -234,6 +235,16 @@ class InventoryEngineTest {
         )
         assertTrue(board.carried.isEmpty())
         assertTrue(board.equipped.isEmpty())
+
+        // LOW-8, and the load-bearing half of K9 (11 decision 5). The UI folds this purse's
+        // section away entirely, because it has no displayable rows — and the shell's 0.1 lb is
+        // still in the grand total, because `carriedWeightLb` is a client sum over items *plus
+        // every container's own empty weight* and never consulted the section list.
+        //
+        // 0.1 (the purse) + 10 × 0.02 (the coins, at CoinKind's rulebook weight, since this
+        // sheet gave its gold none) = 0.3. Counted exactly once each: a reader who "fixes" the
+        // folded-away section by adding the shell back in gets 0.4 and this failing.
+        assertEquals(0.3, board.carriedWeightLb, EPSILON)
     }
 
     @Test
@@ -513,6 +524,133 @@ class InventoryEngineTest {
         assertTrue(board.isEmpty)
         assertEquals(InventoryBoard.EMPTY.wallet.rows.size, board.wallet.rows.size)
         assertEquals(0.0, board.carriedWeightLb, EPSILON)
+    }
+
+    // -----------------------------------------------------------------------
+    // Equippability (docs/design/11-inventory-polish.md decisions 1 and 3)
+    // -----------------------------------------------------------------------
+
+    /** The one row on the board with this id, wherever the precedence put it. */
+    private fun InventoryBoard.item(id: String) = allItems.single { it.propertyId == id }
+
+    @Test
+    fun `a tagged but unequipped weapon is equippable, and files under Weapons`() {
+        val board = InventoryEngine.build(
+            sheet(
+                item(
+                    "d", "Dagger", quantity = 2,
+                    extra = ""","tags":["simple weapon","melee weapon","mundane","dagger"]""",
+                ),
+            ),
+        )
+
+        val dagger = board.item("d")
+        assertTrue("the tag set is the rule's second disjunct", dagger.isEquippable)
+        assertEquals(EquipGroup.WEAPON, dagger.equipGroup)
+    }
+
+    @Test
+    fun `a tinderbox is not equippable, and gets no control`() {
+        // The row FR-10 exists for: no tags at all, not equipped, and nothing about it says a
+        // character could wear it. This is the assertion that makes the whole feature visible.
+        val board = InventoryEngine.build(sheet(item("t", "Tinderbox")))
+
+        val tinderbox = board.item("t")
+        assertFalse(tinderbox.isEquippable)
+        assertEquals(EquipGroup.GEAR, tinderbox.equipGroup)
+    }
+
+    @Test
+    fun `an equipped untagged item is equippable, so its unequip control survives`() {
+        // "A Small Knife" on the reference sheet — hand-made, tagless, already worn. Without
+        // the rule's `equipped` disjunct, equipping a home-made item would be a one-way door:
+        // the control that put it on would vanish the moment it went on.
+        val board = InventoryEngine.build(
+            sheet(item("k", "A Small Knife", extra = ""","equipped":true""")),
+        )
+
+        val knife = board.item("k")
+        assertTrue(knife.isEquippable)
+        // Gear, not Weapons: the override buys the *control*, never a claim about what the
+        // thing is. Nothing on this property says "weapon" — only that it is being worn.
+        assertEquals(EquipGroup.GEAR, knife.equipGroup)
+    }
+
+    @Test
+    fun `Half Plate is equippable by its own tags, though it lacks the bare armor tag`() {
+        // Data defect 1, pinned. The SRD entry carries `medium armor` and does NOT carry
+        // `armor`, so a rule keyed on the bare word would refuse an equip control to a suit of
+        // armor. Casing is the sheet author's, not ours — hence the mixed case here.
+        val board = InventoryEngine.build(
+            sheet(
+                item("h", "Half Plate", extra = ""","tags":["Medium Armor","mundane"]"""),
+                item("s", "Shield", extra = ""","tags":["shield"]"""),
+            ),
+        )
+
+        assertTrue("Half Plate must not need the bare `armor` tag", board.item("h").isEquippable)
+        assertEquals(EquipGroup.ARMOR, board.item("h").equipGroup)
+        assertEquals("a shield is armor for every purpose this screen has", EquipGroup.ARMOR, board.item("s").equipGroup)
+    }
+
+    @Test
+    fun `a homemade item that is unequipped loses its control - the documented residual`() {
+        // 11 decision 1's known false negative, asserted rather than left as prose. The item
+        // is the same "A Small Knife" as two tests up, with `equipped` gone: the rule now
+        // matches neither disjunct and this app stops offering to equip it. That is exactly
+        // what decision 2's override exists to undo, and it is pinned here so a future reader
+        // who is tempted to "fix" it with a name heuristic has to delete a test that says why.
+        val board = InventoryEngine.build(sheet(item("k", "A Small Knife")))
+
+        assertFalse(board.item("k").isEquippable)
+    }
+
+    @Test
+    fun `libraryTags count towards the rule, not just the sheet's own tags`() {
+        // An item whose own `tags` were edited to nothing but which still carries what the SRD
+        // library node said. The rule reads the union (11 decision 1), so this is equippable.
+        val board = InventoryEngine.build(
+            sheet(item("q", "Quarterstaff", extra = ""","tags":[],"libraryTags":["simple weapon"]""")),
+        )
+
+        assertTrue(board.item("q").isEquippable)
+        assertEquals(EquipGroup.WEAPON, board.item("q").equipGroup)
+    }
+
+    @Test
+    fun `stray whitespace around a tag does not cost an item its equip control`() {
+        // Ordinary in hand-typed and copy-pasted tags, and the cost of not trimming falls in
+        // exactly the wrong place: a real weapon silently loses its control and the player has
+        // to reach for 11 decision 2's override to rescue an item this app could have
+        // classified. The override is for data the taxonomy does not cover, not for a space.
+        val board = InventoryEngine.build(
+            sheet(
+                item("d", "Dagger", extra = ""","tags":[" simple weapon "]"""),
+                item("a", "Breastplate", extra = ""","tags":["\tMedium Armor\n"]"""),
+            ),
+        )
+
+        assertTrue(board.item("d").isEquippable)
+        assertEquals(EquipGroup.WEAPON, board.item("d").equipGroup)
+        assertTrue(board.item("a").isEquippable)
+        assertEquals(EquipGroup.ARMOR, board.item("a").equipGroup)
+    }
+
+    @Test
+    fun `a near-miss tag does not sweep an ordinary item in`() {
+        // The whole-tag rule, from the other side: `spellcasting focus` and `adventuring gear`
+        // are the tags real gear carries, and neither may reach the equippable set. A
+        // `contains("weapon")` substring test would also have swept in the sheet's own
+        // `simpleRangedWeapon` skill tag — which is why the set is matched whole.
+        val board = InventoryEngine.build(
+            sheet(
+                item("p", "Component Pouch", extra = ""","tags":["adventuring gear","spellcasting focus"]"""),
+                item("w", "Weapon Oil", extra = ""","tags":["simpleRangedWeapon"]"""),
+            ),
+        )
+
+        assertFalse(board.item("p").isEquippable)
+        assertFalse(board.item("w").isEquippable)
     }
 
     private companion object {

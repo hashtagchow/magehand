@@ -7,3 +7,8 @@ captures/
 .externalNativeBuild/
 .cxx/
 .kotlin/
+
+# Python bytecode from tools/ (magehand-play-api.py and friends). Generated on import,
+# never part of a build, and a .pyc committed once goes stale against the next interpreter.
+__pycache__/
+*.pyc

@@ -26,6 +26,7 @@ import com.hashtagchow.magehand.core.data.local.LocalOpenCharacter
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -97,6 +98,7 @@ class LocalCharacterHomeViewModel @Inject constructor(
     repository: LocalCharacterRepository,
     appSettingsStore: AppSettingsStore,
     private val selectedRollStore: SelectedRollStore,
+    private val equippableOverrideStore: EquippableOverrideStore,
     private val factory: LocalOpenCharacterFactory,
 ) : ViewModel() {
 
@@ -172,6 +174,19 @@ class LocalCharacterHomeViewModel @Inject constructor(
     private val rollKey: String = SelectedRollStore.localKey(characterId)
 
     /**
+     * FR-10's key for this character (11 decision 2), in the same local namespace and for the
+     * same reason as [rollKey]: keyed by the character, so sign-out's per-account prefix sweep
+     * provably cannot reach it (09 decision 10).
+     *
+     * A local character's items carry no tags, so `LocalInventoryBoard` reports every one of
+     * them equippable and the detail sheet's override switch never renders — see there. The key
+     * is wired up anyway rather than left for a later wave, because the *deletion* path has to
+     * reap it either way, and a store that only half exists is how an orphan key gets written
+     * the first time someone adds local tags.
+     */
+    private val equippableOverrideKey: String = EquippableOverrideStore.localKey(characterId)
+
+    /**
      * The two *preference* signals, paired.
      *
      * `combine` tops out at five typed flows before it degenerates into an `Array<Any?>` with
@@ -243,13 +258,18 @@ class LocalCharacterHomeViewModel @Inject constructor(
         if (local == null) {
             flowOf(InventoryUiState(creatureId = characterId))
         } else {
-            combine(local.inventory, local.canWrite) { board, canWrite ->
+            combine(
+                local.inventory,
+                local.canWrite,
+                equippableOverrideStore.overrides(equippableOverrideKey),
+            ) { board, canWrite, overrides ->
                 toInventoryUiState(
                     creatureId = characterId,
                     board = board,
                     connection = ConnectionState.LIVE,
                     isShowingSnapshot = false,
                     canWrite = canWrite,
+                    equippableOverrides = overrides,
                 )
             }
         }
@@ -375,6 +395,20 @@ class LocalCharacterHomeViewModel @Inject constructor(
     fun adjustCoins(coin: CoinKind, delta: Int) {
         val character = open.value ?: return
         character.adjustCoins(character.inventory.value.wallet.row(coin), delta)
+    }
+
+    /**
+     * The detail sheet's "Can be equipped" switch (11 decision 2).
+     *
+     * Reachable only in principle today — the switch renders on rows the board calls
+     * non-equippable, and a local board calls none of them that — and wired anyway so the two
+     * screens keep the one contract. The DiceCloud view model's own `setEquippableOverride`
+     * argues the rest.
+     */
+    fun setEquippableOverride(propertyId: String, canEquip: Boolean) {
+        viewModelScope.launch {
+            equippableOverrideStore.setOverridden(equippableOverrideKey, propertyId, canEquip)
+        }
     }
 
     /** The add-item flow. Not undoable here either, and deliberately so — see the impl. */

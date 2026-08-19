@@ -199,6 +199,28 @@ data class Wallet(
 }
 
 /**
+ * Which of Carried's three subsections an item belongs to (docs/design/11-inventory-polish.md
+ * decision 3).
+ *
+ * ### Why the group and "is it equippable" are two facts and not one
+ *
+ * They cross. [GEAR] holds both a tinderbox (not equippable) and a hand-made item the player
+ * has already equipped or overridden (equippable) — see [InventoryItem.isEquippable] — so a
+ * single three-value field could not answer both questions without inventing a fourth value
+ * meaning "gear, but with a control on it". The grouping answers *where the row goes*; the
+ * flag answers *what the row can do*, and 11 decision 3 is explicit that an overridden item
+ * keeps its Gear grouping while gaining the control.
+ *
+ * There is deliberately no `SHIELD` value: 5e's shield is armor for every purpose this screen
+ * has, and a section holding one row on the sheets that carry one is chrome, not structure.
+ */
+enum class EquipGroup {
+    WEAPON,
+    ARMOR,
+    GEAR,
+}
+
+/**
  * One item on the inventory tab.
  *
  * Distinct from [TrackedResource] on purpose. A tracked resource is a *countable row* — a
@@ -230,6 +252,19 @@ data class InventoryItem(
     /** The sheet's own tags, unaltered. Coin denominations are read off these. */
     val tags: List<String> = emptyList(),
     /**
+     * The tags the item inherited from the SRD library node it was created from.
+     *
+     * A second list rather than merged into [tags], because they are different claims: [tags]
+     * is what *this sheet* says, `libraryTags` is what the *source entry* said. The live
+     * capture carries both and they usually agree — but a hand-edited item can have its tags
+     * changed with the library's left alone, and flattening the two would make it impossible
+     * to tell an authored tag from an inherited one if a later feature ever needs to.
+     *
+     * Equippability reads their **union** (11 decision 1): either list naming a weapon or a
+     * piece of armor is the sheet telling us what the thing is.
+     */
+    val libraryTags: List<String> = emptyList(),
+    /**
      * `requiresAttunement` / `attuned` as the sheet carries them — **both usually absent**.
      *
      * Nullable rather than defaulted to `false` because 10 decision 9 hangs on the
@@ -243,6 +278,21 @@ data class InventoryItem(
     val containerId: String? = null,
     /** The server's `order`, the only stable tie-breaker it gives us. */
     val sortOrder: Int = 0,
+    /**
+     * Whether this app is willing to put an equip control on the row (11 decision 1).
+     *
+     * Computed by whichever board built the item, because the *evidence* differs by source:
+     * `InventoryEngine` reads the sheet's tag taxonomy, and `LocalInventoryBoard` has no
+     * taxonomy at all. See each for its own argument.
+     *
+     * **Defaults to `true`**, and that direction is the deliberate one: a board that has said
+     * nothing about equippability has not said "no". Defaulting to `false` would make every
+     * future source of items — and every test fixture built before this field existed — quietly
+     * lose a control the player had, which is the failure mode that is invisible in a diff.
+     */
+    val isEquippable: Boolean = true,
+    /** Which Carried subsection the row belongs to (11 decision 3). See [EquipGroup]. */
+    val equipGroup: EquipGroup = EquipGroup.GEAR,
 ) {
     /** What the whole stack weighs. A missing per-unit weight counts as zero — see [weightLb]. */
     val totalWeightLb: Double get() = (weightLb ?: 0.0) * quantity

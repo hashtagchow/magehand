@@ -16,6 +16,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -52,8 +53,18 @@ import com.hashtagchow.magehand.ui.screens.characterhome.tracker.StepperButton
  * second one is a claim — `InventoryItem.weightLb` keeps that distinction all the way from
  * the wire specifically so this sheet can print it.
  *
+ * ### The "Can be equipped" switch
+ *
+ * 11 decision 2's override, and this is the one place it lives. The list is a scan and this is
+ * the read — a per-item correction to how the app classified something is exactly the kind of
+ * decision that belongs behind a deliberate tap, not on a row being scrolled past.
+ *
  * @param row the same [InventoryRowState] the list rendered, not a second lookup. A row and
  *   its expanded form therefore cannot disagree about a number.
+ * @param onEquippableOverride the switch above. Local only — it writes an
+ *   `EquippableOverrideStore` key, never the sheet, so there is no undo entry and nothing to
+ *   roll back. It is offered whether or not [canWrite]: refusing it offline would mean a player
+ *   on a bad connection could not even fix how their own inventory is *displayed*.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
@@ -62,6 +73,7 @@ fun ItemDetailSheet(
     canWrite: Boolean,
     onQuantityDelta: (propertyId: String, delta: Int) -> Unit,
     onEquip: (propertyId: String, equipped: Boolean) -> Unit,
+    onEquippableOverride: (propertyId: String, canEquip: Boolean) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -93,18 +105,55 @@ fun ItemDetailSheet(
             Spacer8()
 
             // The equip control, second copy. Same FilterChip vocabulary as the row's, so the
-            // two read as the same control rather than as two ways of doing something.
-            FilterChip(
-                selected = row.equipped,
-                onClick = { onEquip(row.propertyId, !row.equipped) },
-                enabled = canWrite,
-                label = { Text(stringResource(R.string.inventory_section_equipped)) },
-                modifier = Modifier
-                    .semantics { contentDescription = equipDescription }
-                    .testTag("inventory:detail:equip"),
-            )
+            // two read as the same control rather than as two ways of doing something — and
+            // gated by the same rule (11 decision 3), so the sheet cannot offer an equip the
+            // row it was opened from does not.
+            if (row.showsEquipControl) {
+                FilterChip(
+                    selected = row.equipped,
+                    onClick = { onEquip(row.propertyId, !row.equipped) },
+                    enabled = canWrite,
+                    label = { Text(stringResource(R.string.inventory_section_equipped)) },
+                    modifier = Modifier
+                        .semantics { contentDescription = equipDescription }
+                        .testTag("inventory:detail:equip"),
+                )
+                Spacer8()
+            }
 
-            Spacer8()
+            // 11 decision 2. Present **only** where the sheet's own tags left this app unable
+            // to tell — see `InventoryRowState.showsEquippableToggle` for why that is the
+            // board's answer and not the effective one (a switch that vanished the moment it
+            // was used would be a one-way door).
+            if (row.showsEquippableToggle) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("inventory:detail:equippable"),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.inventory_detail_equippable),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            text = stringResource(
+                                R.string.inventory_detail_equippable_hint,
+                                row.name,
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = row.equippableOverridden,
+                        onCheckedChange = { onEquippableOverride(row.propertyId, it) },
+                        modifier = Modifier.testTag("inventory:detail:equippable:switch"),
+                    )
+                }
+                Spacer8()
+            }
             HorizontalDivider()
             Spacer8()
 

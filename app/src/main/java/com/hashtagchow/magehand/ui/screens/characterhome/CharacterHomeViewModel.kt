@@ -26,6 +26,7 @@ import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -121,6 +122,7 @@ class CharacterHomeViewModel @Inject constructor(
     sheetSessionFactory: SheetSessionFactory,
     appSettingsStore: AppSettingsStore,
     private val selectedRollStore: SelectedRollStore,
+    private val equippableOverrideStore: EquippableOverrideStore,
     private val openCharacterFactory: OpenCharacterFactory,
     private val connectionManager: DdpConnectionManager,
 ) : ViewModel() {
@@ -193,6 +195,17 @@ class CharacterHomeViewModel @Inject constructor(
         SelectedRollStore.serverKey(character.accountId, character.creatureId)
 
     /**
+     * FR-10's per-item equippability overrides (11 decision 2), for the *opened* character.
+     *
+     * Read through the store rather than through [OpenCharacter] for [selectedRollId]'s reason,
+     * whole: it is a preference about how this app renders a sheet, not sheet state, and
+     * widening the app's one *write* surface onto a character to carry a display setting is a
+     * bigger claim than this feature earns.
+     */
+    private fun equippableOverrideKey(character: OpenCharacter): String =
+        EquippableOverrideStore.serverKey(character.accountId, character.creatureId)
+
+    /**
      * FR-6 applies to **every** character, not only local ones (09 decision 9: "for ALL
      * characters"). It is read here rather than in the composable so the gate is on the state
      * the screen renders, which is what `TrackerUiStateTest` can pin.
@@ -244,7 +257,7 @@ class CharacterHomeViewModel @Inject constructor(
      * Its own `combine` rather than a field folded into [trackerState], because the two are
      * built from different sources — `character.inventory` and `character.board` — and folding
      * them would make every wallet stepper re-derive the whole tracker and every pip tap
-     * re-derive the whole inventory. Four flows, comfortably inside the typed arity.
+     * re-derive the whole inventory. Five flows, exactly at the typed arity.
      */
     private val inventoryState: Flow<InventoryUiState> = open.flatMapLatest { character ->
         if (character == null) {
@@ -255,13 +268,15 @@ class CharacterHomeViewModel @Inject constructor(
                 character.connectionState,
                 character.isShowingSnapshot,
                 character.canWrite,
-            ) { board, connection, showingSnapshot, canWrite ->
+                equippableOverrideStore.overrides(equippableOverrideKey(character)),
+            ) { board, connection, showingSnapshot, canWrite, overrides ->
                 toInventoryUiState(
                     creatureId = creatureId,
                     board = board,
                     connection = connection,
                     isShowingSnapshot = showingSnapshot,
                     canWrite = canWrite,
+                    equippableOverrides = overrides,
                 )
             }
         }
@@ -392,6 +407,25 @@ class CharacterHomeViewModel @Inject constructor(
             ),
             delta,
         )
+    }
+
+    /**
+     * The detail sheet's "Can be equipped" switch (11 decision 2).
+     *
+     * **Local only** — it writes the same DataStore file the accent, the FR-6 switch and the
+     * FR-7 selection use, and never the sheet. That is the whole reason this feature needed no
+     * `WriteOp`, no undo entry and no rollback path: nothing about the server changes, so there
+     * is nothing for a snackbar to offer to take back.
+     *
+     * Unvalidated against the board, like [selectRoll] and for the same reason: the id came
+     * *from* the rendered row, and an id that has since stopped naming an item is already
+     * handled where it is read (an override nothing matches is simply never applied — see
+     * `EquippableOverrideStore.overrides`). A guard here would only turn a recoverable stale
+     * override into a dropped tap.
+     */
+    fun setEquippableOverride(propertyId: String, canEquip: Boolean) {
+        val key = equippableOverrideKey(open.value ?: return)
+        viewModelScope.launch { equippableOverrideStore.setOverridden(key, propertyId, canEquip) }
     }
 
     /**
