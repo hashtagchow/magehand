@@ -26,7 +26,7 @@ import org.robolectric.annotation.Config
  * docs/verification/WP3.md.
  *
  * SDK 34 rather than 36: it is a long-supported Robolectric image, it is above
- * the app's minSdk 31, and nothing in this DAO is SDK-dependent.
+ * the app's minSdk 30, and nothing in this DAO is SDK-dependent.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])

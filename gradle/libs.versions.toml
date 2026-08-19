@@ -48,9 +48,10 @@ androidxTestCore = "1.7.0"
 
 # SDK levels (referenced from the module build scripts).
 # 37 is the newest stable platform (`platforms;android-37.0`, build-tools 37.0.0);
-# 37.1 exists and 37.2 is in beta. minSdk 31 is a design decision (00-DESIGN.md).
+# 37.1 exists and 37.2 is in beta. minSdk 30 per FR-12 (2026-08-19): the inset
+# machinery is native at exactly API 30, audited zero-violation; 29 is the real cliff.
 compileSdk = "37"
-minSdk = "31"
+minSdk = "30"
 targetSdk = "37"
 
 [libraries]

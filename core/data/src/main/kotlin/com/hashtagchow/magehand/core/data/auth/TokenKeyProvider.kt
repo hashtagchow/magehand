@@ -26,7 +26,7 @@ interface TokenKeyProvider {
 
 /**
  * The production provider: a non-exportable AES-256 key in the **Android
- * Keystore**, hardware-backed on every device this app supports (minSdk 31).
+ * Keystore**, hardware-backed on every device this app supports (minSdk 30).
  *
  * This replaces `androidx.security:security-crypto`'s `MasterKey` +
  * `EncryptedSharedPreferences`, which Jetpack deprecated in 1.1.0 without shipping
