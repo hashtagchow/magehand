@@ -89,6 +89,30 @@ enum class Ability {
     INT,
     WIS,
     CHA,
+    ;
+
+    /**
+     * The ability spelled out — *"Strength"*, not *"STR"*.
+     *
+     * The abbreviation is right for the reference strip, where six cells share a row and the
+     * label is read next to its own number. It is wrong for a *list*: a dropdown of rolls on
+     * a DiceCloud character names them the way that sheet does (an ability attribute's `name`
+     * field is the whole word), and a local character's six checks have to read identically
+     * or 09 decision 5's "same screen" claim breaks at the one string a player compares.
+     *
+     * Written out rather than derived from [name] with a title-case helper: there is no rule
+     * that turns `INT` into `Intelligence`, and a lookup that pretends otherwise would be a
+     * table with extra steps.
+     */
+    val fullName: String
+        get() = when (this) {
+            STR -> "Strength"
+            DEX -> "Dexterity"
+            CON -> "Constitution"
+            INT -> "Intelligence"
+            WIS -> "Wisdom"
+            CHA -> "Charisma"
+        }
 }
 
 /**

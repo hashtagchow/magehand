@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.ui.screens.local
 
 import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.LocalCharacter
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.formatSignedModifier
 
 /**
  * The read-only reference strip on a local character's tracker
@@ -53,15 +54,13 @@ data class LocalReferenceState(
         /**
          * `3` → `"+3"`, `-2` → `"−2"`, `0` → `"+0"`.
          *
-         * A signed modifier is *always* signed on a character sheet — "+0" is how 5e prints a
-         * score of 10, and a bare "0" would read as a missing value rather than a real one.
-         *
-         * The negative uses U+2212 MINUS SIGN rather than a hyphen, matching the app's other
-         * numeric copy: at the type sizes this strip uses, a hyphen next to a digit is short
-         * enough to read as a stray mark.
+         * Delegates to [formatSignedModifier] rather than restating the rule. FR-7's Rolls
+         * section prints the same six numbers for a local character, eight lines below this
+         * strip and from a different code path — so the two disagreeing about `+0` or about
+         * which character a minus sign is would be visible in a single glance. Kept as a name
+         * on this class because that is what its own tests and its composable call.
          */
-        fun formatModifier(value: Int): String =
-            if (value < 0) "−${-value}" else "+$value"
+        fun formatModifier(value: Int): String = formatSignedModifier(value)
     }
 }
 

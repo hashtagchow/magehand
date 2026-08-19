@@ -26,6 +26,7 @@ import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
 import com.hashtagchow.magehand.core.data.db.LocalCharacterEntity
 import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
+import com.hashtagchow.magehand.core.data.fake.FakeSelectedRollStore
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.LocalRowKind
@@ -491,7 +492,7 @@ class LocalOpenCharacterTest {
         assertEquals(1, dao.findRow("r-1")?.current)
 
         // The player edits the sheet: this row is a 2-charge row now.
-        val repository = LocalCharacterRepository(dao, now = { clock })
+        val repository = LocalCharacterRepository(dao, FakeSelectedRollStore(), now = { clock })
         val form = repository.formFor(characterId)!!
         repository.save(form.copy(rows = form.rows.map { it.copy(total = 2) }))
 
@@ -512,7 +513,7 @@ class LocalOpenCharacterTest {
         character.awaitIdle()
         assertEquals(12, dao.find(characterId)?.currentHp)
 
-        val repository = LocalCharacterRepository(dao, now = { clock })
+        val repository = LocalCharacterRepository(dao, FakeSelectedRollStore(), now = { clock })
         val form = repository.formFor(characterId)!!
         repository.save(form.copy(maxHp = 10))
 
@@ -529,7 +530,7 @@ class LocalOpenCharacterTest {
         character.spend(handle("r-1"), amount = 1)
         character.awaitIdle()
 
-        val repository = LocalCharacterRepository(dao, now = { clock })
+        val repository = LocalCharacterRepository(dao, FakeSelectedRollStore(), now = { clock })
         val form = repository.formFor(characterId)!!
         repository.save(form.copy(rows = emptyList()))
 

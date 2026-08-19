@@ -207,6 +207,89 @@ data class DamageDefense(
     val sortOrder: Int = 0,
 )
 
+/**
+ * Whether a d20 roll is made with advantage, with disadvantage, or straight.
+ *
+ * DiceCloud does not store these words either (the same shape as [DefenseKind]): a computed
+ * roll carries a **numeric** `advantage` field, fed by effects whose `operation` is literally
+ * `"advantage"` / `"disadvantage"`, and the word is a reading of that number's sign.
+ * [fromWire] is the only place that reading happens.
+ */
+enum class RollAdvantage {
+    /** No effect currently pushes this roll either way. The overwhelmingly common case. */
+    NONE,
+    ADVANTAGE,
+    DISADVANTAGE,
+    ;
+
+    companion object {
+        /**
+         * Sign → word. Zero, `null` and a missing field all mean [NONE].
+         *
+         * **The sign, not a magic constant.** The field is a *rollup*: an ability or skill
+         * accumulates contributions from every active effect aimed at it, so the honest
+         * reading of "greater than zero" is "something is pushing this up", not "it equals
+         * one". Both directions cancelling to zero is then [NONE] for free, which is also
+         * what 5e says happens when a character has both.
+         *
+         * `null` is the field being absent, which is the normal state of a property whose
+         * kind simply does not express advantage — see `TrackerEngine.rollModifier`. It is
+         * deliberately not distinguished from zero here: "no field" and "the field says
+         * nothing is pushing" are the same fact to a player reading the row.
+         *
+         * **What the sign cannot tell us, and why that is fine.** DiceCloud pre-collapses
+         * every advantage contribution into this one integer before it reaches the wire, so
+         * the sign is the only reading available — a roll carrying one of each arrives as `0`,
+         * indistinguishable from a roll carrying neither. RAW's "advantage and disadvantage
+         * cancel" is therefore handled upstream of this app or not at all, and mapping
+         * net-zero to [NONE] is the correct answer either way: it is what 5e says the result
+         * is, and it is the only answer the data supports.
+         */
+        fun fromWire(value: Int?): RollAdvantage = when {
+            value == null || value == 0 -> NONE
+            value > 0 -> ADVANTAGE
+            else -> DISADVANTAGE
+        }
+    }
+}
+
+/**
+ * One d20 roll the character can be asked to make, and the number they add to it.
+ *
+ * Ability checks, saving throws and skills all land here, because to the player at the table
+ * they are one question — *"what do I add, and do I roll twice?"* — and the sheet answers all
+ * three of them the same way: a name and a computed total.
+ *
+ * ### Read-only, like [DamageDefense]
+ *
+ * There is no DiceCloud method that changes a modifier, and the tracker offers no control
+ * that would want one: this is reference, not state. What makes it worth a section anyway is
+ * that it is the single most frequently asked question in a session and the app answers it
+ * nowhere else — the alternative is the player leaving the tracker for the Sheet tab, mid-turn.
+ *
+ * ### Why [modifier] is an `Int` and [advantage] is separate
+ *
+ * The server computes the total for us, so nothing here re-derives `abilityMod + proficiency`
+ * — a second implementation of the sheet's own arithmetic would be a second thing to be wrong,
+ * and it would silently drop every bonus a feature adds. Advantage is a *different axis*: it
+ * is not worth a number of any kind, and folding it into the modifier would be a lie.
+ */
+data class RollModifier(
+    /**
+     * The stable identity of the row — `creatureProperties._id` for a discovered roll, and an
+     * app-minted constant for a local character's six checks. Never written to; it is what the
+     * dropdown's remembered selection points at.
+     */
+    val id: String,
+    /** As the sheet spells it. */
+    val name: String,
+    /** The whole number added to the d20, already totalled by the source. May be negative. */
+    val modifier: Int,
+    val advantage: RollAdvantage = RollAdvantage.NONE,
+    /** The server's `order`, or the local sheet order. The only stable tie-breaker. */
+    val sortOrder: Int = 0,
+)
+
 /** What the tracker screen renders. Everything here is already override-filtered and ordered. */
 data class TrackerBoard(
     val hp: TrackedResource? = null,
@@ -236,12 +319,19 @@ data class TrackerBoard(
      * which is what makes the section absent rather than empty.
      */
     val defenses: List<DamageDefense> = emptyList(),
+    /**
+     * Every roll the source expressed, in the order the sheet lists them. Empty only for a
+     * character whose data names none — which is what makes the Rolls section absent rather
+     * than an empty dropdown.
+     */
+    val rolls: List<RollModifier> = emptyList(),
     /** Name of the active concentration source, or `null`. */
     val concentratingOn: String? = null,
 ) {
     val isEmpty: Boolean
         get() = hp == null && tempHp == null && slots.isEmpty() && resources.isEmpty() &&
-            allItems.isEmpty() && activeToggles.isEmpty() && defenses.isEmpty()
+            allItems.isEmpty() && activeToggles.isEmpty() && defenses.isEmpty() &&
+            rolls.isEmpty()
 
     companion object {
         val EMPTY: TrackerBoard = TrackerBoard()

@@ -37,6 +37,7 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.ui.components.RadioRow
+import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 
 /**
  * Screen 6 — settings and accounts (docs/design/04-screens-ux.md §6).
@@ -56,6 +57,7 @@ fun SettingsScreen(
     var confirmingSignOutOf by rememberSaveable { mutableStateOf<String?>(null) }
 
     Scaffold(
+        contentWindowInsets = screenContentWindowInsets,
         modifier = modifier,
         topBar = {
             TopAppBar(

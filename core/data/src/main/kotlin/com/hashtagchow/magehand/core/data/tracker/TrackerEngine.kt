@@ -5,6 +5,8 @@ import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.DamageDefense
 import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
+import com.hashtagchow.magehand.core.model.RollAdvantage
+import com.hashtagchow.magehand.core.model.RollModifier
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerKind
@@ -28,9 +30,11 @@ object TrackerEngine {
     private const val TYPE_TOGGLE = "toggle"
     private const val TYPE_BUFF = "buff"
     private const val TYPE_DAMAGE_MULTIPLIER = "damageMultiplier"
+    private const val TYPE_SKILL = "skill"
 
     private const val ATTR_SPELL_SLOT = "spellSlot"
     private const val ATTR_RESOURCE = "resource"
+    private const val ATTR_ABILITY = "ability"
 
     private const val VAR_HIT_POINTS = "hitPoints"
 
@@ -53,6 +57,34 @@ object TrackerEngine {
     private val LEADING_ORDINAL = Regex("""^\s*(\d+)""")
 
     /**
+     * The `skillType` values that are a **proficiency you hold**, not a roll you make.
+     *
+     * DiceCloud files several different things under one property type, distinguished only by
+     * this field, and they are not all d20 rolls: alongside the check-shaped kinds it also
+     * stores weapon, armour and language proficiencies — each of which carries the same
+     * `value` field (the proficiency bonus) purely because the property type has one. A
+     * dropdown offering "make a Common check" would be nonsense the sheet never claimed.
+     *
+     * An **exclusion** list rather than an allow-list, deliberately, and the trade is worth
+     * stating: an allow-list would silently drop a kind DiceCloud adds later, and dropping a
+     * real roll is the failure the player cannot see or work around. Listing the non-rolls
+     * means a new kind shows up in the dropdown instead — visible, harmless, and fixable by
+     * one line here. (`armor` is included from DiceCloud's own vocabulary rather than from any
+     * data seen here: it is the same proficiency shape as the other two, and leaving it out
+     * on the grounds that nobody's sheet happens to carry one would be pedantry with a bug in it.)
+     */
+    private val NON_ROLL_SKILL_TYPES = setOf("language", "weapon", "armor")
+
+    /**
+     * The rollup DiceCloud writes onto a computed roll when an effect pushes it either way.
+     * Read for its **sign** — see [RollAdvantage.fromWire].
+     */
+    private const val FIELD_ADVANTAGE = "advantage"
+
+    /** An ability *score*'s check modifier, which is a different field from the score itself. */
+    private const val FIELD_MODIFIER = "modifier"
+
+    /**
      * Builds the board.
      *
      * @param overrides the local layer from Room `tracker_prefs`, keyed by `propertyId`.
@@ -68,6 +100,7 @@ object TrackerEngine {
         val items = properties.mapNotNull { item(it) }
         val toggles = properties.mapNotNull { toggle(it) }
         val defenses = properties.mapNotNull { damageDefense(it) }
+        val rolls = properties.mapNotNull { abilityCheck(it) ?: skillRoll(it) }
 
         val pinnedIds = overrides.values.filter { it.pinned }.map { it.propertyId }.toSet()
 
@@ -82,6 +115,7 @@ object TrackerEngine {
             pinnedItems = order(items.filter { it.propertyId in pinnedIds }, overrides, NATURAL_ORDER),
             activeToggles = orderToggles(toggles, overrides),
             defenses = orderDefenses(defenses, overrides),
+            rolls = orderRolls(rolls, overrides),
             concentratingOn = concentrationSource(properties),
         )
     }
@@ -260,6 +294,93 @@ object TrackerEngine {
     }
 
     /**
+     * An **ability check** — the six scores, read as the d20 roll you make with them.
+     *
+     * ### Where this rule comes from
+     *
+     * The live capture, like [damageDefense]: 03 lists no rule for rolls at all. An ability
+     * lives where every other tracked number does — `type: "attribute"` — under
+     * `attributeType: "ability"`, and it carries *two* different numbers plus the advantage
+     * rollup:
+     *
+     * ```json
+     * { "type": "attribute", "attributeType": "ability", "name": "…",
+     *   "total": 13, "value": 13, "modifier": 1, "advantage": 0, "order": … }
+     * ```
+     *
+     * **[FIELD_MODIFIER], not `value`**, and that is the whole point of this function: `value`
+     * / `total` are the *score* (the 3–20 number), and adding a score to a d20 would be off by
+     * about ten. `modifier` is the server's own computed `floor((score − 10) / 2)`, which is
+     * also why nothing here re-derives it — see [RollModifier.modifier].
+     *
+     * A missing `modifier` is a skip rather than a fallback to arithmetic on the score: an
+     * attribute that does not say what it adds is not a roll this app can answer, and guessing
+     * would quietly drop every effect the server folded into the real number.
+     */
+    private fun abilityCheck(p: JsonObject): RollModifier? {
+        if (!p.isAttribute(ATTR_ABILITY) || p.isSkipped()) return null
+        return p.toRoll(modifier = p.number(FIELD_MODIFIER) ?: return null)
+    }
+
+    /**
+     * A **skill, save or check** — everything DiceCloud files under its one `skill` property
+     * type that is actually rolled.
+     *
+     * ### Where this rule comes from
+     *
+     * The capture again. One property type covers a surprising amount of ground, sorted by a
+     * `skillType` discriminator, and the rollable ones share a shape:
+     *
+     * ```json
+     * { "type": "skill", "skillType": "…", "name": "…", "ability": "…",
+     *   "abilityMod": 1, "proficiency": 0, "value": 1, "order": … }
+     * ```
+     *
+     * `value` is the **total** the sheet already computed — ability modifier, proficiency,
+     * and anything a feature added. [NON_ROLL_SKILL_TYPES] is what keeps the non-rolls out;
+     * see there for why the filter is stated as an exclusion.
+     *
+     * `abilityMod` and `proficiency` are deliberately *not* read. They are the ingredients of
+     * `value`, and re-adding them here would be a second implementation of the sheet's own
+     * arithmetic — one that would disagree with the sheet the moment a feature contributes
+     * anything neither field accounts for.
+     *
+     * ### Advantage
+     *
+     * [FIELD_ADVANTAGE] is present on some of these and absent on others, which is exactly
+     * how [RollAdvantage.fromWire] treats it: absent and zero are one answer. Every roll in
+     * the capture reads zero, and that is not an accident of the capture — the effects that
+     * would move it (six of them there, `operation: "disadvantage"`, each naming the rolls it
+     * targets) all belong to condition buffs that are switched **off**. Which is the whole
+     * mechanism working: turn the condition on and the server recomputes the rollup, and this
+     * rule reads the new sign with no further work. Nothing here interprets the effects
+     * themselves; that is the server's job and it has already done it.
+     */
+    private fun skillRoll(p: JsonObject): RollModifier? {
+        if (p.string("type") != TYPE_SKILL || p.isSkipped()) return null
+        if (p.string("skillType") in NON_ROLL_SKILL_TYPES) return null
+        return p.toRoll(modifier = p.number("value") ?: return null)
+    }
+
+    /**
+     * The shared tail of both roll rules: identity, name, advantage and order.
+     *
+     * A roll with no name is dropped. The dropdown is a list of names — that *is* its whole
+     * content — so a nameless entry would be an un-pickable blank line, and there is no second
+     * field to fall back on that a player would recognise.
+     */
+    private fun JsonObject.toRoll(modifier: Int): RollModifier? {
+        val name = string("name")?.takeIf { it.isNotBlank() } ?: return null
+        return RollModifier(
+            id = string("_id") ?: return null,
+            name = name,
+            modifier = modifier,
+            advantage = RollAdvantage.fromWire(number(FIELD_ADVANTAGE)),
+            sortOrder = number("order") ?: 0,
+        )
+    }
+
+    /**
      * 03 §5, second half: an **enabled** toggle or buff whose name or tags mention
      * concentration drives the banner. Buffs are included because that is how DiceCloud
      * models a spell's ongoing effect.
@@ -359,6 +480,29 @@ object TrackerEngine {
     ): List<DamageDefense> = rows
         .filter { overrides[it.propertyId]?.hidden != true }
         .sortedWith(compareBy({ it.kind }, { it.sortOrder }, { it.name }))
+
+    /**
+     * Rolls keep the **sheet's own order** — the server's `order`, then the name.
+     *
+     * Not alphabetical, and not grouped by kind. `order` is the sequence DiceCloud itself
+     * lists these in, so a player scrolling the dropdown finds them where their sheet puts
+     * them; re-sorting would make this app's list the one place they have to search rather
+     * than scan. (Defenses *are* re-sorted, and for the opposite reason — see [orderDefenses]:
+     * there the server's order is the order features were added, which means nothing to a
+     * reader scanning three lines. Here it is the sheet's layout, which means a lot to a
+     * reader scanning thirty.)
+     *
+     * Only the *hidden* half of the override layer applies, exactly as for defenses: pinning
+     * and reordering are meaningless on a read-only reference row, and v1's customize sheet
+     * offers no control that could set one on these. The filter is here so the repo's
+     * "overrides are applied last, to everything" rule holds without an exception.
+     */
+    private fun orderRolls(
+        rows: List<RollModifier>,
+        overrides: Map<String, TrackerOverride>,
+    ): List<RollModifier> = rows
+        .filter { overrides[it.id]?.hidden != true }
+        .sortedWith(compareBy({ it.sortOrder }, { it.name }))
 
     private fun orderToggles(
         rows: List<ConditionToggle>,

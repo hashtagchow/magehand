@@ -26,6 +26,7 @@ import com.hashtagchow.magehand.core.data.local.LocalOpenCharacter
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -85,6 +86,7 @@ class LocalCharacterHomeViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     repository: LocalCharacterRepository,
     appSettingsStore: AppSettingsStore,
+    private val selectedRollStore: SelectedRollStore,
     private val factory: LocalOpenCharacterFactory,
 ) : ViewModel() {
 
@@ -148,6 +150,33 @@ class LocalCharacterHomeViewModel @Inject constructor(
 
     private val character = repository.observe(characterId)
 
+    /**
+     * FR-7's key for this character.
+     *
+     * A **local** key, which is the whole reason `SelectedRollStore` is not a Room table: every
+     * per-character table in this app is keyed by `(accountId, creatureId)`, and 09 decision 1
+     * forbids the sentinel account a local character would need to have a row in one. Keyed by
+     * the character instead, the same store serves both kinds — and its own namespace is what
+     * keeps sign-out's per-account reap from reaching this.
+     */
+    private val rollKey: String = SelectedRollStore.localKey(characterId)
+
+    /**
+     * The two *preference* signals, paired.
+     *
+     * `combine` tops out at five typed flows before it degenerates into an `Array<Any?>` with
+     * unchecked casts, and FR-7's selection made the tracker's need six. Grouping the two
+     * DataStore-backed reads is the cheapest honest fix — they are the same kind of signal (a
+     * stored choice, not character data) — and it is the same grouping, for the same reason,
+     * as `CharacterHomeViewModel.Prefs`.
+     */
+    private data class Prefs(val showToggles: Boolean, val selectedRollId: String?)
+
+    private val prefs: Flow<Prefs> =
+        combine(appSettingsStore.showToggles, selectedRollStore.selectedRollId(rollKey)) { toggles, rollId ->
+            Prefs(showToggles = toggles, selectedRollId = rollId)
+        }
+
     private val trackerState: Flow<TrackerUiState> = open.flatMapLatest { local ->
         if (local == null) {
             flowOf(TrackerUiState(creatureId = characterId, hasConnection = false))
@@ -157,8 +186,8 @@ class LocalCharacterHomeViewModel @Inject constructor(
                 local.canWrite,
                 local.canUndo,
                 local.writeHistory,
-                appSettingsStore.showToggles,
-            ) { board, canWrite, canUndo, history, showToggles ->
+                prefs,
+            ) { board, canWrite, canUndo, history, prefs ->
                 toTrackerUiState(
                     creatureId = characterId,
                     board = board,
@@ -178,9 +207,13 @@ class LocalCharacterHomeViewModel @Inject constructor(
                     // FR-6 applies to local characters too, and costs nothing: a local board
                     // carries no toggles at all (09 decision 4). Passing it anyway is what
                     // keeps the two trackers one rule rather than two.
-                    showToggles = showToggles,
+                    showToggles = prefs.showToggles,
                     // 09 decision 8, pinned — see TrackerUiState.hasConnection.
                     hasConnection = false,
+                    // FR-7 works identically for a local character: six ability checks from
+                    // the stored scores, and a selection remembered under this character's own
+                    // key. See `SelectedRollStore` for why that needs no account.
+                    selectedRollId = prefs.selectedRollId,
                 )
             }
         }
@@ -255,6 +288,18 @@ class LocalCharacterHomeViewModel @Inject constructor(
     fun undoLastWrite() {
         val character = open.value ?: return
         viewModelScope.launch { character.undoLastWrite() }
+    }
+
+    /**
+     * FR-7: the Rolls dropdown was used. Local, like every write on this screen.
+     *
+     * Not routed through [LocalOpenCharacter]: the key is the character id, which this class
+     * already has from the route, so the selection is readable and writable before — and
+     * after — a character is open. The DiceCloud view model reads the same store the same way;
+     * see its `selectedRollId`.
+     */
+    fun selectRoll(rollId: String) {
+        viewModelScope.launch { selectedRollStore.setSelectedRollId(rollKey, rollId) }
     }
 
     /** The customize sheet's ▲/▼. The only mutation that sheet offers for a local character. */

@@ -24,6 +24,7 @@ import com.hashtagchow.magehand.core.data.local.LocalCharacterRepository
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacter
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 
 /**
  * Who closes the `LocalOpenCharacter`, when the screen is popped mid-open.
@@ -69,8 +70,9 @@ class LocalCharacterHomeLifecycleTest {
         val dao = EmptyLocalCharacterDao
         return LocalCharacterHomeViewModel(
             savedStateHandle = SavedStateHandle(mapOf("characterId" to characterId)),
-            repository = LocalCharacterRepository(dao),
+            repository = LocalCharacterRepository(dao, FakeSelectedRollStore),
             appSettingsStore = FakeAppSettingsStore,
+            selectedRollStore = FakeSelectedRollStore,
             factory = LocalOpenCharacterFactory(dao),
         )
     }
@@ -155,6 +157,13 @@ private object EmptyLocalCharacterDao : LocalCharacterDao {
 
     private fun unreachable(): Nothing =
         throw UnsupportedOperationException("LocalCharacterHomeLifecycleTest writes nothing")
+}
+
+/** FR-7's store, as a constant; this class is about the open/close hand-off, not the picker. */
+private object FakeSelectedRollStore : SelectedRollStore {
+    override fun selectedRollId(characterKey: String): Flow<String?> = flowOf(null)
+    override suspend fun setSelectedRollId(characterKey: String, rollId: String?) = Unit
+    override suspend fun deleteForAccount(accountId: String) = Unit
 }
 
 /** FR-6's store, as a constant; nothing here reads the tracker's shape. */

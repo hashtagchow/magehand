@@ -44,6 +44,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.ui.navigation.CharacterHomeTab
+import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpNumberPadDialog
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.RestConfirmDialog
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ShakeSignal
@@ -151,6 +152,7 @@ fun CharacterHomeScreen(
 
     MageHandTheme(accentColor = uiState.accentColor) {
         Scaffold(
+            contentWindowInsets = screenContentWindowInsets,
             modifier = modifier,
             snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
@@ -242,6 +244,7 @@ fun CharacterHomeScreen(
                             onHpTap = { hpPadOpen = true },
                             onItemDelta = viewModel::adjustItem,
                             onToggle = viewModel::toggleCondition,
+                            onSelectRoll = viewModel::selectRoll,
                             onConnectionDetails = { connectionOpen = true },
                         ),
                         shake = shake,

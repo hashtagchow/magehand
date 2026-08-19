@@ -6,6 +6,7 @@ import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
 import com.hashtagchow.magehand.core.data.db.LocalCharacterEntity
 import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.LocalCharacter
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.LocalTrackerRow
@@ -19,9 +20,15 @@ import java.util.UUID
  * in-memory database and a fake clock. [now] and [newId] are injected for exactly that
  * reason: a save asserted against a wall clock or a random UUID is a test that asserts
  * nothing.
+ *
+ * [selectedRollStore] is here for [delete] alone, and deliberately has **no default**: a
+ * character's FR-7 roll selection lives outside the database, so a construction site that
+ * could quietly omit the store would be a construction site whose deletes leak keys. Same
+ * argument `DataModule` makes for handing the store to `DefaultAccountRepository.signOut`.
  */
 class LocalCharacterRepository(
     private val dao: LocalCharacterDao,
+    private val selectedRollStore: SelectedRollStore,
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) {
@@ -175,6 +182,24 @@ class LocalCharacterRepository(
      * Note what this is *not*: sign-out. 09 decision 10 — signing out of a DiceCloud account
      * must not delete local characters, and it cannot, because nothing here is account-keyed.
      * This is the player deleting a character on purpose.
+     *
+     * ### The FR-7 selection goes too, and this is the only place that can take it
+     *
+     * A character's remembered roll is not a row — it is a DataStore key,
+     * `SelectedRollStore.localKey(id)`, so `ON DELETE CASCADE` cannot reach it and neither can
+     * `SelectedRollStore.deleteForAccount`: the local namespace is outside the sign-out reap on
+     * purpose (09 decision 10). Local ids are UUIDs and never recur, so a key left behind is
+     * unreachable **forever** rather than merely stale — the same argument sign-out makes about
+     * `accounts.id`, arriving at the same conclusion for the one deletion path local characters
+     * have.
+     *
+     * The selection is cleared *before* the row, matching sign-out's ordering: the satellite
+     * state goes first, the record that names it last, so a failure between the two steps
+     * leaves a character whose dropdown has forgotten its pick — a thing the player can redo —
+     * rather than the orphaned key this path exists to prevent.
      */
-    suspend fun delete(id: String) = dao.delete(id)
+    suspend fun delete(id: String) {
+        selectedRollStore.setSelectedRollId(SelectedRollStore.localKey(id), null)
+        dao.delete(id)
+    }
 }

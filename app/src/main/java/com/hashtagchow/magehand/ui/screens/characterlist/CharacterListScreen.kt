@@ -50,6 +50,7 @@ import coil3.compose.AsyncImage
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 
 /**
  * Screen 2 — character list (docs/design/04-screens-ux.md §2).
@@ -73,6 +74,7 @@ fun CharacterListScreen(
     var creatorMenuOpen by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
+        contentWindowInsets = screenContentWindowInsets,
         modifier = modifier,
         topBar = {
             TopAppBar(

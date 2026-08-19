@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -28,11 +29,13 @@ import com.hashtagchow.magehand.core.data.characters.CharacterListState
 import com.hashtagchow.magehand.core.data.connection.AccountConnection
 import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.RestKind
+import com.hashtagchow.magehand.core.model.RollModifier
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerKind
@@ -91,6 +94,7 @@ class CharacterHomeViewModelTest {
             characterListRepository = FakeCharacterListRepository(listState),
             sheetSessionFactory = SheetSessionFactory(StubAccountRepository, StubTokenStore),
             appSettingsStore = FakeAppSettingsStore(showToggles),
+            selectedRollStore = selectedRolls,
             openCharacterFactory = factory,
             connectionManager = connectionManager,
         )
@@ -98,6 +102,9 @@ class CharacterHomeViewModelTest {
     }
 
     private val connectionManager = RecordingConnectionManager()
+
+    /** FR-7's per-character selection. In memory; the persistence itself is `:core:data`'s. */
+    private val selectedRolls = FakeSelectedRollStore()
 
     /** `stateIn(WhileSubscribed)` never runs without a collector. */
     private fun kotlinx.coroutines.test.TestScope.collecting(vm: CharacterHomeViewModel) {
@@ -138,6 +145,82 @@ class CharacterHomeViewModelTest {
         assertEquals(3 to 4, tracker.slots.single().let { it.value to it.total })
         assertEquals(ConnectionTone.LIVE, tracker.status.tone)
     }
+
+    // --- FR-7: the Rolls dropdown --------------------------------------------
+
+    @Test
+    fun `a discovered roll reaches the tracker state, unselected`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        character.board.value = TrackerBoard(rolls = listOf(RollModifier("r1", "Stealth", 5)))
+        advanceUntilIdle()
+
+        val rolls = vm.uiState.value.tracker.rolls
+        assertEquals(listOf("Stealth"), rolls.options.map { it.name })
+        assertNull("nothing is picked until the player picks it", rolls.selected)
+    }
+
+    @Test
+    fun `selecting a roll stores it under the account-scoped key and comes back out`() =
+        runTest(dispatcher) {
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            advanceUntilIdle()
+
+            character.board.value = TrackerBoard(rolls = listOf(RollModifier("r1", "Stealth", 5)))
+            advanceUntilIdle()
+
+            vm.selectRoll("r1")
+            advanceUntilIdle()
+
+            // Account-scoped, matching every other per-character store — a creature id alone
+            // would make two accounts on one shared creature share a selection.
+            assertEquals(
+                setOf(SelectedRollStore.serverKey(character.accountId, creatureId)),
+                selectedRolls.keys,
+            )
+            assertEquals("+5", vm.uiState.value.tracker.rolls.selected?.modifier)
+        }
+
+    @Test
+    fun `a selection made before the board arrived resolves once it does`() = runTest(dispatcher) {
+        // The cold-open ordering: DataStore answers before the socket does. The remembered id
+        // is not a roll yet, and must not be forgotten while it waits for one.
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        selectedRolls.setSelectedRollId(
+            SelectedRollStore.serverKey(character.accountId, creatureId),
+            "r1",
+        )
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        assertNull(vm.uiState.value.tracker.rolls.selected)
+
+        character.board.value = TrackerBoard(rolls = listOf(RollModifier("r1", "Stealth", 5)))
+        advanceUntilIdle()
+
+        assertEquals("Stealth", vm.uiState.value.tracker.rolls.selected?.name)
+    }
+
+    @Test
+    fun `selecting a roll before the character opens is dropped, not stored under a wrong key`() =
+        runTest(dispatcher) {
+            // The key needs the account id, which only the opened character knows. No character,
+            // no key — writing one anyway would put a row under an empty account id that
+            // sign-out could never reach.
+            val (vm, _) = viewModel(character = null)
+            collecting(vm)
+
+            vm.selectRoll("r1")
+            advanceUntilIdle()
+
+            assertTrue(selectedRolls.keys.isEmpty())
+        }
 
     @Test
     fun `the connection status follows the session, not the character list`() = runTest(dispatcher) {
@@ -555,6 +638,27 @@ private object StubAccountRepository : AccountRepository {
     override suspend fun setActiveAccount(accountId: String) = Unit
     override suspend fun signOut(accountId: String) = Unit
     override suspend fun tokenFor(accountId: String): String? = null
+}
+
+/**
+ * FR-7's store. Recording rather than constant: what this class asserts about the feature is
+ * that the view model writes the *account-scoped* key, which a constant could not show.
+ */
+private class FakeSelectedRollStore : SelectedRollStore {
+    private val entries = MutableStateFlow<Map<String, String>>(emptyMap())
+
+    val keys: Set<String> get() = entries.value.keys
+
+    override fun selectedRollId(characterKey: String): Flow<String?> =
+        entries.map { it[characterKey] }
+
+    override suspend fun setSelectedRollId(characterKey: String, rollId: String?) {
+        entries.value = entries.value.toMutableMap().apply {
+            if (rollId == null) remove(characterKey) else put(characterKey, rollId)
+        }
+    }
+
+    override suspend fun deleteForAccount(accountId: String) = Unit
 }
 
 /** FR-6's store, as a constant. Nothing in this class flips it mid-test. */

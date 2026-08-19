@@ -30,12 +30,18 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -94,6 +100,18 @@ data class TrackerActions(
 
     /** A condition chip, or the concentration banner's ✕ (the same `flipToggle` write). */
     val onToggle: (propertyId: String) -> Unit = {},
+
+    /**
+     * FR-7: an entry was picked in the Rolls dropdown.
+     *
+     * The odd one out in this class, and worth saying why it is here anyway: every other
+     * callback carries a `creatureProperties._id` towards a *server* write, while this one
+     * carries a `RollModifier.id` towards a local preference. It belongs in the same parameter
+     * object because it is the same kind of thing to the composable — "the tab needs to tell
+     * the ViewModel that something was tapped" — and a second lambda parameter on `TrackerTab`
+     * for one intent would be the start of the eight the class KDoc says it replaced.
+     */
+    val onSelectRoll: (rollId: String) -> Unit = {},
 
     /**
      * The bottom-right not-live dot was tapped: open the connection details sheet.
@@ -292,6 +310,18 @@ private fun TrackerContent(
                     SectionHeader(stringResource(R.string.tracker_section_defenses))
                 }
                 item(key = "defenses") { DefenseRows(rows = state.defenses) }
+            }
+
+            // FR-7, and it sits here for the same reason the defenses do: it answers a
+            // question asked mid-turn rather than tracking something the player spends.
+            // Absent — header and all — for a character whose data expresses no rolls.
+            if (state.rolls.isPresent) {
+                item(key = "rolls-header") {
+                    SectionHeader(stringResource(R.string.tracker_section_rolls))
+                }
+                item(key = "rolls") {
+                    RollPicker(state = state.rolls, onSelect = actions.onSelectRoll)
+                }
             }
 
             if (state.slots.isNotEmpty()) {
@@ -854,6 +884,108 @@ private fun DefenseRows(rows: List<DefenseRowState>, modifier: Modifier = Modifi
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * The Rolls section (FR-7): pick a roll on the left, read what it costs you on the right.
+ *
+ * ### Why a dropdown and not thirty rows
+ *
+ * A real sheet expresses upwards of thirty rolls. Printing them all would be the single
+ * longest thing on the tracker — longer than every resource the player actually spends — to
+ * answer a question that is about *one* of them at a time. So the section is one row tall
+ * whatever the character, and the list is behind the control that opens it.
+ *
+ * ### Why the selection is persisted and the *menu* is not
+ *
+ * The picked roll survives an app restart ([TrackerActions.onSelectRoll] → `SelectedRollStore`)
+ * because a player asked to make the same check twice in a round should not have to hunt for
+ * it twice. Whether the menu happens to be *open* is not a preference at all — it is a
+ * half-finished gesture — so it is plain `remember`, not `rememberSaveable`: a rotation
+ * mid-combat should leave the player looking at their modifier, not at a reopened menu they
+ * have to dismiss.
+ *
+ * ### Read-only, and why there is no tap target on the right
+ *
+ * Nothing here writes to the sheet. The right-hand read-out is not a control and does not
+ * pretend to be one — matching [DefenseRows], the tracker's other purely-reference block. The
+ * app does not roll dice; it tells the player what to add to the ones on the table.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
+@Composable
+private fun RollPicker(
+    state: RollPickerState,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = it },
+            modifier = Modifier.weight(1f),
+        ) {
+            OutlinedTextField(
+                // The field is a *display* of the selection, never an input: `readOnly` plus
+                // an ignored `onValueChange` is Material3's own recipe for an exposed dropdown
+                // whose menu is the only way to change the value. An editable one would offer
+                // a keyboard that could type a roll the character does not have.
+                value = state.selected?.name.orEmpty(),
+                onValueChange = {},
+                readOnly = true,
+                singleLine = true,
+                label = { Text(stringResource(R.string.tracker_rolls_label)) },
+                placeholder = { Text(stringResource(R.string.tracker_rolls_placeholder)) },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                modifier = Modifier
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                    .fillMaxWidth()
+                    .testTag("tracker:roll:dropdown"),
+            )
+            ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                state.options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = {
+                            expanded = false
+                            onSelect(option.id)
+                        },
+                        modifier = Modifier.testTag("tracker:roll:option:${option.id}"),
+                    )
+                }
+            }
+        }
+
+        // Absent rather than blank when nothing is picked: an empty column beside the
+        // placeholder would read as a roll with no modifier.
+        state.selected?.let { selected ->
+            Column(
+                horizontalAlignment = Alignment.End,
+                modifier = Modifier
+                    .semantics(mergeDescendants = true) { contentDescription = selected.spoken }
+                    .testTag("tracker:roll:display"),
+            ) {
+                Text(
+                    text = selected.modifier,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                selected.advantageLabel?.let { label ->
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }

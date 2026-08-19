@@ -16,6 +16,7 @@ import com.hashtagchow.magehand.core.data.db.ThemePrefDao
 import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
 import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.server.ServerUrlResult
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.server.normalizeServerUrl
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
 import com.hashtagchow.magehand.core.model.Account
@@ -42,6 +43,7 @@ class DefaultAccountRepository(
     private val characterCache: CharacterCache,
     private val trackerPrefDao: TrackerPrefDao,
     private val themePrefDao: ThemePrefDao,
+    private val selectedRollStore: SelectedRollStore,
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) : AccountRepository {
@@ -194,6 +196,13 @@ class DefaultAccountRepository(
         characterCache.clear(accountId)
         trackerPrefDao.deleteForAccount(accountId)
         themePrefDao.deleteForAccount(accountId)
+        // FR-7's per-character dropdown selection. Not a DAO — it lives in DataStore, keyed
+        // by character rather than by table, because a *local* character needs the same
+        // preference and has no account to key it on (see SelectedRollStore). It is reaped
+        // here for the same reason as everything above it: `accounts.id` is minted per
+        // sign-in, so a row left behind is unreachable rather than merely stale. Its own
+        // key namespace is what stops this reaching a local character's selection.
+        selectedRollStore.deleteForAccount(accountId)
 
         // The token also rests in the WebView's localStorage, because that is how
         // Meteor SSO works (docs/design/05-security.md §"WebView SSO"). WP5 found it

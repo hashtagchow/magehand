@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpNumberPadDialog
@@ -126,6 +127,7 @@ fun LocalCharacterHomeScreen(
     }
 
     Scaffold(
+        contentWindowInsets = screenContentWindowInsets,
         modifier = modifier,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
@@ -206,6 +208,7 @@ fun LocalCharacterHomeScreen(
                     // A local board carries no toggles (09 decision 4), so nothing can reach
                     // this; there is also no connection sheet to open.
                     onToggle = {},
+                    onSelectRoll = viewModel::selectRoll,
                     onConnectionDetails = {},
                 ),
             )

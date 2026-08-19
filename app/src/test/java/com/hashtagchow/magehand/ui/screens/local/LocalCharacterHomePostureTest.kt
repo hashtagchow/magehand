@@ -4,6 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.ui.screens.settings.SettingsUiState
 import com.hashtagchow.magehand.ui.webview.SheetSession
 
@@ -54,6 +55,22 @@ class LocalCharacterHomePostureTest {
 
         assertFalse(fresh.tracker.hasConnection)
         assertFalse(fresh.tracker.showConnectionIndicator)
+    }
+
+    @Test
+    fun `a local character's remembered roll needs no account`() {
+        // FR-7's structural claim, and the reason its store is not a Room table: every
+        // per-character table in this app is keyed by `(accountId, creatureId)`, and 09
+        // decision 1 forbids the sentinel account a local character would need to have a row
+        // in one. The key below is derived from the character id alone — no account is asked
+        // for, so none can be invented.
+        val key = SelectedRollStore.localKey("local-character-1")
+
+        assertTrue("a local key must be namespaced apart from every server key", key.contains("local"))
+        assertFalse(
+            "a local key must not be reachable by sign-out's per-account prefix sweep",
+            key.startsWith(SelectedRollStore.serverKey("", "")),
+        )
     }
 
     @Test

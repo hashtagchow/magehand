@@ -180,9 +180,18 @@ class LocalOpenCharacter(
     private val history = MutableStateFlow<List<TrackerWrite>>(emptyList())
     override val writeHistory: StateFlow<List<TrackerWrite>> = history.asStateFlow()
 
-    override val canUndo: StateFlow<Boolean> =
-        history.map { entries -> entries.any { it.undoable && !it.undone } }
-            .stateIn(scope, SharingStarted.Eagerly, false)
+    /**
+     * Written synchronously by [updateUndoStack], never derived through an async collector.
+     * The original `history.map { … }.stateIn(scope, Eagerly, …)` republished on the
+     * character's scope, so `awaitIdle()` — which waits for `inFlight == 0`, a guarantee
+     * that releases *after* [writeLock] does — could observe a `canUndo` computed from the
+     * pre-write history. Root-caused from a 1-in-5 flake in
+     * `a rest is not undoable and invalidates everything above it`; reproduced 2 000×/run
+     * pristine, 12 000 iterations clean with this shape. The predicate is unchanged:
+     * `undoStack.isNotEmpty()` ≡ `history.any { it.undoable && !it.undone }`.
+     */
+    private val undoAvailable = MutableStateFlow(false)
+    override val canUndo: StateFlow<Boolean> = undoAvailable.asStateFlow()
 
     /** Never emits: a Room write against a row this instance owns has no failure mode the
      * player can act on, and a shake animation for one would be theatre. */
@@ -192,6 +201,16 @@ class LocalOpenCharacter(
 
     /** Newest first, keyed by [TrackerWrite.id] — the undo stack's own memory. */
     private val undoStack = MutableStateFlow<List<Undoable>>(emptyList())
+
+    /**
+     * The one door to [undoStack]: every mutation republishes [undoAvailable] in the same
+     * breath, and every caller already holds [writeLock] — which is what makes
+     * `awaitIdle()`'s guarantee cover [canUndo] deterministically.
+     */
+    private fun updateUndoStack(transform: (List<Undoable>) -> List<Undoable>) {
+        undoStack.value = transform(undoStack.value)
+        undoAvailable.value = undoStack.value.isNotEmpty()
+    }
 
     /**
      * Serializes writes so a press-and-hold's read-modify-write pairs cannot interleave.
@@ -353,7 +372,7 @@ class LocalOpenCharacter(
             }
         }
         dao.touch(creatureId, now())
-        undoStack.update { it.drop(1) }
+        updateUndoStack { it.drop(1) }
         history.update { entries ->
             entries.map { if (it.id == entry.writeId) it.copy(undone = true, undoable = false) else it }
         }
@@ -492,12 +511,12 @@ class LocalOpenCharacter(
                 ),
             ) + entries
         }
-        if (undo != null) undoStack.update { listOf(undo.withWriteId(id)) + it }
+        if (undo != null) updateUndoStack { listOf(undo.withWriteId(id)) + it }
     }
 
     /** A rest refilled rows; every entry above it now describes a value that is gone. */
     private fun invalidateUndoStack() {
-        undoStack.value = emptyList()
+        updateUndoStack { emptyList() }
         history.update { entries -> entries.map { it.copy(undoable = false) } }
     }
 

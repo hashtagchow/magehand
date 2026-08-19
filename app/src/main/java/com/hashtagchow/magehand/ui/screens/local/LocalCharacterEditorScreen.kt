@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.core.data.local.LocalCharacterForm
 import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.LocalRowKind
@@ -98,6 +99,7 @@ fun LocalCharacterEditorScreen(
     }
 
     Scaffold(
+        contentWindowInsets = screenContentWindowInsets,
         modifier = modifier,
         topBar = {
             TopAppBar(

@@ -48,6 +48,8 @@ import com.hashtagchow.magehand.core.data.session.DefaultOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreAppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.DataStoreSelectedRollStore
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
 import java.util.concurrent.TimeUnit
 import javax.inject.Singleton
@@ -150,6 +152,19 @@ object DataModule {
         DataStoreAppSettingsStore(preferences(context))
 
     /**
+     * FR-7's per-character roll selection.
+     *
+     * Shares [preferences] with the other two stores for the reason stated above: DataStore's
+     * contract is per-*file*, and a third `.preferences_pb` would be a third thing to migrate
+     * and back up. The three interfaces over it stay separate because their *contracts* differ
+     * — app-wide, active-account, per-character — see `SelectedRollStore`'s KDoc.
+     */
+    @Provides
+    @Singleton
+    fun provideSelectedRollStore(@ApplicationContext context: Context): SelectedRollStore =
+        DataStoreSelectedRollStore(preferences(context))
+
+    /**
      * The snapshot store, character cache and two pref DAOs are here for
      * [DefaultAccountRepository.signOut] alone — it is the one path that knows an account
      * has ended, and each of these owns rows keyed by `accountId` that nothing else could
@@ -168,6 +183,7 @@ object DataModule {
         characterCache: CharacterCache,
         trackerPrefDao: TrackerPrefDao,
         themePrefDao: ThemePrefDao,
+        selectedRollStore: SelectedRollStore,
     ): AccountRepository = DefaultAccountRepository(
         api = api,
         accountDao = accountDao,
@@ -178,6 +194,7 @@ object DataModule {
         characterCache = characterCache,
         trackerPrefDao = trackerPrefDao,
         themePrefDao = themePrefDao,
+        selectedRollStore = selectedRollStore,
     )
 
     // ---- WP5: live connection + character list -------------------------------
@@ -262,11 +279,17 @@ object DataModule {
      * `@Singleton` because it is stateless apart from the DAO and the two injected seams, and
      * one instance keeps the `now`/`newId` overrides in one place rather than letting a second
      * construction site quietly pick the defaults.
+     *
+     * The [SelectedRollStore] is for the delete path: a local character's remembered roll is a
+     * DataStore key, not a row, so nothing cascades it and sign-out is forbidden from reaping
+     * it — see [LocalCharacterRepository.delete].
      */
     @Provides
     @Singleton
-    fun provideLocalCharacterRepository(dao: LocalCharacterDao): LocalCharacterRepository =
-        LocalCharacterRepository(dao)
+    fun provideLocalCharacterRepository(
+        dao: LocalCharacterDao,
+        selectedRollStore: SelectedRollStore,
+    ): LocalCharacterRepository = LocalCharacterRepository(dao, selectedRollStore)
 
     /**
      * Not `@Singleton`, for the same reason [provideOpenCharacterFactory] is not: each open

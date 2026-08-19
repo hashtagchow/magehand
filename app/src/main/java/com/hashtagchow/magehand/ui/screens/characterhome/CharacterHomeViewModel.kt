@@ -26,6 +26,7 @@ import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -109,6 +110,7 @@ class CharacterHomeViewModel @Inject constructor(
     characterListRepository: CharacterListRepository,
     sheetSessionFactory: SheetSessionFactory,
     appSettingsStore: AppSettingsStore,
+    private val selectedRollStore: SelectedRollStore,
     private val openCharacterFactory: OpenCharacterFactory,
     private val connectionManager: DdpConnectionManager,
 ) : ViewModel() {
@@ -160,6 +162,27 @@ class CharacterHomeViewModel @Inject constructor(
     }
 
     /**
+     * FR-7's remembered dropdown selection, for the *opened* character.
+     *
+     * Read through the store directly rather than through [OpenCharacter], for the same reason
+     * FR-6's switch is: it is a **preference**, not sheet state, and `AppSettingsStore` set the
+     * pattern one feature ago — a `:core:data` interface over plain types, injected into the
+     * view model that renders it. Widening `OpenCharacter` would have put a DataStore read
+     * behind the seam whose whole job is to be the app's *write* surface onto a character (see
+     * `WritePostureTest`), which is a bigger claim than this feature earns.
+     *
+     * The key needs the account id, and the only place that knows it is the opened character —
+     * hence [rollKey] rather than a field. Before the open completes there is no key and
+     * nothing to read, which is exactly the state where the board is empty anyway.
+     */
+    private fun selectedRollId(character: OpenCharacter): Flow<String?> =
+        selectedRollStore.selectedRollId(rollKey(character))
+
+    /** Account-scoped, matching every other per-character store. */
+    private fun rollKey(character: OpenCharacter): String =
+        SelectedRollStore.serverKey(character.accountId, character.creatureId)
+
+    /**
      * FR-6 applies to **every** character, not only local ones (09 decision 9: "for ALL
      * characters"). It is read here rather than in the composable so the gate is on the state
      * the screen renders, which is what `TrackerUiStateTest` can pin.
@@ -183,8 +206,10 @@ class CharacterHomeViewModel @Inject constructor(
                 character.canWrite,
                 character.canUndo,
                 character.writeHistory,
-                showToggles,
-            ) { read, canWrite, canUndo, history, toggles ->
+                combine(showToggles, selectedRollId(character)) { toggles, rollId ->
+                    Prefs(showToggles = toggles, selectedRollId = rollId)
+                },
+            ) { read, canWrite, canUndo, history, prefs ->
                 toTrackerUiState(
                     creatureId = creatureId,
                     board = read.board,
@@ -196,7 +221,8 @@ class CharacterHomeViewModel @Inject constructor(
                     canUndo = canUndo,
                     history = history,
                     zone = zone,
-                    showToggles = toggles,
+                    showToggles = prefs.showToggles,
+                    selectedRollId = prefs.selectedRollId,
                 )
             }
         }
@@ -354,6 +380,20 @@ class CharacterHomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * FR-7: the Rolls dropdown was used.
+     *
+     * Local only — it writes the same DataStore the accent and the FR-6 switch use, never the
+     * sheet. Unvalidated against the board on purpose: the id came *from* the rendered option
+     * list, and an id that has since stopped naming a roll is already handled where it is read
+     * (`RollPickerState.selected` resolves to null and the section shows its placeholder), so
+     * a guard here would only turn a recoverable stale selection into a dropped tap.
+     */
+    fun selectRoll(rollId: String) {
+        val key = rollKey(open.value ?: return)
+        viewModelScope.launch { selectedRollStore.setSelectedRollId(key, rollId) }
+    }
+
     fun setAccentColor(hex: String?) {
         val character = open.value ?: return
         viewModelScope.launch { character.setAccentColor(hex) }
@@ -397,6 +437,16 @@ class CharacterHomeViewModel @Inject constructor(
         val showingSnapshot: Boolean,
         val accent: String?,
     )
+
+    /**
+     * The two *preference* signals, bundled for the same arity reason as [Read].
+     *
+     * FR-7's selection made the tracker's `combine` nine flows wide, one past the typed
+     * five-arity overload nesting bought. Pairing the two DataStore-backed reads is the
+     * cheapest honest fix — they are the same kind of signal (a stored choice, not sheet
+     * data), so the grouping means something rather than being an arbitrary split to fit.
+     */
+    private data class Prefs(val showToggles: Boolean, val selectedRollId: String?)
 
     private companion object {
         const val STOP_TIMEOUT_MILLIS = 5_000L

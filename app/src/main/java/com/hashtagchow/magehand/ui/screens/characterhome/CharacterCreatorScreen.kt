@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.ui.webview.SheetSession
 import com.hashtagchow.magehand.ui.webview.SheetSessionFactory
 import com.hashtagchow.magehand.ui.webview.SheetWebViewHost
@@ -48,6 +49,7 @@ fun CharacterCreatorScreen(
     val sheetState = rememberSheetWebViewState(session)
 
     Scaffold(
+        contentWindowInsets = screenContentWindowInsets,
         modifier = modifier,
         topBar = {
             TopAppBar(

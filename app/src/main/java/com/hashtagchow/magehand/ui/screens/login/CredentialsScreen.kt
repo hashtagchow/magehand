@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 
 /**
  * Screen 1 — sign in (docs/design/04-screens-ux.md §1).
@@ -79,6 +80,7 @@ fun CredentialsScreen(
     }
 
     Scaffold(
+        contentWindowInsets = screenContentWindowInsets,
         modifier = modifier,
         topBar = { TopAppBar(title = { Text(stringResource(R.string.title_login)) }) },
     ) { innerPadding ->

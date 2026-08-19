@@ -7,6 +7,8 @@ import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DamageDefense
 import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
+import com.hashtagchow.magehand.core.model.RollAdvantage
+import com.hashtagchow.magehand.core.model.RollModifier
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerKind
@@ -241,6 +243,56 @@ data class DefenseRowState(
 }
 
 /**
+ * One entry in the Rolls dropdown. Name and identity, and deliberately nothing else — the
+ * numbers belong to [RollDisplayState], which is only built for the *selected* one.
+ */
+data class RollOptionState(val id: String, val name: String)
+
+/**
+ * The read-out beside the dropdown: what the player adds, and whether they roll twice.
+ *
+ * @param modifier already signed — see [formatSignedModifier]. `"+0"`, never `"0"`.
+ * @param advantageLabel `"Advantage"` / `"Disadvantage"`, or `null` when the sheet expresses
+ *   neither. Null rather than a third word ("Normal") on purpose: a line that reads *"+5 ·
+ *   Normal"* on every roll of every character trains the eye to skip the very field that
+ *   matters on the one roll where it says something else.
+ */
+data class RollDisplayState(
+    val name: String,
+    val modifier: String,
+    val advantageLabel: String?,
+) {
+    /** The whole row as one sentence, for TalkBack — see the section's composable. */
+    val spoken: String get() = listOfNotNull(name, modifier, advantageLabel).joinToString(", ")
+}
+
+/**
+ * The Rolls section (FR-7): a dropdown of every roll the character has, and a read-out for the
+ * one currently picked.
+ *
+ * ### Why the selection is resolved here rather than stored resolved
+ *
+ * The remembered selection is an **id**, persisted across restarts, and the board it points
+ * into is rebuilt on every sync. So the id can outlive the roll: a feature is switched off, a
+ * sheet is re-authored, a character is edited. [selected] being `null` is the honest answer to
+ * that — the section renders its placeholder, exactly as it does before the player has ever
+ * picked — and the stored id is deliberately *not* cleared: the property may well be back
+ * after the next sync (a toggled-off feature is one tap from returning), and silently
+ * forgetting the player's choice because a buff lapsed is worse than a placeholder.
+ */
+data class RollPickerState(
+    val options: List<RollOptionState> = emptyList(),
+    val selected: RollDisplayState? = null,
+) {
+    /**
+     * Whether the section renders at all. Empty means *absent*, header and all — the same rule
+     * the defenses section uses, and the reason a character whose data expresses no rolls
+     * does not get an empty dropdown to open.
+     */
+    val isPresent: Boolean get() = options.isNotEmpty()
+}
+
+/**
  * One row of the undo-history sheet (04 §3), already turned into display text.
  *
  * @param canUndo true on the **single** newest reversible entry. Undo is a stack, not a
@@ -269,6 +321,13 @@ data class TrackerUiState(
      * it costs nothing to scroll past.
      */
     val defenses: List<DefenseRowState> = emptyList(),
+    /**
+     * FR-7's Rolls section, or [RollPickerState.isPresent] `false` when the character has no
+     * rolls. Sits after the defenses and before the spell slots: everything above it is
+     * glance-reference that answers a question mid-turn, everything below it is a resource the
+     * player spends, and this belongs with the first group.
+     */
+    val rolls: RollPickerState = RollPickerState(),
     val slots: List<PipRowState> = emptyList(),
     val resources: List<PipRowState> = emptyList(),
     val consumables: List<ConsumableState> = emptyList(),
@@ -335,7 +394,7 @@ data class TrackerUiState(
     val isEmpty: Boolean
         get() = hp == null && slots.isEmpty() && resources.isEmpty() &&
             consumables.isEmpty() && conditions.isEmpty() && inactiveConditions.isEmpty() &&
-            defenses.isEmpty()
+            defenses.isEmpty() && !rolls.isPresent
 
     /**
      * Distinguishes "this character genuinely has no tracker rows" from "we have not
@@ -400,6 +459,9 @@ data class TrackerUiState(
  *   property-driven and unaffected"*.
  * @param hasConnection false for a character with no server (09 decision 8). See
  *   [TrackerUiState.hasConnection].
+ * @param selectedRollId FR-7's remembered dropdown selection, as a raw id. Resolved against
+ *   `board.rolls` here — see [toRollPicker] — which is what makes a stale id a placeholder
+ *   rather than a crash or a silently wrong number.
  */
 fun toTrackerUiState(
     creatureId: String,
@@ -414,6 +476,7 @@ fun toTrackerUiState(
     zone: ZoneId = ZoneId.systemDefault(),
     showToggles: Boolean = true,
     hasConnection: Boolean = true,
+    selectedRollId: String? = null,
 ): TrackerUiState {
     // The one place the board's toggles are split, using the rule itself rather than a
     // re-statement of it — `partition` keeps both halves in the board's order.
@@ -432,6 +495,7 @@ fun toTrackerUiState(
         concentratingOn = board.concentratingOn,
         hp = board.hp?.toHpState(tempHp = board.tempHp?.value ?: 0),
         defenses = toDefenseRows(board.defenses),
+        rolls = toRollPicker(board.rolls, selectedRollId),
         slots = board.slots.map { it.toPipRow() },
         resources = board.resources.map { it.toPipRow() },
         consumables = board.pinnedItems.map { it.toConsumable() },
@@ -490,6 +554,56 @@ fun toDefenseRows(defenses: List<DamageDefense>): List<DefenseRowState> = defens
                 .sorted(),
         )
     }
+
+/**
+ * Discovered rolls + the remembered id → the section's state.
+ *
+ * The board's order is kept verbatim: `TrackerEngine` already put the rolls in the sheet's own
+ * order (and `LocalTrackerBoard` in sheet order for the six checks), so re-sorting here would
+ * be a second opinion about something already decided — and the wrong layer to have it in.
+ *
+ * A `null` or unmatched [selectedId] yields a `null` [RollPickerState.selected]; see that
+ * class for why that is the same state as "not picked yet" and why nothing is cleared.
+ */
+fun toRollPicker(rolls: List<RollModifier>, selectedId: String?): RollPickerState =
+    RollPickerState(
+        options = rolls.map { RollOptionState(id = it.id, name = it.name) },
+        selected = rolls.firstOrNull { it.id == selectedId }?.let { roll ->
+            RollDisplayState(
+                name = roll.name,
+                modifier = formatSignedModifier(roll.modifier),
+                advantageLabel = roll.advantage.label(),
+            )
+        },
+    )
+
+/**
+ * `3` → `"+3"`, `-2` → `"−2"`, `0` → `"+0"`.
+ *
+ * **The one copy of this rule.** A signed modifier is always signed on a character sheet —
+ * "+0" is how 5e prints a score of 10, and a bare "0" reads as a missing value rather than a
+ * real one — and the negative uses U+2212 MINUS SIGN rather than a hyphen, which at these type
+ * sizes is the difference between a minus and a stray mark.
+ *
+ * It lives in the tracker's vocabulary because both screens that print one are tracker screens:
+ * this section, and the local reference strip
+ * ([com.hashtagchow.magehand.ui.screens.local.LocalReferenceState], which delegates here). The
+ * two showing the same character's Dexterity as `+1` and `1` would be visible in one glance,
+ * because on a local character they are eight lines apart.
+ */
+fun formatSignedModifier(value: Int): String = if (value < 0) "−${-value}" else "+$value"
+
+/**
+ * Display text for advantage, or `null` for [RollAdvantage.NONE].
+ *
+ * Same "not a string resource" reasoning as [ResetRule.label]. `null` is the deliberate half —
+ * see [RollDisplayState.advantageLabel].
+ */
+fun RollAdvantage.label(): String? = when (this) {
+    RollAdvantage.NONE -> null
+    RollAdvantage.ADVANTAGE -> "Advantage"
+    RollAdvantage.DISADVANTAGE -> "Disadvantage"
+}
 
 /**
  * Display text for a defense kind. Same "not a string resource" reasoning as

@@ -1,9 +1,16 @@
 package com.hashtagchow.magehand.core.data.local
 
 import android.content.Context
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -11,12 +18,17 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
+import com.hashtagchow.magehand.core.data.settings.DataStoreSelectedRollStore
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
+import java.io.File
 import com.hashtagchow.magehand.core.model.AbilityScores
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.ResetRule
@@ -37,9 +49,23 @@ import com.hashtagchow.magehand.core.model.ResetRule
 @Config(sdk = [34])
 class LocalCharacterRepositoryTest {
 
+    @get:Rule
+    val temp: TemporaryFolder = TemporaryFolder()
+
     private lateinit var database: MageHandDatabase
     private lateinit var dao: LocalCharacterDao
     private lateinit var repository: LocalCharacterRepository
+
+    /**
+     * A **real** Preferences-DataStore on a real file, the shape `SelectedRollStoreTest` uses.
+     *
+     * The delete path's claim is that a key stops existing, and a fake map is the wrong
+     * instrument for it: the fake is a second implementation of `remove`, so a test written
+     * against it can only prove that the fake agrees with itself. This one goes through the
+     * store that actually ships.
+     */
+    private lateinit var storeScope: CoroutineScope
+    private lateinit var selectedRolls: SelectedRollStore
 
     private var clock = 1_000L
     private var nextId = 0
@@ -51,15 +77,27 @@ class LocalCharacterRepositoryTest {
             .allowMainThreadQueries()
             .build()
         dao = database.localCharacterDao()
+        storeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        selectedRolls = DataStoreSelectedRollStore(
+            PreferenceDataStoreFactory.create(scope = storeScope) {
+                File(temp.root, "selected-rolls.preferences_pb")
+            },
+        )
         repository = LocalCharacterRepository(
             dao = dao,
+            selectedRollStore = selectedRolls,
             now = { clock },
             newId = { "id-${++nextId}" },
         )
     }
 
     @After
-    fun tearDown() = database.close()
+    fun tearDown() {
+        // DataStore refuses two live instances over one file, so the scope must be provably
+        // gone before the next test's store opens over the next TemporaryFolder.
+        runBlocking { storeScope.coroutineContext.job.cancelAndJoin() }
+        database.close()
+    }
 
     private fun form(
         name: String = "Brambles",
@@ -320,6 +358,34 @@ class LocalCharacterRepositoryTest {
         assertNull(repository.find(doomed))
         assertTrue(repository.rows(doomed).isEmpty())
         assertEquals("Thistle", repository.find(survivor)?.name)
+    }
+
+    @Test
+    fun `deleting takes the character's remembered roll with it, and only that one`() = runTest {
+        val doomed = saveOrFail(form(name = "Brambles"))
+        val survivor = saveOrFail(form(name = "Thistle"))
+        val serverCharacter = SelectedRollStore.serverKey("acct-1", "creature-1")
+
+        selectedRolls.setSelectedRollId(SelectedRollStore.localKey(doomed), "roll-1")
+        selectedRolls.setSelectedRollId(SelectedRollStore.localKey(survivor), "roll-2")
+        selectedRolls.setSelectedRollId(serverCharacter, "roll-3")
+
+        repository.delete(doomed)
+
+        // Local ids are UUIDs and never recur, so a key left here is unreachable forever —
+        // nothing cascades it (it is not a row) and sign-out is forbidden from reaping the
+        // local namespace (09 decision 10). This path is the only one that can.
+        assertNull(selectedRolls.selectedRollId(SelectedRollStore.localKey(doomed)).first())
+        assertEquals(
+            "another on-device character's selection is not this character's business",
+            "roll-2",
+            selectedRolls.selectedRollId(SelectedRollStore.localKey(survivor)).first(),
+        )
+        assertEquals(
+            "and a DiceCloud character's selection least of all",
+            "roll-3",
+            selectedRolls.selectedRollId(serverCharacter).first(),
+        )
     }
 
     @Test

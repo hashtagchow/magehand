@@ -10,6 +10,8 @@ import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DamageDefense
 import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
+import com.hashtagchow.magehand.core.model.RollAdvantage
+import com.hashtagchow.magehand.core.model.RollModifier
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerKind
@@ -74,6 +76,7 @@ class TrackerUiStateTest {
         /** FR-6. True here so every pre-FR-6 assertion keeps asserting FR-1/2's behaviour. */
         showToggles: Boolean = true,
         hasConnection: Boolean = true,
+        selectedRollId: String? = null,
     ) = toTrackerUiState(
         creatureId = "FakeCreature23456",
         board = board,
@@ -84,6 +87,7 @@ class TrackerUiStateTest {
         zone = utc,
         showToggles = showToggles,
         hasConnection = hasConnection,
+        selectedRollId = selectedRollId,
     )
 
     // --- board → UI ---------------------------------------------------------
@@ -516,5 +520,119 @@ class TrackerUiStateTest {
         // hasConnection defaults to true, so every existing caller keeps the old rule.
         assertTrue(map(connection = ConnectionState.OFFLINE).showConnectionIndicator)
         assertFalse(map(connection = ConnectionState.LIVE).showConnectionIndicator)
+    }
+
+    // --- FR-7: the Rolls section --------------------------------------------
+
+    /** A server-shaped roll list: an ability check, a save and a skill, in sheet order. */
+    private val rolls = listOf(
+        RollModifier("r1", "Dexterity", 3, sortOrder = 10),
+        RollModifier("r2", "Wisdom Save", -1, sortOrder = 20),
+        RollModifier("r3", "Stealth", 5, RollAdvantage.ADVANTAGE, sortOrder = 30),
+        RollModifier("r4", "Perception", 0, RollAdvantage.DISADVANTAGE, sortOrder = 40),
+    )
+
+    private val withRolls = sabriel.copy(rolls = rolls)
+
+    @Test
+    fun `the section is absent for a character whose data expresses no rolls`() {
+        // Absent, not empty: the screen renders the header and the control only when this is
+        // true, exactly as it does for defenses.
+        assertFalse(map().rolls.isPresent)
+        assertTrue(map().rolls.options.isEmpty())
+        assertNull(map().rolls.selected)
+    }
+
+    @Test
+    fun `every roll is offered, in the board's order`() {
+        val picker = map(board = withRolls).rolls
+
+        assertTrue(picker.isPresent)
+        assertEquals(
+            listOf("Dexterity", "Wisdom Save", "Stealth", "Perception"),
+            picker.options.map { it.name },
+        )
+        assertEquals(listOf("r1", "r2", "r3", "r4"), picker.options.map { it.id })
+    }
+
+    @Test
+    fun `nothing selected renders no display at all`() {
+        // The placeholder case: the dropdown is there, the read-out is not.
+        assertNull(map(board = withRolls).rolls.selected)
+    }
+
+    @Test
+    fun `the selected roll's modifier is always signed`() {
+        assertEquals("+3", map(board = withRolls, selectedRollId = "r1").rolls.selected?.modifier)
+        // U+2212 MINUS SIGN, not a hyphen.
+        assertEquals("\u22121", map(board = withRolls, selectedRollId = "r2").rolls.selected?.modifier)
+        // "+0", never a bare "0" — that reads as a missing value on a character sheet.
+        assertEquals("+0", map(board = withRolls, selectedRollId = "r4").rolls.selected?.modifier)
+    }
+
+    @Test
+    fun `advantage is named when the data expresses one, and silent when it does not`() {
+        assertEquals("Advantage", map(board = withRolls, selectedRollId = "r3").rolls.selected?.advantageLabel)
+        assertEquals(
+            "Disadvantage",
+            map(board = withRolls, selectedRollId = "r4").rolls.selected?.advantageLabel,
+        )
+        // Null rather than "Normal": a word on every roll teaches the eye to skip the field.
+        assertNull(map(board = withRolls, selectedRollId = "r1").rolls.selected?.advantageLabel)
+    }
+
+    @Test
+    fun `a remembered id that no longer names a roll reads as no selection`() {
+        // The state a persisted selection can outlive its board into — a feature switched
+        // off, a sheet re-authored. Placeholder, not a crash and not a wrong number.
+        val picker = map(board = withRolls, selectedRollId = "gone").rolls
+
+        assertTrue("the dropdown must still be offered", picker.isPresent)
+        assertNull(picker.selected)
+    }
+
+    @Test
+    fun `the spoken form is the whole row, so TalkBack reads a fact`() {
+        val selected = map(board = withRolls, selectedRollId = "r3").rolls.selected!!
+        assertEquals("Stealth, +5, Advantage", selected.spoken)
+
+        val plain = map(board = withRolls, selectedRollId = "r1").rolls.selected!!
+        assertEquals("Dexterity, +3", plain.spoken)
+    }
+
+    @Test
+    fun `a board with only rolls is not loading`() {
+        // The local-character shape at its most minimal, and the trap it avoids: a board that
+        // is nothing but six ability checks is real content, so the spinner must give way.
+        val onlyRolls = TrackerBoard(rolls = rolls)
+
+        assertFalse(map(board = onlyRolls).isEmpty)
+        assertFalse(map(board = onlyRolls, connection = ConnectionState.OFFLINE).isLoading)
+    }
+
+    @Test
+    fun `a local character's six checks map exactly like a server character's rolls`() {
+        // 09 decision 5's "same screen" claim, at this feature: the mapping is source-blind,
+        // so the only difference is what the board carried.
+        val local = TrackerBoard(
+            rolls = listOf(
+                RollModifier("local:check:STR", "Strength", -1, sortOrder = 0),
+                RollModifier("local:check:DEX", "Dexterity", 2, sortOrder = 1),
+            ),
+        )
+        val picker = map(board = local, selectedRollId = "local:check:STR").rolls
+
+        assertEquals(listOf("Strength", "Dexterity"), picker.options.map { it.name })
+        assertEquals("\u22121", picker.selected?.modifier)
+        assertNull("no local source expresses advantage", picker.selected?.advantageLabel)
+    }
+
+    @Test
+    fun `the signed formatter is the one both screens use`() {
+        // FR-7's read-out and the local reference strip must never disagree about "+0" or
+        // about which character a minus sign is.
+        assertEquals("+0", formatSignedModifier(0))
+        assertEquals("+3", formatSignedModifier(3))
+        assertEquals("\u22122", formatSignedModifier(-2))
     }
 }

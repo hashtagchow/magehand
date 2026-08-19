@@ -23,6 +23,8 @@ import com.hashtagchow.magehand.core.data.characters.CharacterCache
 import com.hashtagchow.magehand.core.data.characters.RoomCharacterCache
 import com.hashtagchow.magehand.core.data.db.AccountEntity
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
+import com.hashtagchow.magehand.core.data.fake.FakeSelectedRollStore
+import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.db.ThemePrefEntity
 import com.hashtagchow.magehand.core.data.db.TrackerPrefEntity
 import com.hashtagchow.magehand.core.data.fake.FakeAccountDao
@@ -60,6 +62,13 @@ class DefaultAccountRepositoryTest {
     private lateinit var characters: CharacterCache
     private lateinit var repository: DefaultAccountRepository
 
+    /**
+     * FR-7's per-character dropdown selection. In-memory here on purpose: what this file
+     * asserts is *which keys sign-out reaps*, and the persistence claim is checked against a
+     * real file in `SelectedRollStoreTest`.
+     */
+    private val selectedRolls = FakeSelectedRollStore()
+
     @Before
     fun setUp() {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -85,6 +94,7 @@ class DefaultAccountRepositoryTest {
             characterCache = characters,
             trackerPrefDao = database.trackerPrefDao(),
             themePrefDao = database.themePrefDao(),
+            selectedRollStore = selectedRolls,
             now = { clock },
             newId = { "acct-${++idCounter}" },
         )
@@ -342,6 +352,10 @@ class DefaultAccountRepositoryTest {
             database.trackerPrefDao().get(account.id, CREATURE_ID).isEmpty(),
         )
         assertNull("the accent colour must be gone", database.themePrefDao().find(account.id, CREATURE_ID))
+        assertTrue(
+            "the remembered roll selection must be gone: ${selectedRolls.keys}",
+            selectedRolls.keys.isEmpty(),
+        )
     }
 
     @Test
@@ -361,6 +375,11 @@ class DefaultAccountRepositoryTest {
         assertNotNull(characters.read(bob.id))
         assertEquals(1, database.trackerPrefDao().get(bob.id, CREATURE_ID).size)
         assertNotNull(database.themePrefDao().find(bob.id, CREATURE_ID))
+        assertEquals(
+            "bob's remembered roll is not alice's to delete",
+            setOf(SelectedRollStore.serverKey(bob.id, CREATURE_ID)),
+            selectedRolls.keys,
+        )
     }
 
     /** One row in every per-account store, so a missed `deleteForAccount` cannot pass. */
@@ -371,6 +390,10 @@ class DefaultAccountRepositoryTest {
             TrackerPrefEntity(accountId, CREATURE_ID, "prop-1", pinned = true, hidden = false, sortIndex = null),
         )
         database.themePrefDao().upsert(ThemePrefEntity(accountId, CREATURE_ID, "#7F5AF0"))
+        selectedRolls.setSelectedRollId(
+            SelectedRollStore.serverKey(accountId, CREATURE_ID),
+            "roll-1",
+        )
     }
 
     private suspend fun snapshotFor(accountId: String) = snapshots.load(accountId, CREATURE_ID)

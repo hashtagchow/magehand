@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
+import com.hashtagchow.magehand.core.model.RollAdvantage
 import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
 
@@ -19,6 +20,11 @@ import com.hashtagchow.magehand.core.model.TrackerOverride
 class TrackerEngineTest {
 
     private val board by lazy { TrackerEngine.build(Fixtures.sabrielSheet()) }
+
+    /** The six ability attributes' names, as DiceCloud spells them. */
+    private val ABILITY_NAMES = setOf(
+        "Strength", "Dexterity", "Constitution", "Intelligence", "Wisdom", "Charisma",
+    )
 
     // -----------------------------------------------------------------------
     // Acceptance criteria (docs/design/07-build-plan.md WP4)
@@ -537,6 +543,186 @@ class TrackerEngineTest {
         val rollup = Fixtures.sabrielSheet().creature?.get("damageMultipliers")
         assertEquals("{}", rollup.toString())
         assertTrue("discovery must not depend on the empty rollup", board.defenses.isNotEmpty())
+    }
+
+    // -----------------------------------------------------------------------
+    // Rolls (FR-7) — read off the capture rather than off 03, like the defenses
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `an ability check reads the modifier, never the score`() {
+        // The bug this rule exists to prevent: `value`/`total` on an ability attribute are
+        // the 3-20 score, and adding one of those to a d20 would be off by about ten.
+        val built = sheet(
+            """{"_id":"a1","type":"attribute","attributeType":"ability","name":"Dexterity",
+                "variableName":"dexterity","total":13,"value":13,"modifier":1,
+                "advantage":0,"order":106}""",
+        )
+        val roll = TrackerEngine.build(built).rolls.single()
+        assertEquals("Dexterity", roll.name)
+        assertEquals(1, roll.modifier)
+        assertEquals(RollAdvantage.NONE, roll.advantage)
+        assertEquals(106, roll.sortOrder)
+    }
+
+    @Test
+    fun `an ability with no modifier field is not a roll we can answer`() {
+        // Deriving it from the score would be this app re-implementing the sheet's own
+        // arithmetic, and would silently drop everything the server folded into the real
+        // number. No modifier, no row.
+        val built = sheet(
+            """{"_id":"a1","type":"attribute","attributeType":"ability","name":"Strength",
+                "total":8,"value":8}""",
+        )
+        assertTrue(TrackerEngine.build(built).rolls.isEmpty())
+    }
+
+    @Test
+    fun `a skill's value is the total, and its ingredients are not re-added`() {
+        val built = sheet(
+            """{"_id":"s1","type":"skill","skillType":"skill","name":"Acrobatics",
+                "variableName":"acrobatics","ability":"dexterity",
+                "abilityMod":1,"proficiency":1,"value":5,"order":70}""",
+        )
+        val roll = TrackerEngine.build(built).rolls.single()
+        // 5, not 5 + 1 + 1: the server already totalled it.
+        assertEquals(5, roll.modifier)
+        assertEquals("Acrobatics", roll.name)
+    }
+
+    @Test
+    fun `saves and checks are rolls, and proficiency-only kinds are not`() {
+        fun namesFor(skillType: String, name: String): List<String> = TrackerEngine.build(
+            sheet(
+                """{"_id":"s1","type":"skill","skillType":"$skillType","name":"$name",
+                    "abilityMod":0,"proficiency":1,"value":2}""",
+            ),
+        ).rolls.map { it.name }
+
+        // Rolled with a d20…
+        assertEquals(listOf("Wisdom Save"), namesFor("save", "Wisdom Save"))
+        assertEquals(listOf("Initiative"), namesFor("check", "Initiative"))
+        assertEquals(listOf("Tinker's Tools"), namesFor("tool", "Tinker's Tools"))
+        assertEquals(listOf("Stealth"), namesFor("skill", "Stealth"))
+        // …and the three that are a proficiency you *hold*. "Make a Common check" is not a
+        // thing the sheet ever claimed, and the `value` on these is the proficiency bonus
+        // that the property type carries whether or not it means anything.
+        assertTrue(namesFor("language", "Common").isEmpty())
+        assertTrue(namesFor("weapon", "Simple Melee Weapons").isEmpty())
+        assertTrue(namesFor("armor", "Light Armor").isEmpty())
+        // A kind nobody has seen yet is *offered* rather than dropped — see
+        // TrackerEngine.NON_ROLL_SKILL_TYPES for why the filter is an exclusion list.
+        assertEquals(listOf("Something New"), namesFor("somethingUnheardOf", "Something New"))
+    }
+
+    @Test
+    fun `advantage is read from the sign, and its absence is not disadvantage`() {
+        fun advantageFor(field: String): RollAdvantage = TrackerEngine.build(
+            sheet(
+                """{"_id":"s1","type":"skill","skillType":"skill","name":"Stealth",
+                    "value":3$field}""",
+            ),
+        ).rolls.single().advantage
+
+        assertEquals(RollAdvantage.NONE, advantageFor(""))
+        assertEquals(RollAdvantage.NONE, advantageFor(""","advantage":0"""))
+        assertEquals(RollAdvantage.ADVANTAGE, advantageFor(""","advantage":1"""))
+        // A rollup, not a flag: two sources pushing the same way still reads as advantage.
+        assertEquals(RollAdvantage.ADVANTAGE, advantageFor(""","advantage":2"""))
+        assertEquals(RollAdvantage.DISADVANTAGE, advantageFor(""","advantage":-1"""))
+    }
+
+    @Test
+    fun `an inactive or removed roll never reaches the dropdown`() {
+        // The same blanket rule every other discovery rule uses: a save switched off by a
+        // toggle is not something the character can be asked to roll.
+        listOf(
+            """{"_id":"s1","type":"skill","skillType":"save","name":"Death Save",
+                "value":0,"inactive":true,"deactivatedByToggle":true}""",
+            """{"_id":"s1","type":"skill","skillType":"skill","name":"Gone",
+                "value":3,"removed":true}""",
+            """{"_id":"a1","type":"attribute","attributeType":"ability","name":"Strength",
+                "modifier":-1,"inactive":true}""",
+        ).forEach { json ->
+            assertTrue(json, TrackerEngine.build(sheet(json)).rolls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `a nameless roll is dropped rather than offered as a blank line`() {
+        listOf(
+            """{"_id":"s1","type":"skill","skillType":"skill","value":3}""",
+            """{"_id":"s1","type":"skill","skillType":"skill","name":"  ","value":3}""",
+            """{"type":"skill","skillType":"skill","name":"No id","value":3}""",
+        ).forEach { json ->
+            assertTrue(json, TrackerEngine.build(sheet(json)).rolls.isEmpty())
+        }
+    }
+
+    @Test
+    fun `rolls keep the sheet's own order`() {
+        val built = sheet(
+            """{"_id":"s2","type":"skill","skillType":"skill","name":"Later","value":1,"order":90}""",
+            """{"_id":"s1","type":"skill","skillType":"skill","name":"Earlier","value":2,"order":10}""",
+            """{"_id":"s3","type":"skill","skillType":"skill","name":"Alpha","value":3,"order":10}""",
+        )
+        // order first, then name as the tie-breaker — never alphabetical overall.
+        assertEquals(
+            listOf("Alpha", "Earlier", "Later"),
+            TrackerEngine.build(built).rolls.map { it.name },
+        )
+    }
+
+    @Test
+    fun `a hidden roll obeys the override layer like every other row`() {
+        val built = sheet(
+            """{"_id":"s1","type":"skill","skillType":"skill","name":"Stealth","value":3}""",
+        )
+        val hidden = TrackerEngine.build(built, listOf(TrackerOverride("s1", hidden = true)))
+        assertTrue(hidden.rolls.isEmpty())
+    }
+
+    @Test
+    fun `a board with only rolls is not empty`() {
+        val built = sheet(
+            """{"_id":"s1","type":"skill","skillType":"skill","name":"Stealth","value":3}""",
+        )
+        assertFalse(TrackerEngine.build(built).isEmpty)
+    }
+
+    @Test
+    fun `the live sheet's rolls are the six abilities plus every rollable skill kind`() {
+        // 6 ability checks + 26 skill-type properties that are actually rolled. The capture
+        // holds 32 `skill` properties in total; the six that do not appear here are the
+        // three language and two weapon proficiencies, and one save that is switched off.
+        assertEquals(32, board.rolls.size)
+        assertEquals(6, board.rolls.count { it.name in ABILITY_NAMES })
+        assertEquals(6, board.rolls.count { it.name.endsWith(" Save") })
+        assertTrue(board.rolls.none { it.name == "Death Save" })
+        assertTrue(board.rolls.none { it.name == "Common" })
+        // Every id is distinct, which is what lets the dropdown key on it.
+        assertEquals(board.rolls.size, board.rolls.map { it.id }.toSet().size)
+    }
+
+    @Test
+    fun `the live sheet's ability checks carry modifiers, not scores`() {
+        // Two ends of the range on the capture: an 8 reads −1 and a 14 reads +2. If this
+        // ever asserts 8 and 14, the rule has started reading `value`.
+        assertEquals(-1, board.rolls.single { it.name == "Strength" }.modifier)
+        assertEquals(2, board.rolls.single { it.name == "Intelligence" }.modifier)
+    }
+
+    @Test
+    fun `no roll on the live sheet carries advantage, because the conditions are off`() {
+        // Not a weak assertion about the capture — it is the mechanism working. The capture
+        // holds several `operation: "disadvantage"` effects, every one of them belonging to
+        // a condition buff that is switched off, so every computed rollup reads zero.
+        assertTrue(board.rolls.all { it.advantage == RollAdvantage.NONE })
+    }
+
+    @Test
+    fun `the live sheet's rolls come out in ascending sheet order`() {
+        assertEquals(board.rolls.map { it.sortOrder }.sorted(), board.rolls.map { it.sortOrder })
     }
 
     @Test

@@ -1,8 +1,11 @@
 package com.hashtagchow.magehand.core.data.local
 
+import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.LocalCharacter
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.LocalTrackerRow
+import com.hashtagchow.magehand.core.model.RollAdvantage
+import com.hashtagchow.magehand.core.model.RollModifier
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerKind
@@ -30,6 +33,10 @@ import com.hashtagchow.magehand.core.model.toTrackedResource
  * - **Temp HP**. Discovered on a sheet, not offered by the form.
  * - **Concentration**. Property-driven on the server path (an enabled toggle or buff named
  *   "concentration"); with no toggles there is no source for it.
+ * - **Skills and saving throws.** The *rolls* list is not empty here — see [abilityChecks] —
+ *   but it holds the six ability checks and nothing else, because the six scores are the only
+ *   thing the form captures. A skill list would need proficiencies, which is a form field and
+ *   a schema column, not a rendering decision.
  *
  * Each of those is an *empty* board field rather than a rendering exception, so the tracker
  * makes the section absent by the same rule it already uses for a character that has none.
@@ -49,6 +56,7 @@ object LocalTrackerBoard {
 
         return TrackerBoard(
             hp = hitPointsRow(character),
+            rolls = abilityChecks(character),
             slots = resources.filter { it.kind == TrackerKind.SPELL_SLOT },
             resources = resources.filter { it.kind == TrackerKind.RESOURCE },
             // Every local item is pinned by construction (see `toTrackedResource`): the
@@ -76,6 +84,56 @@ object LocalTrackerBoard {
         reset = null,
         sortOrder = 0,
     )
+
+    /**
+     * The six ability checks, derived from the stored scores.
+     *
+     * ### Why six, and only six
+     *
+     * A DiceCloud sheet expresses skills and saves as their own properties, computed by the
+     * server from proficiencies the form has no field for. A local character has six numbers
+     * and nothing else, so the six checks are the complete, honest answer — anything more
+     * would mean this app inventing a proficiency list, which is a form change and a schema
+     * change, not a rendering decision. Skills and saves for local characters are deliberately
+     * out of scope here for the same reason toggles and defenses are (see the class KDoc).
+     *
+     * ### Where the number comes from
+     *
+     * [com.hashtagchow.magehand.core.model.abilityModifier], through `AbilityScores.modifier`
+     * — the rule itself, not a re-derivation of it. That function's `floorDiv` is why a score
+     * of 7 reads −2 and not −1, and this is the second consumer of it rather than a second
+     * copy: the reference strip on the same screen prints the same six numbers, and the two
+     * disagreeing would be visible on one glance.
+     *
+     * No advantage: nothing in the local model expresses one. `RollAdvantage.NONE` is not a
+     * default standing in for missing data — there is no data to be missing, because there is
+     * no local concept of a condition that could grant it.
+     *
+     * [ROLL_ID_PREFIX] gives each check a fixed id for the same reason [HP_ROW_ID] is fixed:
+     * it is the identity the remembered dropdown selection points at, so it has to survive
+     * every rebuild of the board *and* every edit of the character through the form. Derived
+     * from the enum constant rather than from the score, so changing a score in the form does
+     * not silently reset the player's selection.
+     */
+    private fun abilityChecks(character: LocalCharacter): List<RollModifier> =
+        character.abilities.inSheetOrder.mapIndexed { index, (ability, _) ->
+            RollModifier(
+                id = rollId(ability),
+                name = ability.fullName,
+                modifier = character.abilities.modifier(ability),
+                advantage = RollAdvantage.NONE,
+                // Sheet order (STR → CHA), which is the order `inSheetOrder` already yields
+                // and the order every 5e sheet prints. The server path's equivalent is the
+                // sheet's own `order` field; this is the local sheet's.
+                sortOrder = index,
+            )
+        }
+
+    /** The stable id of one local ability check — see [abilityChecks]. */
+    fun rollId(ability: Ability): String = "$ROLL_ID_PREFIX${ability.name}"
+
+    /** Namespaced like [HP_ROW_ID], so a local id can never be mistaken for a Meteor one. */
+    const val ROLL_ID_PREFIX: String = "local:check:"
 
     /** The HP row's stable identity. */
     const val HP_ROW_ID: String = "local:hitPoints"

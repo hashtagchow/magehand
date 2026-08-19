@@ -8,7 +8,9 @@ import com.hashtagchow.magehand.core.model.AbilityScores
 import com.hashtagchow.magehand.core.model.LocalCharacter
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.LocalTrackerRow
+import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.ResetRule
+import com.hashtagchow.magehand.core.model.RollAdvantage
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerKind
 
@@ -209,6 +211,66 @@ class LocalTrackerBoardTest {
         assertTrue("defenses are a discovered-sheet concept", board.defenses.isEmpty())
         assertNull("no temp HP field on the form", board.tempHp)
         assertNull("concentration is toggle-driven, and there are no toggles", board.concentratingOn)
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-7 — the six ability checks
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `the six ability checks are derived from the stored scores`() {
+        val board = LocalTrackerBoard.build(character(), emptyList())
+
+        assertEquals(
+            listOf("Strength", "Dexterity", "Constitution", "Intelligence", "Wisdom", "Charisma"),
+            board.rolls.map { it.name },
+        )
+        // The fixture character is STR 8, DEX 14, CON 15, and 10 for the rest. `floorDiv`,
+        // not truncation: 8 reads −1 (a truncating divide would say 0), and 15 reads +2.
+        assertEquals(
+            listOf(-1, 2, 2, 0, 0, 0),
+            board.rolls.map { it.modifier },
+        )
+    }
+
+    @Test
+    fun `an odd score below ten floors rather than truncating`() {
+        // The whole reason `abilityModifier` exists, checked through this path too: a 7 is
+        // −2, and an integer divide toward zero would make it −1.
+        val board = LocalTrackerBoard.build(
+            character().copy(abilities = AbilityScores(strength = 7)),
+            emptyList(),
+        )
+        assertEquals(-2, board.rolls.single { it.name == "Strength" }.modifier)
+    }
+
+    @Test
+    fun `local rolls carry no advantage and keep sheet order`() {
+        val board = LocalTrackerBoard.build(character(), emptyList())
+
+        assertTrue(board.rolls.all { it.advantage == RollAdvantage.NONE })
+        assertEquals(listOf(0, 1, 2, 3, 4, 5), board.rolls.map { it.sortOrder })
+    }
+
+    @Test
+    fun `a check's id is stable across edits, so a remembered selection survives one`() {
+        // The id is derived from the ability, never from the score: editing a character in
+        // the form must not silently reset the player's dropdown selection.
+        val before = LocalTrackerBoard.build(character(), emptyList()).rolls
+        val after = LocalTrackerBoard.build(
+            character().copy(abilities = AbilityScores(strength = 20, dexterity = 3)),
+            emptyList(),
+        ).rolls
+
+        assertEquals(before.map { it.id }, after.map { it.id })
+        assertEquals(LocalTrackerBoard.rollId(Ability.STR), before.first().id)
+        // Namespaced, so it can never be mistaken for a Meteor property id.
+        assertTrue(before.all { it.id.startsWith(LocalTrackerBoard.ROLL_ID_PREFIX) })
+    }
+
+    @Test
+    fun `a character that has not loaded has no rolls at all`() {
+        assertTrue(LocalTrackerBoard.build(null, emptyList()).rolls.isEmpty())
     }
 
     @Test
