@@ -50,7 +50,7 @@ rule matches — the same operations the DiceCloud UI itself performs.
 | ![Local character](screenshots/05-local-tracker.png) | ![Customize](screenshots/07-customize.png) |
 | A local character: ability reference strip, HP, rolls. | Reorder, hide and pin rows per character. |
 
-The full set — including the local-character editor and settings — is in
+The full set — including the local-character editor, settings and dark-mode shots — is in
 [`screenshots/`](screenshots/).
 
 ## Architecture
