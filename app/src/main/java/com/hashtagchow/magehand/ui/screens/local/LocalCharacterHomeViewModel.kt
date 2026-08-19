@@ -505,6 +505,19 @@ class LocalCharacterHomeViewModel @Inject constructor(
             InventoryLayoutPlan.setHidden(resolved, stored, key, hidden)
         }
 
+    /**
+     * Shuts an inventory section, or opens it (FR-16, 13 decision 3).
+     *
+     * The DiceCloud screen's method, verbatim, over this character's own layout key — which is
+     * the whole of 12 decision 6's "same customize surface" claim extended to FR-16: a local
+     * character's inventory collapses and remembers it exactly as a server one does, because
+     * both go through the same plan and the same store.
+     */
+    fun setInventorySectionCollapsed(key: String, collapsed: Boolean) =
+        mutateInventoryLayout { resolved, stored ->
+            InventoryLayoutPlan.setCollapsed(resolved, stored, key, collapsed)
+        }
+
     /** The sheet's Reset — a key deletion, so the default is never frozen into a character. */
     fun resetInventoryLayout() {
         viewModelScope.launch { inventoryLayoutStore.clearForCharacter(inventoryLayoutKey) }

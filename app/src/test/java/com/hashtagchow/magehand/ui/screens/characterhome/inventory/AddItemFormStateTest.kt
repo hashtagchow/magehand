@@ -1,6 +1,7 @@
 package com.hashtagchow.magehand.ui.screens.characterhome.inventory
 
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.ItemCatalog
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -179,5 +180,74 @@ class AddItemFormStateTest {
         val spec = AddItemFormState(name = "Chalk", quantity = "1", weight = "0").toSpec()
 
         assertEquals(0.0, spec!!.weightLb!!, 0.0001)
+    }
+
+    // --- FR-10b: the category chooser (13 decision 9) ---------------------------
+
+    @Test
+    fun `the form opens on Gear, which is what the catalog does not have`() {
+        // The default the decision names, and the honest one for a form whose whole purpose is
+        // "the thing the catalog is missing": most such items are neither weapons nor armor, and
+        // 11 decision 2's override is there for a player who picks wrong. A default of Weapon
+        // would put a claim on the sheet that nobody made.
+        assertEquals(CatalogCategory.GEAR, AddItemFormState().category)
+        assertEquals(CatalogCategory.GEAR, AddItemFormState(name = "Torch").toSpec()!!.category)
+    }
+
+    @Test
+    fun `the chooser carries into the spec, which is what the local row is built from`() {
+        listOf(CatalogCategory.WEAPON, CatalogCategory.ARMOR, CatalogCategory.GEAR).forEach {
+            assertEquals(
+                it,
+                AddItemFormState(name = "A curious thing", category = it).toSpec()!!.category,
+            )
+        }
+    }
+
+    @Test
+    fun `the chooser is never a reason a form is invalid`() {
+        // It has no half-typed state — it is on one of three values at every instant — so unlike
+        // the five text fields it can never hold a save up. That is why it is not a `String`.
+        CatalogCategory.entries.forEach {
+            assertTrue(it.name, AddItemFormState(name = "Rope", category = it).isValid)
+        }
+    }
+
+    // --- M2: the chooser is a local-only control (1.6.0 review) ------------------
+
+    /**
+     * The gate itself, on the state rather than in the composable.
+     *
+     * `:app` has no Compose harness, so "the server form draws no chooser" is only assertable if
+     * the *decision* lives somewhere a JVM test can hold still. It does — see
+     * [AddItemFormState.isLocal] — and this is the assertion that would fire if a later wave
+     * re-added the control to both paths. `InventoryWriteOpTest` holds the other half: the write
+     * that a server-side answer would have ridden on drops the field.
+     */
+    @Test
+    fun `a server form offers no category chooser and a local one does`() {
+        assertFalse(
+            "13 lists server-side category editing as out of scope, and the insert body drops " +
+                "the field — a chooser there takes an answer and throws it away",
+            AddItemFormState(isLocal = false).offersCategoryChooser,
+        )
+        assertTrue(AddItemFormState(isLocal = true).offersCategoryChooser)
+        assertTrue("the default is the local path, where the category is read", AddItemFormState().offersCategoryChooser)
+    }
+
+    /**
+     * A server form has one category and it is the default, because nothing can change it.
+     *
+     * Stated as an assertion rather than left implicit: with no chooser drawn there is no
+     * `onChange` that can move this field on the server path, so the spec a server add produces
+     * carries `GEAR` — the value `NewItemSpec` already defaults to, which is why the field being
+     * dropped downstream costs nothing.
+     */
+    @Test
+    fun `the spec a server form produces carries the untouched default`() {
+        val spec = AddItemFormState(name = "A curious thing", isLocal = false).toSpec()
+
+        assertNotNull(spec)
+        assertEquals(CatalogCategory.GEAR, spec!!.category)
     }
 }

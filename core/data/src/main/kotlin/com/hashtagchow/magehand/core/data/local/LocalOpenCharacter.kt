@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
@@ -95,6 +96,14 @@ import java.util.concurrent.atomic.AtomicLong
 class LocalOpenCharacter(
     override val creatureId: String,
     private val dao: LocalCharacterDao,
+    /**
+     * 11 decision 2's overrides, here for [removeItem] alone.
+     *
+     * **No default**, for `LocalCharacterRepository`'s stated reason: an override is a DataStore
+     * key, not a row, so `ON DELETE CASCADE` cannot follow a deleted item and a construction site
+     * that could quietly omit this store would be a construction site whose deletes leak keys.
+     */
+    private val equippableOverrideStore: EquippableOverrideStore,
     private val scope: CoroutineScope,
     private val now: () -> Long = System::currentTimeMillis,
 ) : OpenCharacter {
@@ -386,6 +395,11 @@ class LocalOpenCharacter(
                         value = spec.valueGp,
                         description = spec.description?.takeIf { it.isNotBlank() },
                         equipped = false,
+                        // 13 decision 9's capture: whatever the catalog entry said, or whatever
+                        // the custom form's chooser was left on. The server path has no
+                        // counterpart because a DiceCloud item carries the spec's `tags`
+                        // instead — see [NewItemSpec.category].
+                        category = spec.category.storedValue,
                     ),
                 ),
             )
@@ -418,6 +432,21 @@ class LocalOpenCharacter(
      * still perfectly correct — and the one entry that could name this row is skipped by
      * [undoLastWrite]'s existing "a row deleted by that same edit is skipped" branch, which
      * the form's delete already exercised.
+     *
+     * ### The equippability override goes with it
+     *
+     * 11 decision 2's override is a DataStore key keyed by `(character, row id)`, not a row, so
+     * `ON DELETE CASCADE` cannot follow the item the way it follows a deleted character. Local
+     * row ids are UUIDs minted per row and never recur, so an override left behind is unreachable
+     * **forever** rather than merely stale — word for word the argument the character-delete path
+     * makes about `SelectedRollStore.localKey`, arriving at the same conclusion one level down.
+     *
+     * Deliberately unlike the *server* path, and the difference is the store's own: an id that
+     * stops matching after a soft-remove or a dropped socket must keep its override, because the
+     * item can come back. Here the row is gone for good — this delete is a hard `DELETE` — so
+     * there is nothing that could come back to claim it. Cleared **before** the row, matching the
+     * ordering every other reaping path in this app uses: satellite state first, the record that
+     * names it last.
      */
     override fun removeItem(propertyId: String, targetName: String) {
         dispatch {
@@ -431,6 +460,13 @@ class LocalOpenCharacter(
             // delete is a reversible `softRemove` in any case. This path has neither, so the
             // gate is written out. Refused rather than journalled: nothing happened.
             if (LocalRowKind.fromStored(stored.kind) != LocalRowKind.ITEM) return@dispatch
+            // Before the row — see the KDoc. A UUID row id never recurs, so this is the last
+            // moment anything can reach the key.
+            equippableOverrideStore.setOverridden(
+                EquippableOverrideStore.localKey(creatureId),
+                stored.id,
+                overridden = false,
+            )
             dao.deleteRow(stored.id)
             dao.touch(creatureId, now())
             journal(TrackerWriteKind.ITEM_DELETE, stored.label, amount = 1, undo = null)
@@ -793,6 +829,8 @@ class LocalOpenCharacter(
  */
 class LocalOpenCharacterFactory(
     private val dao: LocalCharacterDao,
+    /** Handed straight through to [LocalOpenCharacter] — see there for why it has no default. */
+    private val equippableOverrideStore: EquippableOverrideStore,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     suspend fun open(characterId: String): LocalOpenCharacter? {
@@ -804,6 +842,7 @@ class LocalOpenCharacterFactory(
         return LocalOpenCharacter(
             creatureId = characterId,
             dao = dao,
+            equippableOverrideStore = equippableOverrideStore,
             scope = scope,
             now = now,
         )

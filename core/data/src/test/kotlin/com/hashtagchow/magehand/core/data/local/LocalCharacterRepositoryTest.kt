@@ -25,6 +25,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
+import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
 import com.hashtagchow.magehand.core.data.settings.DataStoreEquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreSelectedRollStore
@@ -35,6 +36,7 @@ import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import java.io.File
 import com.hashtagchow.magehand.core.model.AbilityScores
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.ResetRule
 
@@ -244,6 +246,245 @@ class LocalCharacterRepositoryTest {
     @Test
     fun `formFor is null for an id that names nothing`() = runTest {
         assertNull(repository.formFor("nope"))
+    }
+
+    // --- FR-10b: the category, and what an edit must not take with it -----------
+
+    @Test
+    fun `an item row's category round-trips through the form`() = runTest {
+        // 13 decision 9's third capture point. `formFor` has to re-open the chooser on what the
+        // row already says, or an untouched save would silently reset every item to gear.
+        val id = saveOrFail(
+            form(
+                rows = listOf(
+                    LocalRowForm(
+                        kind = LocalRowKind.ITEM,
+                        label = "Longsword",
+                        total = 1,
+                        category = CatalogCategory.WEAPON,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(CatalogCategory.WEAPON, repository.formFor(id)!!.rows.single().category)
+        assertEquals(CatalogCategory.WEAPON.storedValue, dao.getRows(id).single().category)
+
+        // …and re-saving what was re-opened is a no-op for it.
+        saveOrFail(repository.formFor(id)!!)
+        assertEquals(CatalogCategory.WEAPON.storedValue, dao.getRows(id).single().category)
+    }
+
+    @Test
+    fun `a slot or a resource is stored as gear, whatever the form was carrying`() = runTest {
+        // The same shape the reset rule already has: the form may keep a value the player picked
+        // before switching the kind, and the save drops it. A spell slot that claimed to be a
+        // sword would put a row in Weapons that the tracker owns.
+        val id = saveOrFail(
+            form(
+                rows = listOf(
+                    LocalRowForm(
+                        kind = LocalRowKind.SLOT,
+                        label = "1st Level",
+                        total = 4,
+                        category = CatalogCategory.WEAPON,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(CatalogCategory.GEAR.storedValue, dao.getRows(id).single().category)
+    }
+
+    /**
+     * **The regression this section exists for.**
+     *
+     * `LocalCharacterDao.save` upserts *whole rows*, and the form has never had fields for the
+     * four FR-8 inventory columns — so building the entity from the form alone wrote each one
+     * back at its default, and saving the editor after changing a character's name silently
+     * stripped every item's weight, price, note and equipped state. Found while wiring the
+     * category chooser through this same path.
+     *
+     * Asserted through the item-adding path the player actually uses (`LocalOpenCharacter.addItem`
+     * writes those four; the editor never does), because that is the only way to get a row into
+     * the state the bug needed.
+     */
+    @Test
+    fun `editing a character does not strip its items' weight, price, note or equipped state`() =
+        runTest {
+            val id = saveOrFail(form())
+            dao.upsertRows(
+                listOf(
+                    LocalTrackerRowEntity(
+                        id = "row-1",
+                        characterId = id,
+                        kind = LocalRowKind.ITEM.storedValue,
+                        label = "Quarterstaff",
+                        total = 1,
+                        current = 1,
+                        resetRule = LocalTrackerRowEntity.RESET_NONE,
+                        sortIndex = 0,
+                        weight = 4.0,
+                        value = 0.2,
+                        description = "A simple melee weapon.",
+                        equipped = true,
+                        category = CatalogCategory.WEAPON.storedValue,
+                    ),
+                ),
+            )
+
+            // The player opens the editor, renames the character, saves. They never saw the
+            // weight field, because there is not one.
+            val reopened = repository.formFor(id)!!
+            saveOrFail(reopened.copy(name = "Brambles the Bold"))
+
+            with(dao.getRows(id).single()) {
+                assertEquals("Brambles the Bold", repository.find(id)!!.name)
+                assertEquals(4.0, weight)
+                assertEquals(0.2, value)
+                assertEquals("A simple melee weapon.", description)
+                assertEquals("an edit must not take an item off the character", true, equipped)
+                assertEquals(CatalogCategory.WEAPON.storedValue, category)
+            }
+        }
+
+    /**
+     * L1 (1.6.0 review): a row that **stops being an item** drops all five inventory columns.
+     *
+     * The test above is the other half of the same rule and it is worth reading the two
+     * together. Carrying `weight`, `value`, `description` and `equipped` across a save is right
+     * for the case they were written for — the same item row, re-saved after an unrelated edit
+     * — and wrong for a row whose *kind* changed: the four are claims about an object, and the
+     * row is no longer one. `category` already said so in its own comment ("a slot that once was
+     * an item must not keep claiming to be a sword"); the visible consequence of the other four
+     * not saying it was worse, because `equipped = true` on a spell-slot row is a value the
+     * tracker renders and the inventory board would file under Equipped.
+     */
+    @Test
+    fun `a row that stops being an item drops its weight, price, note and equipped state`() =
+        runTest {
+            val id = saveOrFail(form())
+            dao.upsertRows(
+                listOf(
+                    LocalTrackerRowEntity(
+                        id = "row-1",
+                        characterId = id,
+                        kind = LocalRowKind.ITEM.storedValue,
+                        label = "Quarterstaff",
+                        total = 4,
+                        current = 4,
+                        resetRule = LocalTrackerRowEntity.RESET_NONE,
+                        sortIndex = 0,
+                        weight = 4.0,
+                        value = 0.2,
+                        description = "A simple melee weapon.",
+                        equipped = true,
+                        category = CatalogCategory.WEAPON.storedValue,
+                    ),
+                ),
+            )
+
+            // The player re-uses the row: same slot, retyped as a resource.
+            val reopened = repository.formFor(id)!!
+            saveOrFail(
+                reopened.copy(
+                    rows = listOf(
+                        reopened.rows.single().copy(
+                            kind = LocalRowKind.RESOURCE,
+                            label = "Bardic Inspiration",
+                            reset = ResetRule.LONG_REST,
+                        ),
+                    ),
+                ),
+            )
+
+            with(dao.getRows(id).single()) {
+                assertEquals("the row is the same row", "row-1", this.id)
+                assertEquals(LocalRowKind.RESOURCE.storedValue, kind)
+                assertNull("a use of Bardic Inspiration does not weigh 4 lb", weight)
+                assertNull("…nor cost 0.2 gp", value)
+                assertNull("…nor describe itself as a melee weapon", description)
+                assertEquals("…and above all cannot be worn", false, equipped)
+                assertEquals(CatalogCategory.GEAR.storedValue, category)
+            }
+        }
+
+    // --- L2: a dropped row takes its equippability override with it -------------
+
+    /**
+     * The editor's delete path, which `ON DELETE CASCADE` cannot reach.
+     *
+     * `LocalCharacterDao.save` deletes rows the form no longer carries, and 11 decision 2's
+     * override is a DataStore key rather than a row — so nothing followed it until the 1.6.0
+     * review. Row ids are UUIDs and never recur, which is exactly the argument the *character*
+     * delete path already makes about `SelectedRollStore.localKey`: a key left behind is
+     * unreachable **forever** rather than merely stale.
+     *
+     * Against the real store, for this file's stated reason: the claim is that a key stops
+     * existing, and a fake map can only prove that the fake agrees with itself.
+     */
+    @Test
+    fun `a row the form drops takes its equippability override with it`() = runTest {
+        val id = saveOrFail(
+            form(
+                rows = listOf(
+                    LocalRowForm(id = null, kind = LocalRowKind.ITEM, label = "A Small Knife", total = 1),
+                    LocalRowForm(id = null, kind = LocalRowKind.ITEM, label = "Bedroll", total = 1),
+                ),
+            ),
+        )
+        val key = EquippableOverrideStore.localKey(id)
+        val rows = dao.getRows(id).sortedBy { it.sortIndex }
+        val knife = rows.first().id
+        val bedroll = rows.last().id
+
+        equippableOverrides.setOverridden(key, knife, overridden = true)
+        equippableOverrides.setOverridden(key, bedroll, overridden = true)
+        assertEquals(setOf(knife, bedroll), equippableOverrides.overrides(key).first())
+
+        // The player opens the editor and deletes the knife row.
+        val reopened = repository.formFor(id)!!
+        saveOrFail(reopened.copy(rows = reopened.rows.filter { it.label != "A Small Knife" }))
+
+        assertEquals(
+            "the surviving row keeps its override; the deleted row's is unreachable and gone",
+            setOf(bedroll),
+            equippableOverrides.overrides(key).first(),
+        )
+    }
+
+    @Test
+    fun `dropping every row empties the override key rather than leaving it behind`() = runTest {
+        // The `rows.isEmpty()` branch of `LocalCharacterDao.save` is a different statement
+        // (`deleteAllRows`), so it is walked separately — and an emptied set must remove the key,
+        // which is the store's own rule about a key that holds nothing.
+        val id = saveOrFail(
+            form(rows = listOf(LocalRowForm(id = null, kind = LocalRowKind.ITEM, label = "Bedroll", total = 1))),
+        )
+        val key = EquippableOverrideStore.localKey(id)
+        val bedroll = dao.getRows(id).single().id
+        equippableOverrides.setOverridden(key, bedroll, overridden = true)
+
+        saveOrFail(repository.formFor(id)!!.copy(rows = emptyList()))
+
+        assertTrue(equippableOverrides.overrides(key).first().isEmpty())
+    }
+
+    @Test
+    fun `an ordinary edit leaves every override alone`() = runTest {
+        // The guard against over-reaping: a save that drops no row must reap nothing. Row ids
+        // survive a `formFor` round trip, so this is the case that would break if the reap were
+        // computed from the form's ids rather than from the difference.
+        val id = saveOrFail(
+            form(rows = listOf(LocalRowForm(id = null, kind = LocalRowKind.ITEM, label = "Bedroll", total = 1))),
+        )
+        val key = EquippableOverrideStore.localKey(id)
+        val bedroll = dao.getRows(id).single().id
+        equippableOverrides.setOverridden(key, bedroll, overridden = true)
+
+        saveOrFail(repository.formFor(id)!!.copy(name = "Brambles the Bold"))
+
+        assertEquals(setOf(bedroll), equippableOverrides.overrides(key).first())
     }
 
     @Test

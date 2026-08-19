@@ -148,7 +148,17 @@ class ItemCatalogTest {
         assertEquals(entry.description, spec.description)
         assertEquals(entry.tags, spec.tags)
         assertEquals(entry.id, spec.catalogId)
+        // 13 decision 9's first capture point: whatever the entry says it is, the created row
+        // says too. The agreement between an entry's category and its *tags* is
+        // `ItemCatalogCategoryTest`'s subject — it needs `:core:data`'s taxonomy to check.
+        assertEquals(entry.category, spec.category)
         assertTrue(spec.isValid)
+    }
+
+    @Test
+    fun `a custom spec and a coin spec are gear, because nobody said otherwise`() {
+        assertEquals(CatalogCategory.GEAR, NewItemSpec(name = "A curious key").category)
+        assertEquals(CatalogCategory.GEAR, NewItemSpec.ofCoin(CoinKind.SILVER, 57).category)
     }
 
     @Test

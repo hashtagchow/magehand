@@ -62,6 +62,32 @@ object InventoryLayoutKeys {
      * that lives only in a composable is a guardrail the next screen forgets.
      */
     fun isHideable(key: String): Boolean = key != EQUIPPED && key != GEAR
+
+    /**
+     * Whether this section's **collapsed** state is remembered across restarts
+     * (docs/design/13-collapsible-sections-local-gear.md decision 3).
+     *
+     * True for every section but one. Decision 1 makes every header an expander — Equipped and
+     * Gear included, which is why this is not a second spelling of [isHideable]: those two
+     * refuse to be *folded away* and collapse perfectly well.
+     *
+     * ### The Wallet exception, and why it is here rather than in the composable
+     *
+     * Decision 3's own words: the wallet's collapsed-default plus ephemeral expansion **is** the
+     * designed reading (11 decision 4), and *"I opened my wallet to pay"* should not leave a
+     * player's purse open for a week. So the wallet alone keeps `rememberSaveable` and writes
+     * nothing here.
+     *
+     * This is the standing convention's first recorded "good reason" exception for a sub-rule
+     * (00-DESIGN.md: sectioned surfaces default to collapsible), and an exception that lives
+     * only as a `rememberSaveable` in one composable is an exception the next screen forgets. So
+     * it is enforced the way [isHideable]'s guardrails are, **twice**: [InventoryLayoutPlan]
+     * refuses to write a collapsed wallet and strips the flag on read, so a hand-edited or
+     * future-version preferences file cannot reach the state either — and a reader wondering
+     * why the wallet behaves differently finds the answer next to the rule instead of next to
+     * the `var`.
+     */
+    fun persistsCollapse(key: String): Boolean = key != WALLET
 }
 
 /**
@@ -148,6 +174,7 @@ object InventoryLayoutPlan {
             reference = defaultKeys,
         )
         val storedHidden = stored.filter { it.hidden }.map { it.key }.toSet()
+        val storedCollapsed = stored.filter { it.collapsed }.map { it.key }.toSet()
         return ordered.map { key ->
             InventoryLayoutEntry(
                 key = key,
@@ -155,6 +182,12 @@ object InventoryLayoutPlan {
                 // `!equipped` — from a hand-edited file, or from a future version that allowed
                 // it — reads as visible rather than as a section the player cannot get back.
                 hidden = key in storedHidden && InventoryLayoutKeys.isHideable(key),
+                // 13 decision 2's default is *expanded for everything but the wallet*, and it
+                // is expressed by absence: a key the store has never heard of is not in
+                // `storedCollapsed`, so it renders open. The wallet's own default lives in the
+                // composable's `rememberSaveable`, which is the exception — see
+                // [InventoryLayoutKeys.persistsCollapse], enforced here as well as there.
+                collapsed = key in storedCollapsed && InventoryLayoutKeys.persistsCollapse(key),
             )
         }
     }
@@ -217,6 +250,38 @@ object InventoryLayoutPlan {
         if (index < 0 || resolved[index].hidden == hidden) return emptyList()
         val next = resolved.toMutableList().apply {
             this[index] = this[index].copy(hidden = hidden)
+        }
+        return persist(next, stored)
+    }
+
+    /**
+     * Collapses a section, or opens it, and returns the whole arrangement to persist
+     * (docs/design/13-collapsible-sections-local-gear.md decision 3).
+     *
+     * [setHidden]'s shape exactly, down to the empty-for-a-no-op contract and the guardrail
+     * refusal — which is the point of writing it as a twin rather than generalising the two into
+     * one `setFlag(…, KProperty)`. They are two different player intents ("stop grouping my
+     * items this way" versus "stop showing me this list right now"), they have different
+     * guardrails ([InventoryLayoutKeys.isHideable] versus
+     * [InventoryLayoutKeys.persistsCollapse]), and a reader at either call site should see which
+     * one they are looking at without resolving a property reference.
+     *
+     * The refusal here is the **Wallet**, and it is a refusal to *store* rather than a refusal
+     * to collapse: the wallet's chevron works, its state simply lives in the composable. A write
+     * that reached this with `wallet` would be a bug one layer up, and returning empty is what
+     * makes it a no-op rather than a preference file that quietly disagrees with the screen.
+     */
+    fun setCollapsed(
+        resolved: List<InventoryLayoutEntry>,
+        stored: List<InventoryLayoutEntry>,
+        key: String,
+        collapsed: Boolean,
+    ): List<InventoryLayoutEntry> {
+        if (!InventoryLayoutKeys.persistsCollapse(key)) return emptyList()
+        val index = resolved.indexOfFirst { it.key == key }
+        if (index < 0 || resolved[index].collapsed == collapsed) return emptyList()
+        val next = resolved.toMutableList().apply {
+            this[index] = this[index].copy(collapsed = collapsed)
         }
         return persist(next, stored)
     }

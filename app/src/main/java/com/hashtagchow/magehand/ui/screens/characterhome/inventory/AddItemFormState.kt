@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.ui.screens.characterhome.inventory
 
 import androidx.annotation.StringRes
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CatalogItem
 import com.hashtagchow.magehand.core.model.ItemCatalog
 import com.hashtagchow.magehand.core.model.NewItemSpec
@@ -70,8 +71,55 @@ data class AddItemFormState(
     val weight: String = "",
     val value: String = "",
     val description: String = "",
+    /**
+     * What the item is (FR-10b, 13 decision 9).
+     *
+     * **Not a `String` like its neighbours**, and that is the whole difference between this field
+     * and the five above it: those are text a player is mid-way through typing, where "" and "0"
+     * are genuinely different states this holder has to keep apart. A three-way chooser has no
+     * half-typed state — it is on one of three values at every instant — so parsing it would be
+     * a state machine over a control that cannot be in a bad state.
+     *
+     * Defaulted to [CatalogCategory.GEAR], per decision 9. It is the honest default for a form
+     * whose whole purpose is *the thing the catalog does not have*: most such items are neither
+     * weapons nor armor, and 11 decision 2's override is there for a player who picks wrong.
+     * Choosing "Weapon" as a default would put a claim on the sheet that nobody made.
+     *
+     * Read by the **local** path only — a DiceCloud item is classified by its tags, which this
+     * form deliberately does not write (see [toSpec]). Which is why it is *offered* on the local
+     * path only: see [isLocal].
+     */
+    val category: CatalogCategory = CatalogCategory.GEAR,
     val showErrors: Boolean = false,
+    /**
+     * Whether this form belongs to an on-device character.
+     *
+     * A field on the state rather than a parameter of the composable, for this file's own stated
+     * reason: *"which box is red" is a decision, not a rendering detail*. Whether the sheet draws
+     * a category chooser is exactly such a decision, and `:app` has no Compose harness, so a gate
+     * living in an `if` inside `AddItemSheet` is a gate nothing can test.
+     *
+     * Defaulted to `true` so every construction written before this field existed — all of which
+     * are about the local path, because the category is only ever read there — keeps meaning what
+     * it meant. `AddItemSheet` always passes it explicitly.
+     */
+    val isLocal: Boolean = true,
 ) {
+
+    /**
+     * Whether the sheet offers the FR-10b category chooser (13 decision 9).
+     *
+     * False on a server character, and that is the whole of the fix: `NewItemSpec.category` is
+     * **never sent to the server** — `WriteOp.insertItem` builds the insert body from `tags` and
+     * drops it, which `InventoryWriteOpTest` pins — so a chooser there would take an answer and
+     * throw it away. 13 lists server-side category editing as out of scope; a control that
+     * silently discards what the player told it is worse than one that is absent, and the server
+     * path is the majority path, so it is the one that must not lie.
+     *
+     * A derived property and not a second stored flag, so there is one answer rather than two
+     * that can disagree.
+     */
+    val offersCategoryChooser: Boolean get() = isLocal
     /** The parsed quantity, or `null` when the box does not hold a usable whole number. */
     private val parsedQuantity: Int? get() = quantity.trim().toIntOrNull()
 
@@ -146,6 +194,12 @@ data class AddItemFormState(
             weightLb = parsedWeight,
             valueGp = parsedValue,
             description = description.trim().takeIf { it.isNotEmpty() },
+            // 13 decision 9's second capture point. It rides to `LocalOpenCharacter.addItem` and
+            // stops there: no tag is invented from it for the server path, because the app's
+            // `adventuring gear` tag is a claim the catalog can make about its own curated
+            // entries and this form cannot make about arbitrary text — the same argument that
+            // keeps `tags` empty above.
+            category = category,
         )
     }
 

@@ -22,14 +22,18 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import com.hashtagchow.magehand.core.data.fake.FakeEquippableOverrideStore
+import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
 import com.hashtagchow.magehand.core.data.db.LocalCharacterEntity
 import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
 import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.AbilityScores
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.CoinPurse
+import com.hashtagchow.magehand.core.model.EquipGroup
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.ItemCatalog
 import com.hashtagchow.magehand.core.model.LocalCharacter
@@ -82,6 +86,7 @@ class LocalInventoryTest {
         valueGp: Double? = null,
         equipped: Boolean = false,
         sortIndex: Int = 0,
+        category: CatalogCategory = CatalogCategory.GEAR,
     ) = LocalTrackerRow(
         id = id,
         characterId = "local-1",
@@ -94,7 +99,77 @@ class LocalInventoryTest {
         weightLb = weightLb,
         valueGp = valueGp,
         equipped = equipped,
+        category = category,
     )
+
+    // --- FR-10b: the local equippable rule (13 decision 10) ----------------------
+
+    /**
+     * The rule, term for term, as a table — because the whole claim of 13 decision 10 is that it
+     * is the *same rule* the server path applies, with the category standing where the tag test
+     * stands. Every cell is `equippable = category != GEAR || equipped`.
+     */
+    @Test
+    fun `the local rule is category-or-equipped, on every combination of the two`() {
+        val rows = listOf(
+            itemRow("w-off", "Longsword", category = CatalogCategory.WEAPON),
+            itemRow("w-on", "Rapier", equipped = true, category = CatalogCategory.WEAPON, sortIndex = 1),
+            itemRow("a-off", "Chain Shirt", category = CatalogCategory.ARMOR, sortIndex = 2),
+            itemRow("a-on", "Shield", equipped = true, category = CatalogCategory.ARMOR, sortIndex = 3),
+            itemRow("g-off", "Tinderbox", sortIndex = 4),
+            itemRow("g-on", "A Small Knife", equipped = true, sortIndex = 5),
+        )
+
+        val board = LocalInventoryBoard.build(character(), rows)
+        val equippable = board.allItems.associate { it.propertyId to it.isEquippable }
+
+        assertEquals(
+            mapOf(
+                "w-off" to true,
+                "w-on" to true,
+                "a-off" to true,
+                "a-on" to true,
+                // The only false in the table, and the whole of what FR-10b changed: an
+                // unequipped, uncategorised row. 11 decision 2's override is the way back, and
+                // it is applied one layer up in `InventoryRowState`.
+                "g-off" to false,
+                // Not false, because the player is holding it — 13 decision 11's upgrade
+                // honesty rides entirely on this disjunct.
+                "g-on" to true,
+            ),
+            equippable,
+        )
+    }
+
+    @Test
+    fun `the category is also the grouping, so Carried subdivides like a server board`() {
+        val board = LocalInventoryBoard.build(
+            character(),
+            listOf(
+                itemRow("w1", "Longsword", category = CatalogCategory.WEAPON),
+                itemRow("a1", "Chain Shirt", category = CatalogCategory.ARMOR, sortIndex = 1),
+                itemRow("g1", "Rope", sortIndex = 2),
+            ),
+        )
+
+        assertEquals(
+            listOf(EquipGroup.WEAPON, EquipGroup.ARMOR, EquipGroup.GEAR),
+            board.carried.map { it.equipGroup },
+        )
+    }
+
+    @Test
+    fun `an equipped row's group is still its category, not a promotion to gear`() {
+        // `equipGroup` is read from the same field either way — 11 decision 3 keeps the two
+        // facts separate on purpose (`EquipGroup`'s KDoc), and the equipped item renders in
+        // Equipped, so its group is never drawn. It must still be honest.
+        val board = LocalInventoryBoard.build(
+            character(),
+            listOf(itemRow("w1", "Rapier", equipped = true, category = CatalogCategory.WEAPON)),
+        )
+
+        assertEquals(EquipGroup.WEAPON, board.equipped.single().equipGroup)
+    }
 
     @Test
     fun `only item rows reach the inventory - slots and resources are the tracker's`() {
@@ -282,7 +357,11 @@ class LocalInventoryTest {
             equipped = equipped,
         )
 
-    private fun open(): LocalOpenCharacter = LocalOpenCharacter(characterId, dao, scope, now = { clock })
+    /** Shared, so a test can assert what a delete did to it. */
+    private val equippableOverrides = FakeEquippableOverrideStore()
+
+    private fun open(): LocalOpenCharacter =
+        LocalOpenCharacter(characterId, dao, equippableOverrides, scope, now = { clock })
 
     /**
      * The board once Room has actually emitted it.
@@ -380,6 +459,10 @@ class LocalInventoryTest {
         assertNotNull(row.description)
         assertEquals(false, row.equipped)
         assertEquals(LocalRowKind.ITEM.storedValue, row.kind)
+        // 13 decision 9's first capture point. The torch is gear, like every catalog entry
+        // today — the assertion that matters is that the *entry's* answer is what was stored,
+        // so a longsword joining the catalog needs no change here or anywhere downstream.
+        assertEquals(ItemCatalog.byId("torch")!!.category.storedValue, row.category)
     }
 
     @Test
@@ -395,6 +478,28 @@ class LocalInventoryTest {
         assertNull("a blank weight field is an absence, not a zero", row.weight)
         assertNull(row.value)
         assertNull(row.description)
+        // A category the player did not change is gear, which is what the chooser opens on.
+        assertEquals(CatalogCategory.GEAR.storedValue, row.category)
+    }
+
+    @Test
+    fun `the custom form's chooser rides all the way to the row and to the board`() = runTest {
+        // 13 decision 9's second capture point, end to end: form → spec → Room → board. The
+        // board half is the point — a category stored but not read would be a column nobody
+        // could tell had worked.
+        seed()
+        val character = open()
+
+        character.addItem(
+            NewItemSpec(name = "A curious sword", quantity = 1, category = CatalogCategory.WEAPON),
+        )
+        character.awaitIdle()
+
+        assertEquals(CatalogCategory.WEAPON.storedValue, dao.getRows(characterId).single().category)
+
+        val item = character.inventory.first { it.allItems.isNotEmpty() }.carried.single()
+        assertEquals(EquipGroup.WEAPON, item.equipGroup)
+        assertTrue("a weapon is equippable without being equipped first", item.isEquippable)
     }
 
     @Test
@@ -683,6 +788,56 @@ class LocalInventoryTest {
         character.removeItem("i1")
         character.awaitIdle()
         assertEquals(listOf("r1", "s1"), dao.getRows(characterId).map { it.id }.sorted())
+    }
+
+    /**
+     * L2 (1.6.0 review): the deleted row's equippability override goes with it.
+     *
+     * 11 decision 2's override is a DataStore key keyed by `(character, row id)`, so
+     * `ON DELETE CASCADE` cannot follow a deleted *item* the way it follows a deleted character.
+     * Local row ids are UUIDs and never recur, which makes an orphan unreachable **forever**
+     * rather than merely stale — the character-delete path's own argument, one level down.
+     *
+     * The neighbouring row's override must survive, which is what makes this a reap rather than
+     * a clear: the two facts together are the only ones a wrong implementation cannot satisfy.
+     */
+    @Test
+    fun `deleting a local item reaps its equippability override and nothing else`() = runTest {
+        seed(rows = listOf(itemEntity("i1", "A Small Knife"), itemEntity("i2", "Bag of Sand")))
+        val key = EquippableOverrideStore.localKey(characterId)
+        equippableOverrides.setOverridden(key, "i1", overridden = true)
+        equippableOverrides.setOverridden(key, "i2", overridden = true)
+        val character = open()
+
+        character.removeItem("i1")
+        character.awaitIdle()
+
+        assertEquals(
+            "a UUID row id never recurs, so a key left here is unreachable forever",
+            setOf("i2"),
+            equippableOverrides.overrides(key).first(),
+        )
+    }
+
+    @Test
+    fun `a refused delete leaves the override alone`() = runTest {
+        // The items-only gate above runs *before* the reap, so a tracker id that this path
+        // refuses must not quietly clear an override that belongs to a live row.
+        seed(
+            rows = listOf(
+                itemEntity("i1", "Torch"),
+                itemEntity("s1", "1st Level").copy(kind = LocalRowKind.SLOT.storedValue, total = 4, current = 4),
+            ),
+        )
+        val key = EquippableOverrideStore.localKey(characterId)
+        equippableOverrides.setOverridden(key, "s1", overridden = true)
+        val character = open()
+
+        character.removeItem("s1")
+        character.removeItem("gone-entirely")
+        character.awaitIdle()
+
+        assertEquals(setOf("s1"), equippableOverrides.overrides(key).first())
     }
 
     @Test

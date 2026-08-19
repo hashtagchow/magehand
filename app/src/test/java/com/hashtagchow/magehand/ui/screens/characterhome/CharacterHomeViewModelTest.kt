@@ -435,6 +435,98 @@ class CharacterHomeViewModelTest {
     }
 
     @Test
+    fun `collapsing a section persists it in the same key and re-renders the tab`() =
+        runTest(dispatcher) {
+            // FR-16 (13 decision 3): collapse is a preference, so it rides in the FR-14 layout
+            // key rather than in a `rememberSaveable`. That is what makes it survive a
+            // force-stop, and it is why this is a view-model test rather than a state one.
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            character.inventory.value = arrangeableBoard()
+            advanceUntilIdle()
+
+            vm.setInventorySectionCollapsed("weapons", collapsed = true)
+            advanceUntilIdle()
+
+            val key = InventoryLayoutStore.serverKey(character.accountId, creatureId)
+            assertEquals(
+                listOf("weapons"),
+                inventoryLayouts.layoutFor(key).filter { it.collapsed }.map { it.key },
+            )
+            // The header is still on the tab — this is a collapse, not a hide — and its rows
+            // are still filed under it, one tap away.
+            val weapons = vm.uiState.value.inventory.sections.single { it.key == "weapons" }
+            assertTrue(weapons.collapsed)
+            assertTrue(weapons.rows.isNotEmpty())
+        }
+
+    @Test
+    fun `Reset opens every section again, because collapse lives in the key it deletes`() =
+        runTest(dispatcher) {
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            character.inventory.value = arrangeableBoard()
+            advanceUntilIdle()
+
+            vm.setInventorySectionCollapsed("weapons", collapsed = true)
+            vm.setInventorySectionCollapsed("gear", collapsed = true)
+            advanceUntilIdle()
+
+            vm.resetInventoryLayout()
+            advanceUntilIdle()
+
+            // 13 decision 3's "Reset clears collapse too", end to end. A separate collapse store
+            // would have needed a second call here, and a Reset that left every section shut is
+            // exactly the failure that would have shipped.
+            assertTrue(inventoryLayouts.keys.isEmpty())
+            assertTrue(vm.uiState.value.inventory.sections.none { it.collapsed })
+        }
+
+    @Test
+    fun `collapsing the wallet writes nothing, because its state is not a preference`() =
+        runTest(dispatcher) {
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            character.inventory.value = arrangeableBoard()
+            advanceUntilIdle()
+
+            vm.setInventorySectionCollapsed("wallet", collapsed = true)
+            advanceUntilIdle()
+
+            // 13 decision 3's exception. The tab never routes the wallet's chevron here — it is
+            // a `rememberSaveable` in the composable — and the plan refuses the key regardless,
+            // so a character who has never customized does not acquire a stored key from it.
+            assertTrue(inventoryLayouts.keys.isEmpty())
+        }
+
+    @Test
+    fun `a move made while a section is collapsed keeps it collapsed`() = runTest(dispatcher) {
+        // The silent regression: every gesture persists the whole arrangement, so a move
+        // computed against a state that had dropped the collapse flags would quietly re-open
+        // every shut section the first time the player reordered anything.
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        character.inventory.value = arrangeableBoard()
+        advanceUntilIdle()
+
+        vm.setInventorySectionCollapsed("weapons", collapsed = true)
+        advanceUntilIdle()
+        vm.moveInventorySection("wallet", delta = 1)
+        advanceUntilIdle()
+
+        val key = InventoryLayoutStore.serverKey(character.accountId, creatureId)
+        assertEquals(
+            listOf("weapons"),
+            inventoryLayouts.layoutFor(key).filter { it.collapsed }.map { it.key },
+        )
+        assertTrue(vm.uiState.value.inventory.sections.single { it.key == "weapons" }.collapsed)
+    }
+
+    @Test
     fun `the connection status follows the session, not the character list`() = runTest(dispatcher) {
         val character = FakeOpenCharacter(creatureId = creatureId)
         val (vm, _) = viewModel(character)

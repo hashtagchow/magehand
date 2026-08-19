@@ -177,3 +177,53 @@ val MIGRATION_3_4: Migration = object : Migration(3, 4) {
         )
     }
 }
+
+/**
+ * v4 → v5: the local item category
+ * (docs/design/13-collapsible-sections-local-gear.md decision 8).
+ *
+ * ```
+ * local_tracker_rows += category TEXT NOT NULL DEFAULT 'gear'
+ * ```
+ *
+ * **Additive in [MIGRATION_3_4]'s narrower sense**: one `ALTER TABLE … ADD COLUMN` against a
+ * table that already holds player data. No table is re-created, so there is no copy step that
+ * could drop a row, no temporary table, and no window in which `local_tracker_rows`' foreign key
+ * to `local_characters` does not exist. Nothing on `local_characters` is touched at all.
+ *
+ * ### What the default means, and why it is not a data loss
+ *
+ * Every existing row was written by a build that never asked what kind of thing the item was, so
+ * there is no answer to migrate — only a reading to choose. 13 decision 8 chooses **gear**,
+ * which is the honest reading of "never collected" and is what 11 decision 2's override toggle
+ * has let a player correct since 1.4.0.
+ *
+ * The reading a careless migration would choose instead is "everything stays equippable", to
+ * preserve 1.4.x's `LocalInventoryBoard` behaviour — and that is precisely the interim this
+ * change retires, so encoding it in the column would make the retirement unreachable. Decision
+ * 11's honesty requirement is met by the **rule** rather than by the column: `category != gear
+ * || equipped || override` keeps every equipped row in Equipped with its unequip control, and
+ * leaves every other row one toggle away from the control it had.
+ * `MageHandDatabaseMigrationTest` pins both halves through the real board.
+ *
+ * ### Why the `DEFAULT` is load-bearing
+ *
+ * [MIGRATION_3_4]'s reason, unchanged: SQLite refuses `ADD COLUMN … NOT NULL` without one on a
+ * table that already has rows. The matching `@ColumnInfo(defaultValue = "'gear'")` on
+ * [LocalTrackerRowEntity] is what makes the exported v5 schema say the same thing — note the
+ * inner single quotes, which are what turns a bare identifier into a SQL string literal and are
+ * the one difference from the v4 integer defaults.
+ *
+ * As with every migration before it, this is proven rather than trusted:
+ * `MageHandDatabaseMigrationTest` builds a real v4 database from the **committed** v4 JSON,
+ * populates both local tables, runs this migration, and lets Room's own validator compare the
+ * result against the compiled v5 expectation.
+ */
+val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE `local_tracker_rows` " +
+                "ADD COLUMN `category` TEXT NOT NULL DEFAULT '${LocalTrackerRowEntity.CATEGORY_GEAR}'",
+        )
+    }
+}

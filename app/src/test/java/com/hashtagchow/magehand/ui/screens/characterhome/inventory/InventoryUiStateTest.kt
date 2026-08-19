@@ -2,7 +2,9 @@ package com.hashtagchow.magehand.ui.screens.characterhome.inventory
 
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.data.local.LocalInventoryBoard
+import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.model.AbilityScores
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.CoinPurse
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -22,6 +24,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.util.Locale
 
 /**
  * Board → UI for the inventory tab (docs/design/10-inventory.md, wave B acceptance).
@@ -116,6 +119,10 @@ class InventoryUiStateTest {
         isShowingSnapshot: Boolean = false,
         canWrite: Boolean = true,
         equippableOverrides: Set<String> = emptySet(),
+        // FR-16 only. The *arrangement* layer is `InventoryLayoutTest`'s subject; this class
+        // needs the parameter so a section can be put in its collapsed state, which is a
+        // property of the section this class does test.
+        layout: List<InventoryLayoutEntry> = emptyList(),
         isLocal: Boolean = false,
     ) = toInventoryUiState(
         creatureId = "FakeCreature23456",
@@ -124,6 +131,7 @@ class InventoryUiStateTest {
         isShowingSnapshot = isShowingSnapshot,
         canWrite = canWrite,
         equippableOverrides = equippableOverrides,
+        layout = layout,
         isLocal = isLocal,
     )
 
@@ -649,6 +657,48 @@ class InventoryUiStateTest {
     }
 
     /**
+     * L3: the section header's item count is a **plural resource**, and it ships as one.
+     *
+     * `strings.xml` says why the count is a `<plurals>` and not a format string — *"this sentence
+     * is read aloud, and '1 items' is the kind of thing a screen-reader user hears in full"* —
+     * and until the 1.6.0 review that was the only place it was said. A `<string>` with `%1$d
+     * items` in it renders identically on every screen and wrongly in exactly one place: the
+     * TalkBack sentence on a section holding one thing.
+     *
+     * Read from the file that ships and formatted the way the header formats it, for the em-dash
+     * test's reason: two literals agreeing proves only that they were typed the same day.
+     * `pluralStringResource(id, count, count)` resolves the quantity and then applies the
+     * platform's `String.format`, so the second half is reproducible here exactly; the first half
+     * is English's own one/other rule, which is why both arms are asserted rather than one.
+     */
+    @Test
+    fun `the section item count is a plural resource that reads 1 item and N items`() {
+        val strings = stringsXml().readText()
+        val block = Regex("""<plurals name="inventory_section_items">(.*?)</plurals>""", RegexOption.DOT_MATCHES_ALL)
+            .find(strings)
+            ?.groupValues
+            ?.get(1)
+
+        assertNotNull(
+            "inventory_section_items must be a <plurals>, not a <string> — a format string " +
+                "would have TalkBack say '1 items' on every single-item section",
+            block,
+        )
+
+        val forms = Regex("""<item quantity="(\w+)">(.*?)</item>""")
+            .findAll(block!!)
+            .associate { it.groupValues[1] to it.groupValues[2] }
+
+        assertEquals("English needs exactly one and other", setOf("one", "other"), forms.keys)
+        // The header's own call is `pluralStringResource(R.plurals…, count, count)`: the quantity
+        // picks the form, the same count fills the argument.
+        assertEquals("1 item", String.format(Locale.US, forms.getValue("one"), 1))
+        assertEquals("0 items", String.format(Locale.US, forms.getValue("other"), 0))
+        assertEquals("2 items", String.format(Locale.US, forms.getValue("other"), 2))
+        assertEquals("11 items", String.format(Locale.US, forms.getValue("other"), 11))
+    }
+
+    /**
      * `app/src/main/res/values/strings.xml`, found by walking up from the working directory.
      *
      * Gradle runs a unit test with the *module* directory as its working directory, but that is
@@ -717,6 +767,69 @@ class InventoryUiStateTest {
             "Wallet, Empty, Show the coin steppers",
             state.wallet.spokenLabel("Wallet", "Empty", "Show the coin steppers"),
         )
+    }
+
+    // --- FR-16: the section header's summary and sentence (13 decisions 1 and 5) ---
+
+    @Test
+    fun `a section counts rows, not the things inside them`() {
+        // The distinction the count exists to keep: a quiver of twenty arrows is ONE item on
+        // this list. Summing quantities would print "22 items" over a section a player can
+        // expand and count three of, and the number they can check has to be the right one.
+        val section = map(
+            board.copy(
+                carried = listOf(
+                    item("q1", "Arrows", quantity = 20, weightLb = 0.05),
+                    item("q2", "Torch", quantity = 2, weightLb = 1.0),
+                ),
+            ),
+        ).sections.single { it.kind == InventorySectionKind.GEAR }
+
+        assertEquals(2, section.itemCount)
+        // …and the weight beside it is still the summed figure, so nothing is lost between them.
+        assertEquals("3", section.weight)
+    }
+
+    @Test
+    fun `a section header summarises as count then weight, on this tab's own separator`() {
+        val section = map().sections.first()
+
+        // The copy arrives as parameters — "items" is a plural and "lb" is a unit — while the
+        // separator and the order are this tab's punctuation, shared with the wallet's coin
+        // line so the two summaries cannot drift apart.
+        assertEquals("3 items · 41 lb", section.summary(countLabel = "3 items", weightLabel = "41 lb"))
+    }
+
+    @Test
+    fun `the spoken section header carries all five facts, in order`() {
+        // 13 decision 5's sentence. The header is a clickable, so this string is *everything* a
+        // screen-reader user is told about the section — the name, how much is in it, what it
+        // weighs, whether it is open, and that it can be tapped.
+        val section = map(layout = listOf(InventoryLayoutEntry("equipped", collapsed = true)))
+            .sections.single { it.key == "equipped" }
+
+        assertTrue(section.collapsed)
+        assertEquals(
+            "Armor, 3 items, 41 lb, collapsed, tap to expand",
+            section.spokenLabel(
+                title = "Armor",
+                countLabel = "3 items",
+                weightLabel = "41 lb",
+                stateLabel = "collapsed",
+                action = "tap to expand",
+            ),
+        )
+    }
+
+    @Test
+    fun `the spoken section header names no copy of its own`() {
+        // Every word arrives as a parameter: the builder joins, it does not write. A future edit
+        // that hard-codes "collapsed" or "lb" in here would be putting untranslatable copy in a
+        // Kotlin file, and this is what notices. It is also what notices a *dropped* fragment —
+        // a five-part sentence quietly becoming four is invisible until TalkBack is on.
+        val section = map().sections.first()
+
+        assertEquals("A, B, C, D, E", section.spokenLabel("A", "B", "C", "D", "E"))
     }
 
     @Test
@@ -826,7 +939,13 @@ class InventoryUiStateTest {
         updatedAt = 0L,
     )
 
-    private fun localItem(id: String, label: String, equipped: Boolean, weightLb: Double? = 2.0) =
+    private fun localItem(
+        id: String,
+        label: String,
+        equipped: Boolean,
+        weightLb: Double? = 2.0,
+        category: CatalogCategory = CatalogCategory.GEAR,
+    ) =
         LocalTrackerRow(
             id = id,
             characterId = "local-1",
@@ -840,28 +959,55 @@ class InventoryUiStateTest {
             valueGp = null,
             description = null,
             equipped = equipped,
+            category = category,
         )
 
     @Test
-    fun `a local board renders the same two item sections and never a container`() {
+    fun `a local board subdivides Carried by category, exactly as a server board does by tags`() {
+        // FR-10b (13 decision 10). Until 1.6.0 this asserted the opposite — one GEAR section for
+        // everything, because a local character had no data to subdivide by. It has now.
         val local = LocalInventoryBoard.build(
             localCharacter(),
-            listOf(localItem("r1", "Shield", equipped = true), localItem("r2", "Rope", equipped = false)),
+            listOf(
+                localItem("r1", "Longsword", equipped = false, category = CatalogCategory.WEAPON),
+                localItem("r2", "Chain Shirt", equipped = false, category = CatalogCategory.ARMOR),
+                localItem("r3", "Rope", equipped = false),
+            ),
         )
 
         val state = map(local)
 
         assertEquals(
-            // Gear, not Weapons, even for a row called "Shield": a local character carries no
-            // tags at all, so there is nothing to subdivide by. See `LocalInventoryBoard`.
-            listOf(InventorySectionKind.EQUIPPED, InventorySectionKind.GEAR),
+            listOf(
+                InventorySectionKind.WEAPONS,
+                InventorySectionKind.ARMOR,
+                InventorySectionKind.GEAR,
+            ),
             state.sections.map { it.kind },
         )
+        // Still never a container: 09 decision 8's flat `sortIndex` is the only structure there
+        // is, and FR-10b did not change that.
         assertTrue(state.sections.none { it.kind == InventorySectionKind.CONTAINER })
     }
 
     @Test
-    fun `every local row keeps its equip control, because no local row is classified`() {
+    fun `a local weapon or armor row is equippable outright`() {
+        val local = LocalInventoryBoard.build(
+            localCharacter(),
+            listOf(localItem("r1", "Longsword", equipped = false, category = CatalogCategory.WEAPON)),
+        )
+
+        val row = map(local).sections.single { it.kind == InventorySectionKind.WEAPONS }.rows.single()
+
+        // 13 decision 10's first disjunct, `category != GEAR`. The board has classified it, so
+        // 11 decision 2's override toggle has nothing to rescue — the same rule a tagged
+        // DiceCloud weapon already gets.
+        assertTrue(row.showsEquipControl)
+        assertFalse(row.showsEquippableToggle)
+    }
+
+    @Test
+    fun `a local gear row loses the chip and gains the override switch, as a server gear row does`() {
         val local = LocalInventoryBoard.build(
             localCharacter(),
             listOf(localItem("r1", "Rope", equipped = false)),
@@ -869,11 +1015,46 @@ class InventoryUiStateTest {
 
         val row = map(local).sections.single { it.kind == InventorySectionKind.GEAR }.rows.single()
 
-        // 11 decision 1's rule reads a tag taxonomy a local character does not have. "No
-        // taxonomy" is not "not equippable" — running the rule anyway would strip the control
-        // from the whole of a local inventory on the strength of data never collected.
+        // The retirement of the FR-10 interim, stated as the behaviour a player sees: an
+        // unequipped, uncategorised local row now reads exactly like a tinderbox on a DiceCloud
+        // sheet — no equip chip, and the "Can be equipped" switch offered to get one back.
+        assertFalse(row.showsEquipControl)
+        assertTrue("the override is the way back, and it must be offered", row.showsEquippableToggle)
+    }
+
+    @Test
+    fun `an equipped local gear row keeps its control, which is decision 11's upgrade honesty`() {
+        // The row every 1.4.x/1.5.x local character has: added before the category column
+        // existed, so it reads as gear — but the player equipped it, and the migration must not
+        // take the unequip control away from an item they are holding.
+        val local = LocalInventoryBoard.build(
+            localCharacter(),
+            listOf(localItem("r1", "A Small Knife", equipped = true)),
+        )
+
+        val row = map(local).sections.single { it.kind == InventorySectionKind.EQUIPPED }.rows.single()
+
         assertTrue(row.showsEquipControl)
-        assertFalse("and so the override switch has nothing to rescue", row.showsEquippableToggle)
+        // And the switch is absent, for `showsEquippableToggle`'s stated reason: the board has
+        // classified it through the `equipped` disjunct, so there is no doubt to correct.
+        assertFalse(row.showsEquippableToggle)
+    }
+
+    @Test
+    fun `a local gear row the player overrides gets its chip back and stays in Gear`() {
+        val local = LocalInventoryBoard.build(
+            localCharacter(),
+            listOf(localItem("r1", "A Little Bag of Sand", equipped = false)),
+        )
+
+        val row = map(local, equippableOverrides = setOf("r1"))
+            .sections.single { it.kind == InventorySectionKind.GEAR }
+            .rows.single()
+
+        // 11 decision 3's rule, now reachable locally: an override buys the *control*, not a
+        // promotion to Weapons. This app still does not know what the thing is.
+        assertTrue(row.showsEquipControl)
+        assertTrue("and the switch stays, because it is the only way back", row.showsEquippableToggle)
     }
 
     @Test

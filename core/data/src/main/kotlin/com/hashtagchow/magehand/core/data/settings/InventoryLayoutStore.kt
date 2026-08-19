@@ -8,9 +8,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 /**
- * One section's place on the inventory tab: which section, and whether the player folded it.
+ * One section's place on the inventory tab: which section, whether the player folded it, and
+ * whether they collapsed it.
  *
- * A pair rather than two parallel lists, because the two facts are only ever read together and
+ * A triple rather than three parallel lists, because the facts are only ever read together and
  * a list of keys beside a set of hidden keys is two things that can disagree — the shape where
  * a section is ordered but not known, or hidden but not ordered, would be representable and
  * meaningless.
@@ -24,6 +25,21 @@ data class InventoryLayoutEntry(
     val key: String,
     /** Folded, in decision 3's sense: the section's *heading* goes, never its items. */
     val hidden: Boolean = false,
+    /**
+     * Collapsed, in docs/design/13-collapsible-sections-local-gear.md decision 3's sense: the
+     * section's **header stays and its rows go**.
+     *
+     * Orthogonal to [hidden] and stored alongside it rather than folded into one tri-state,
+     * because the two are genuinely independent (13 decision 4): a hidden section does not
+     * render at all and its items appear under Gear, while a collapsed one renders its header
+     * with the items still filed under it. All four combinations are meaningful, and a tri-state
+     * would have had to invent a precedence between them.
+     *
+     * **Not written for every section.** The wallet's collapse is deliberately ephemeral — see
+     * decision 3's exception and `InventoryLayoutKeys.persistsCollapse` — so a `wallet` entry
+     * always reads `false` here regardless of what is on screen.
+     */
+    val collapsed: Boolean = false,
 )
 
 /**
@@ -34,7 +50,10 @@ data class InventoryLayoutEntry(
  *
  * Decision 1 gives every character the same default order — Wallet, Equipped, Weapons, Armor,
  * containers, Gear — and decision 3 lets the player rearrange it: move a section, or fold one
- * away so its items join Gear. This remembers that arrangement. It stores a *preference over
+ * away so its items join Gear. FR-16 (13 decision 3) adds a third fact to the same entries:
+ * whether the section is **collapsed**, which is remembered here rather than in a
+ * `rememberSaveable` because *"I never look at Armor"* is a durable fact about a character while
+ * a quick wallet peek is not. This remembers that arrangement. It stores a *preference over
  * whatever exists*, never a list of what exists: the board is the authority on which sections
  * a character has, and it changes with every sync.
  *
@@ -114,6 +133,11 @@ interface InventoryLayoutStore {
      * *forget this character's arrangement*, after which decision 1's default is what renders.
      * `setLayout(key, emptyList())` reaches the same state; this is named so the two call sites
      * read as what they are.
+     *
+     * 13 decision 3's *"Reset clears collapse too"* falls out of that rather than needing a
+     * branch: collapse is a flag on the same entries, in the same key, so removing the key
+     * removes it. A separate collapse store would have needed a second call here, and a Reset
+     * that left every section shut is exactly the failure a second store would have shipped.
      */
     suspend fun clearForCharacter(characterKey: String)
 
@@ -148,38 +172,93 @@ interface InventoryLayoutStore {
 }
 
 /**
- * The stored format (docs/design/12-inventory-layout.md decision 5): the ordered keys, joined by
- * commas, with `!` in front of a folded one — `wallet,equipped,!weapons,container:abc,gear`.
+ * The stored format (12 decision 5, extended by 13 decision 3): the ordered keys, joined by
+ * commas, each optionally prefixed by `!` for folded and `^` for collapsed —
+ * `wallet,equipped,!weapons,^armor,^!container:abc,gear`.
  *
  * ### Why a hand-rolled string and not JSON
  *
- * Because the value is a list of short opaque tokens with one boolean each, and JSON would cost
+ * Because the value is a list of short opaque tokens with two booleans each, and JSON would cost
  * a serializer dependency in `:core:data` to express `["wallet",{"key":"weapons",...}]` — more
  * apparatus than the thing being stored. The format is also *readable in a preferences dump*,
  * which matters for a preference the only debugging tool for is `adb shell run-as … strings`.
  *
- * ### What makes the two delimiters safe
+ * ### Why 13 decision 3 could extend this and still say "NO schema change"
+ *
+ * **Not** because 1.5.0 could read a 1.6.0 file. It could not, and the claim that it could was
+ * wrong: 1.5.0's decoder was `startsWith(HIDDEN_MARK)` / `removePrefix(HIDDEN_MARK)`, so it
+ * recognised exactly one mark. A 1.5.0 install meeting `^armor` reads the key **`^armor`**,
+ * matches no section, and drops that section out of the stored order — the arrangement survives,
+ * but Armor loses its position. The negative prefix scan below is a *1.6.0* property; it buys
+ * forward tolerance of some later release's mark, not backward tolerance of this one's.
+ *
+ * The reason "no schema change" holds is that **no install ever reads a file written by a newer
+ * build**, and there are two independent mechanisms for that:
+ *
+ *  - `android:allowBackup="false"` (see the manifest), so Android's backup/restore transport
+ *    never carries this preferences file onto a device running a different version of the app.
+ *  - Android has no in-place downgrade: installing an older `versionCode` over a newer one is
+ *    refused, so getting back to 1.5.0 means uninstalling first — which deletes the app's data
+ *    directory and the DataStore file with it. 1.5.0 comes back to an empty store and the
+ *    default arrangement, which is a first-run, not a corruption.
+ *
+ * So the extension is safe because the old reader is never handed the new string, not because the
+ * old reader coped. Downgrade tolerance is **not** claimed here; what *is* claimed is the forward
+ * direction, and that is what the sections below are about.
+ *
+ * ### Marks are order-independent and unknown ones are ignored
+ *
+ * `^!armor` and `!^armor` both decode to *armor, hidden and collapsed*, because [decode] reads
+ * the whole run of prefix characters as a set rather than as a sequence. There is no reading in
+ * which the order of two independent booleans matters, so making one canonical would only create
+ * a second string for one state and a bug for whichever writer produced the other. [encode]
+ * still emits one canonical order (`^` then `!`), so a round trip is byte-stable.
+ *
+ * An unrecognised mark — `~armor` from some future release — is **dropped, and the key kept**.
+ * That is the same forward-compatibility posture `InventoryLayoutPlan.resolve` takes towards an
+ * unknown *key*: the honest degradation of "a newer build knew one more thing about this
+ * section" is to lose that one thing, not to lose the section or the whole arrangement with it.
+ *
+ * ### What makes the delimiters safe
  *
  * Section keys are minted by the UI layer and are one of five constants or `container:` followed
- * by a `creatureProperties._id`, which Meteor generates from an alphanumeric alphabet. Neither
- * `,` nor `!` can occur in any of them. [decode] does not *rely* on that being true forever
- * though — it drops blank segments and de-duplicates keys, so a malformed string that somehow
- * reached the file degrades to a partial order rather than to a crash or a duplicated section.
+ * by a `creatureProperties._id`, which Meteor generates from an alphanumeric alphabet — so every
+ * key **starts with a letter or a digit**, and `,`, `!` and `^` occur in none of them. That is
+ * what lets the prefix run be defined negatively, as "everything before the first alphanumeric",
+ * which is the only definition that can absorb a mark this build has never heard of. [decode]
+ * does not *rely* on any of it being true forever: it drops blank segments and de-duplicates
+ * keys, so a malformed string that somehow reached the file degrades to a partial order rather
+ * than to a crash or a duplicated section.
  */
 internal object InventoryLayoutCodec {
     const val SEPARATOR = ","
-    const val HIDDEN_MARK = "!"
+    const val HIDDEN_MARK = '!'
+    const val COLLAPSED_MARK = '^'
 
     fun encode(layout: List<InventoryLayoutEntry>): String =
-        layout.joinToString(SEPARATOR) { if (it.hidden) "$HIDDEN_MARK${it.key}" else it.key }
+        layout.joinToString(SEPARATOR) { entry ->
+            buildString {
+                // Canonical order, so encode(decode(s)) is stable. Nothing reads it back in
+                // this order — see the class KDoc — it exists so two writers agree.
+                if (entry.collapsed) append(COLLAPSED_MARK)
+                if (entry.hidden) append(HIDDEN_MARK)
+                append(entry.key)
+            }
+        }
 
     fun decode(stored: String?): List<InventoryLayoutEntry> =
         stored.orEmpty()
             .split(SEPARATOR)
             .mapNotNull { token ->
-                val hidden = token.startsWith(HIDDEN_MARK)
-                val key = if (hidden) token.removePrefix(HIDDEN_MARK) else token
-                key.takeIf { it.isNotBlank() }?.let { InventoryLayoutEntry(it, hidden) }
+                val marks = token.takeWhile { !it.isLetterOrDigit() }
+                val key = token.drop(marks.length)
+                key.takeIf { it.isNotBlank() }?.let {
+                    InventoryLayoutEntry(
+                        key = it,
+                        hidden = HIDDEN_MARK in marks,
+                        collapsed = COLLAPSED_MARK in marks,
+                    )
+                }
             }
             // A key twice over is not a representable arrangement — a section cannot be in two
             // places — so the first mention wins rather than the last section silently moving.

@@ -501,6 +501,27 @@ data class NewItemSpec(
      * between a repeat-add affordance that works and one that guesses.
      */
     val catalogId: String? = null,
+    /**
+     * What the thing is (docs/design/13-collapsible-sections-local-gear.md decision 9).
+     *
+     * **Never sent to the server either**, and for a sharper version of [catalogId]'s reason: a
+     * DiceCloud sheet states this with [tags], which the insert body already carries, so writing
+     * a second private field alongside them would be this app's vocabulary competing with the
+     * sheet's own on the sheet's own document. It is read by the **local** path only, where
+     * there are no tags and `local_tracker_rows.category` is the whole of the answer.
+     *
+     * That "never" is **pinned by `InventoryWriteOpTest`**, over every value of the enum and
+     * against the whole serialized body — it was a comment until the 1.6.0 review, and it is
+     * load-bearing: it is why 13 puts server-side category editing out of scope, and therefore
+     * why the add sheet draws no chooser on a DiceCloud character (`AddItemFormState.isLocal`).
+     *
+     * Defaulted to [CatalogCategory.GEAR] so that every existing construction — the coin path
+     * below, and every test fixture written before this field existed — keeps meaning what it
+     * meant. That direction is the safe one for the same reason [InventoryItem.isEquippable]
+     * defaults `true`: gear is what "nobody said" reads as, and 11 decision 2's override is
+     * always available to correct it.
+     */
+    val category: CatalogCategory = CatalogCategory.GEAR,
 ) {
     /** True when the spec has enough to create anything at all. */
     val isValid: Boolean get() = name.isNotBlank() && quantity > 0
@@ -516,6 +537,9 @@ data class NewItemSpec(
                 description = entry.description,
                 tags = entry.tags,
                 catalogId = entry.id,
+                // 13 decision 9's first capture point: the entry already knows, so the add
+                // path does not have to ask. See [CatalogItem.category].
+                category = entry.category,
             )
 
         /** The wallet's insert path: the coin item a sheet was missing (10 decision 5). */

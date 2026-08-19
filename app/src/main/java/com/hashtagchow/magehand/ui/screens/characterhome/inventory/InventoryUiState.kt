@@ -66,6 +66,20 @@ const val EM_DASH: String = "—"
 private const val SPOKEN_SEPARATOR = ", "
 
 /**
+ * What separates the facts inside a **visible** one-line summary on this tab.
+ *
+ * A middle dot with hair spaces, as the item rows' meta line already uses. Deliberately a
+ * different character from [SPOKEN_SEPARATOR] and deliberately not unified with it: this one is
+ * seen, that one is heard, and a screen reader either skips a middle dot or announces it as
+ * "middle dot".
+ *
+ * File-level since FR-16, because there are two builders of it now — the wallet's coin line and
+ * [InventorySectionState.summary] — and a tab that punctuated its two summaries differently would
+ * be the sort of drift nobody reports and everybody sees.
+ */
+private const val SUMMARY_SEPARATOR = " · "
+
+/**
  * `142.0` → `"142"`, `1.5` → `"1.5"`, `0.02` → `"0.02"`, `0.005` → `"0.01"`.
  *
  * **The one copy of this rule**, used for every weight and every price on the tab.
@@ -466,8 +480,100 @@ data class InventorySectionState(
     val containerName: String? = null,
     val weight: String = "0",
     val rows: List<InventoryRowState> = emptyList(),
+    /**
+     * Whether the player has shut this section (13 decisions 1–3).
+     *
+     * On the **section** rather than on [InventoryBlock.Items], because every consumer that asks
+     * whether a section is collapsed already has the section in its hand, and a flag one level
+     * out would make `block.collapsed` and `block.section` two things a call site has to keep
+     * together. `false` for a section built for the customize sheet, which does not draw rows and
+     * is deliberately untouched by FR-16 (decision 6) — see [toInventoryUiState].
+     */
+    val collapsed: Boolean = false,
 ) {
     val isEmpty: Boolean get() = rows.isEmpty()
+
+    /**
+     * How many **rows** the section holds — the "3 items" in *"Armor · 3 items · 41 lb"*
+     * (13 decision 5).
+     *
+     * Rows and not summed quantities, and the difference is the whole reason this is a property
+     * with a KDoc rather than a `.size` at the call site: a quiver of twenty arrows is *one*
+     * item on this list. Summing [InventoryRowState.quantity] would print "22 items" over a
+     * section a player can expand and count three of, and the number they can check is the one
+     * that has to be right. The weight beside it is already the summed figure, so nothing is
+     * lost — between them the header says how much there is to read and how much it costs to
+     * carry, which are the two questions a collapsed section has to answer.
+     */
+    val itemCount: Int get() = rows.size
+
+    /**
+     * The header's one-line summary — *"3 items · 41 lb"* (13 decision 5).
+     *
+     * ### Why the copy arrives as parameters
+     *
+     * [WalletUiState.spokenLabel]'s rule, applied to a visible string: "items" is a plural that a
+     * translator owns and "lb" is a unit that lives in `strings.xml`, while the *separator* and
+     * the *order* are this tab's own punctuation and belong beside the wallet's, which uses the
+     * same middle dot. So the pieces are resolved by the composable and joined here, which is
+     * also what lets a test assert the shape without a Compose runtime.
+     *
+     * ### Why it is printed while the section is open, too
+     *
+     * A judgment call, recorded because decision 5 states the requirement only for the collapsed
+     * case ("a collapsed section still informs"). Two things settle it towards *always*: the
+     * wallet — the control this generalizes — has shown its summary in both states since FR-11,
+     * and a header whose content changes on expand makes the row it lives in re-measure and jump
+     * under the player's finger at the exact moment they tapped it. The count is redundant with
+     * the rows below it when open, which is the same harmless redundancy the equip chip's
+     * checked state already carries (see [InventoryRowState]).
+     */
+    fun summary(countLabel: String, weightLabel: String): String =
+        listOf(countLabel, weightLabel).joinToString(SUMMARY_SEPARATOR)
+
+    /**
+     * What TalkBack says when it lands on this section's header — *"Armor, 3 items, 41 lb,
+     * collapsed, tap to expand"* (13 decisions 1 and 5).
+     *
+     * ### Why a built sentence, again
+     *
+     * [WalletUiState.spokenLabel]'s argument, and it applies harder here. The header is a
+     * **clickable**, so it merges its descendants into one accessibility node: a
+     * `contentDescription` naming only the action would *replace* the title, the count and the
+     * weight rather than adding to them, and a screen-reader user would be told a control exists
+     * over a section whose name they were never given. Every fact a sighted user reads off the
+     * row has to be in this string or it is not on the screen at all for them.
+     *
+     * ### The rule this holds, which is what the test pins
+     *
+     * **Five facts, in this order, none of them dropped** — what it is, how much is in it, what
+     * it weighs, whether it is open, and that it can be tapped. The last two are separate on
+     * purpose and neither is inferable from the other: the state word is the *fact* ("collapsed")
+     * and the action is the *offer* ("tap to expand"), which is the same verb-versus-state split
+     * [InventoryRowState.equipChipLabelRes] draws for the equip chip. A sentence carrying only
+     * the action leaves a user who tabs onto the header unable to tell whether the rows below it
+     * are hidden or simply absent.
+     *
+     * Nothing here names a resource; every fragment is copy resolved by the composable. A future
+     * edit that quietly drops the weight or the state word fails `InventoryUiStateTest` rather
+     * than going unnoticed until someone runs the app with TalkBack on.
+     *
+     * @param title the section's own name — a container's, or [InventorySectionKind.titleRes]
+     *   resolved. As written rather than uppercased, because a screen reader may spell an
+     *   all-caps word out letter by letter (see the composable).
+     * @param countLabel "3 items" — a plural, which is why it is not built from [itemCount] here.
+     * @param weightLabel "41 lb" — the unit is copy.
+     * @param stateLabel "collapsed" / "expanded".
+     * @param action "tap to expand" / "tap to collapse".
+     */
+    fun spokenLabel(
+        title: String,
+        countLabel: String,
+        weightLabel: String,
+        stateLabel: String,
+        action: String,
+    ): String =
+        listOf(title, countLabel, weightLabel, stateLabel, action).joinToString(SPOKEN_SEPARATOR)
 }
 
 /**
@@ -558,11 +664,6 @@ data class WalletUiState(
      */
     fun spokenLabel(title: String, emptyLabel: String, action: String): String =
         listOf(title, summary ?: emptyLabel, action).joinToString(SPOKEN_SEPARATOR)
-
-    private companion object {
-        /** A middle dot with hair spaces around it, as the item rows' meta line already uses. */
-        const val SUMMARY_SEPARATOR = " · "
-    }
 }
 
 /**
@@ -766,6 +867,25 @@ data class InventoryUiState(
  * else on the tab. Equipped and Gear cannot be hidden at all; see
  * [InventoryLayoutKeys.isHideable] for both reasons.
  *
+ * ### Collapse, and the invariant it has to compose with (13 decision 4)
+ *
+ * Collapsing is **orthogonal** to hiding and is applied strictly after it. Hiding decides *which
+ * sections render*; collapsing decides *whether a rendered section shows its rows*. Nothing
+ * below branches on the two together, and that is the implementation of decision 4 rather than
+ * an accident: the `hidden` filter runs once, over `resolved`, and the `collapsed` flag is
+ * stamped onto whatever survives it.
+ *
+ * What that buys is the extended invariant — **every item is at most two taps away**. Hiding
+ * cannot lose an item because a hidden section's rows are added to Gear (the `foldedIntoGear`
+ * block below, which has no branch that drops anything); collapsing cannot lose one because a
+ * collapsed section still *has* its rows and its header is one tap from showing them. Compose
+ * the two and every item is in exactly one rendered, un-hidden section, which is either open or
+ * one tap from open. `InventoryUiStateTest` pins the whole grid of hide × collapse combinations
+ * — item count unchanged, and every item in a section this state can name.
+ *
+ * The wallet is not part of that grid and cannot be: its rows are coins, not items, and its
+ * collapse is not stored at all (see [InventoryLayoutKeys.persistsCollapse]).
+ *
  * ### What the fold does to the weights
  *
  * A folded container's contents are summed into **Gear's** header, and the container's own shell
@@ -925,7 +1045,14 @@ fun toInventoryUiState(
         if (entry.key == InventoryLayoutKeys.WALLET) {
             InventoryBlock.Wallet
         } else {
-            sectionFor(entry.key)?.let(InventoryBlock::Items)
+            // 13 decision 4: collapse is orthogonal to hide and is applied *after* it — the
+            // filter above has already decided what renders, and this decides how much of it.
+            // Stamped here rather than inside `sectionFor` so the customize sheet's copy of the
+            // same section is untouched (decision 6: the sheet manages order and hide, and
+            // collapse is an in-place gesture on the tab).
+            sectionFor(entry.key)
+                ?.copy(collapsed = entry.collapsed)
+                ?.let(InventoryBlock::Items)
         }
     }
 
@@ -941,6 +1068,9 @@ fun toInventoryUiState(
                 summary = walletUi.summary,
                 hidden = entry.hidden,
                 canHide = InventoryLayoutKeys.isHideable(entry.key),
+                // Carried, never drawn — see [InventoryCustomizeRow.collapsed] for why the
+                // sheet's state has to hold a flag the sheet must not render.
+                collapsed = entry.collapsed,
             )
         } else {
             sectionFor(entry.key)?.let { section ->
@@ -954,6 +1084,8 @@ fun toInventoryUiState(
                     weightLabel = section.weight,
                     hidden = entry.hidden,
                     canHide = InventoryLayoutKeys.isHideable(entry.key),
+                    // Carried, never drawn — see [InventoryCustomizeRow.collapsed].
+                    collapsed = entry.collapsed,
                 )
             }
         }

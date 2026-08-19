@@ -54,6 +54,25 @@ data class InventoryCustomizeRow(
      * onto the state so the sheet does not re-derive a guardrail and a test can read it.
      */
     val canHide: Boolean = true,
+    /**
+     * Whether the section is collapsed on the tab (13 decision 3).
+     *
+     * **Carried and deliberately never drawn.** 13 decision 6 keeps the sheet unchanged: collapse
+     * is an in-place gesture on the section itself, not a third control in a list whose job is
+     * order and grouping. So why is it here at all?
+     *
+     * Because [InventoryCustomizeState.resolved] is the *arrangement* every
+     * [InventoryLayoutPlan] gesture is computed against, and the plan persists the **whole**
+     * arrangement on every gesture. A row that dropped this flag would make `resolved` a lossy
+     * copy of what is stored, and `persist` — which lets the edited entries win over the stored
+     * ones — would then quietly re-open every collapsed section the first time the player moved
+     * an unrelated one. That failure is silent and total, which is the same shape the class KDoc
+     * on [InventoryLayoutPlan] describes for a forgotten container.
+     *
+     * The field's name is therefore doing two jobs: it is what the sheet must not render, and it
+     * is what the sheet's state must not lose.
+     */
+    val collapsed: Boolean = false,
 )
 
 data class InventoryCustomizeState(
@@ -81,5 +100,5 @@ data class InventoryCustomizeState(
      * failure mode — a move computed against yesterday's order — is silent.
      */
     val resolved: List<InventoryLayoutEntry>
-        get() = rows.map { InventoryLayoutEntry(it.key, it.hidden) }
+        get() = rows.map { InventoryLayoutEntry(it.key, it.hidden, it.collapsed) }
 }

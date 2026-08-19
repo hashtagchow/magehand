@@ -266,6 +266,25 @@ data class LocalTrackerRow(
      * the local equip has a complete undo where the server's has an honest partial one.
      */
     val equipped: Boolean = false,
+    /**
+     * What the item **is** (docs/design/13-collapsible-sections-local-gear.md decisions 8–10).
+     *
+     * The local stand-in for a server sheet's tag taxonomy, and the field that finally gives
+     * `LocalInventoryBoard` an input for 11 decision 1's rule — see [CatalogCategory] for why
+     * it is a constant rather than a list of tags, and `LocalInventoryBoard` for the rule it
+     * feeds.
+     *
+     * Meaningless on a slot or a resource, and the form does not offer it there — the same
+     * arrangement [weightLb] already has, and for the same reason stated on it: one unused
+     * field on a shared row type is cheaper than a second row type, and every consumer already
+     * switches on [kind].
+     *
+     * Defaulted to gear so that every row that predates the v5 column — and every fixture built
+     * before this field existed — reads as the "never collected" it actually is. Decision 11's
+     * upgrade honesty is *not* carried by this default alone: an equipped row stays equippable
+     * through the `equipped` disjunct, and an unequipped one through 11 decision 2's override.
+     */
+    val category: CatalogCategory = CatalogCategory.GEAR,
 )
 
 /** The row as the shared tracker renders it. */

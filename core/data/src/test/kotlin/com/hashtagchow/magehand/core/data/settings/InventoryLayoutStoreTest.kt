@@ -145,6 +145,159 @@ class InventoryLayoutStoreTest {
         )
     }
 
+    // --- FR-16: the collapse mark (13 decision 3) ---------------------------------
+
+    private val withCollapse = listOf(
+        InventoryLayoutEntry("equipped"),
+        InventoryLayoutEntry("weapons", hidden = true),
+        InventoryLayoutEntry("armor", collapsed = true),
+        InventoryLayoutEntry("container:cont1", hidden = true, collapsed = true),
+        InventoryLayoutEntry("gear"),
+    )
+
+    @Test
+    fun `a collapse survives a restart of the store, exactly as a fold does`() {
+        // The claim decision 3 makes and the reason collapse is stored at all: "I never look at
+        // Armor" is a durable fact about a character. A `rememberSaveable` cannot survive a
+        // force-stop, so this has to be the shape that proves it — two store instances over one
+        // file, with the codec in between.
+        val file = prefsFile()
+
+        withStore(file) { it.setLayout(key, withCollapse) }
+
+        assertEquals(withCollapse, withStore(file) { it.layout(key).first() })
+    }
+
+    @Test
+    fun `the stored form gains a caret, and emits the two marks in one canonical order`() {
+        // A **file format**, pinned for the reason the hidden mark already is. `^` before `!`
+        // on the way out so two writers cannot produce two strings for one arrangement; the way
+        // back in accepts either (below), which is what makes this a choice rather than a rule.
+        assertEquals(
+            "equipped,!weapons,^armor,^!container:cont1,gear",
+            InventoryLayoutCodec.encode(withCollapse),
+        )
+        assertEquals(
+            withCollapse,
+            InventoryLayoutCodec.decode("equipped,!weapons,^armor,^!container:cont1,gear"),
+        )
+    }
+
+    @Test
+    fun `the two marks decode in either order, because two booleans have no sequence`() {
+        val both = InventoryLayoutEntry("armor", hidden = true, collapsed = true)
+
+        assertEquals(listOf(both), InventoryLayoutCodec.decode("^!armor"))
+        assertEquals(listOf(both), InventoryLayoutCodec.decode("!^armor"))
+        // Repetition is not a third state either — the marks are read as a set.
+        assertEquals(listOf(both), InventoryLayoutCodec.decode("!^^!armor"))
+    }
+
+    @Test
+    fun `an unknown prefix is dropped and the section is kept`() {
+        // Forward compatibility: a 1.6.0 build meeting some later release's mark keeps the
+        // section rather than losing it — or, worse, ordering the tab by a key nobody can match.
+        //
+        // Note which direction this is. 1.5.0 did **not** do this with `^`: its decoder was
+        // `startsWith('!')` / `removePrefix('!')`, so it would read `^armor` as the key `^armor`
+        // and drop Armor out of the stored order. What makes 13 decision 3's "no schema change"
+        // true is that no install is ever handed a newer build's file — `allowBackup="false"`,
+        // and a downgrade requires an uninstall, which clears DataStore. See the codec's KDoc.
+        assertEquals(
+            listOf(
+                InventoryLayoutEntry("armor"),
+                InventoryLayoutEntry("gear", collapsed = true),
+            ),
+            InventoryLayoutCodec.decode("~armor,~^gear"),
+        )
+    }
+
+    /**
+     * L5: `encode(decode(x))` is **canonical**, over every permutation of the two marks.
+     *
+     * The codec's KDoc claims two things that only hold together: that `^!armor` and `!^armor`
+     * mean the same arrangement, and that [InventoryLayoutCodec.encode] emits one canonical
+     * string for it. Either claim alone is testable by inspection; the property that matters is
+     * the composition — feed the codec *any* spelling of a state and it comes back in the one
+     * spelling every writer agrees on, which is what makes "two writers cannot produce two
+     * strings for one arrangement" true rather than aspirational.
+     *
+     * Stated as `encode(decode(x)) == encode(decode(encode(decode(x))))` would be weaker: that
+     * holds for a codec that canonicalises to the *wrong* order. So the expected string is
+     * written out, and the input set includes the review's own example, `!^armor` → `^!armor`.
+     */
+    @Test
+    fun `encode of decode is canonical, whatever spelling it was given`() {
+        val canonical = mapOf(
+            "armor" to "armor",
+            "!armor" to "!armor",
+            "^armor" to "^armor",
+            "^!armor" to "^!armor",
+            // The permutation the 1.6.0 review named: written the other way round, read as the
+            // same two booleans, re-emitted in the one order `encode` promises.
+            "!^armor" to "^!armor",
+            "!^^!armor" to "^!armor",
+            "^container:abc123" to "^container:abc123",
+            "!^container:abc123" to "^!container:abc123",
+            // Whole arrangements, including the mixed one the format's own KDoc uses as its
+            // example, and a duplicate key that `distinctBy` collapses to its first mention.
+            "wallet,equipped,!weapons,^armor,^!container:abc,gear" to
+                "wallet,equipped,!weapons,^armor,^!container:abc,gear",
+            "wallet,equipped,!weapons,^armor,!^container:abc,gear" to
+                "wallet,equipped,!weapons,^armor,^!container:abc,gear",
+            "!^gear,^!gear" to "^!gear",
+            // Blank segments are dropped rather than encoded as empty tokens.
+            "gear,,^armor," to "gear,^armor",
+        )
+
+        canonical.forEach { (input, expected) ->
+            val once = InventoryLayoutCodec.encode(InventoryLayoutCodec.decode(input))
+            assertEquals("'$input' must canonicalise", expected, once)
+            // …and it is a fixed point: running it again changes nothing, which is what makes a
+            // re-save of an untouched arrangement a byte-identical write.
+            assertEquals(
+                "'$input' must be stable under a second round trip",
+                once,
+                InventoryLayoutCodec.encode(InventoryLayoutCodec.decode(once)),
+            )
+        }
+    }
+
+    /**
+     * The other direction of the same property: `decode(encode(x))` returns `x`.
+     *
+     * Over all four flag combinations on a key of each shape the format carries. This is the one
+     * a lossy `encode` would fail — dropping `collapsed` when `hidden` is also set, say, which
+     * every assertion written in terms of a literal string would still pass.
+     */
+    @Test
+    fun `decode of encode returns the same entries, for every flag combination`() {
+        listOf("wallet", "equipped", "weapons", "armor", "gear", "container:abc123").forEach { key ->
+            listOf(false, true).forEach { hidden ->
+                listOf(false, true).forEach { collapsed ->
+                    val entry = InventoryLayoutEntry(key, hidden = hidden, collapsed = collapsed)
+                    assertEquals(
+                        "$key hidden=$hidden collapsed=$collapsed",
+                        listOf(entry),
+                        InventoryLayoutCodec.decode(InventoryLayoutCodec.encode(listOf(entry))),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a container key survives the prefix scan, colon and all`() {
+        // The prefix run is defined as "everything before the first alphanumeric", which is
+        // what lets it absorb an unknown mark. A container key contains a `:` — in the middle,
+        // never at the front — so this is the case that would break if the scan were widened to
+        // "every non-key character" instead.
+        assertEquals(
+            listOf(InventoryLayoutEntry("container:abc123", collapsed = true)),
+            InventoryLayoutCodec.decode("^container:abc123"),
+        )
+    }
+
     // --- per-character isolation --------------------------------------------------
 
     @Test

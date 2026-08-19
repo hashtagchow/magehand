@@ -1,6 +1,81 @@
 package com.hashtagchow.magehand.core.model
 
 /**
+ * What kind of thing an item **is**, as this app is willing to state it
+ * (docs/design/13-collapsible-sections-local-gear.md decision 7).
+ *
+ * ### Why a constant and not a tag list
+ *
+ * A DiceCloud sheet answers "is this a weapon?" with a free-text tag taxonomy, and
+ * `InventoryEngine` reads it (11 decision 1). A **local** character has no taxonomy at all —
+ * 09's form captures no tags and `LocalTrackerRow` stores none — so FR-10b collects the answer
+ * directly instead of collecting the evidence for it. Three values rather than a `List<String>`
+ * because that is exactly what the local rule needs and nothing more: reproducing the tag
+ * indirection over a table this app owns outright would be modelling DiceCloud's limitation
+ * rather than the item, which is the argument [CoinPurse] already makes about currency.
+ *
+ * The three values are chosen to line up with [EquipGroup] one-for-one (see [equipGroup]), so a
+ * catalog weapon and a server-discovered weapon land in the same section and mean the same
+ * thing — decision 7's requirement, expressed as a total function rather than as a convention.
+ *
+ * ### Why [GEAR] is the default everywhere
+ *
+ * Because it is the reading of *"nobody said"* that costs the player nothing. Decision 10's
+ * local rule is `category != GEAR || equipped || override`, so a row that defaults to gear keeps
+ * its equip control whenever it is equipped and can always get one back through 11 decision 2's
+ * override. Defaulting to [WEAPON] or [ARMOR] would be this app inventing a claim about an item
+ * it was never told anything about.
+ */
+enum class CatalogCategory {
+    WEAPON,
+    ARMOR,
+    GEAR,
+    ;
+
+    /** Which Carried subsection an item of this category lands in (11 decision 3). */
+    val equipGroup: EquipGroup
+        get() = when (this) {
+            WEAPON -> EquipGroup.WEAPON
+            ARMOR -> EquipGroup.ARMOR
+            GEAR -> EquipGroup.GEAR
+        }
+
+    /**
+     * What `local_tracker_rows.category` holds.
+     *
+     * Spelled out rather than `name.lowercase()`, for [LocalRowKind.storedValue]'s reason and
+     * `InventoryLayoutKeys`' at greater length: the moment a value is **written to disk**,
+     * renaming the enum constant stops being an ordinary refactor and becomes a silent
+     * re-classification of every row already stored. The persisted vocabulary is written here,
+     * once, and the constant's name is free to change without it.
+     */
+    val storedValue: String
+        get() = when (this) {
+            WEAPON -> "weapon"
+            ARMOR -> "armor"
+            GEAR -> "gear"
+        }
+
+    companion object {
+        /** Decision 8's column default, and the reading of "never collected". See the KDoc. */
+        val DEFAULT: CatalogCategory = GEAR
+
+        /**
+         * The stored value's category, or [DEFAULT] for anything this build does not know.
+         *
+         * **Not nullable**, which is the deliberate difference from [LocalRowKind.fromStored]:
+         * an unrecognised `kind` means a row this app cannot render at all, so dropping it is
+         * the honest answer. An unrecognised `category` — from a downgrade after some future
+         * release added a fourth — describes a row that renders perfectly well; refusing it
+         * would delete a player's item to protect a classification. Gear is the same "nobody
+         * usable said anything" reading the column default carries.
+         */
+        fun fromStored(value: String?): CatalogCategory =
+            entries.firstOrNull { it.storedValue == value } ?: DEFAULT
+    }
+}
+
+/**
  * One entry in the built-in add-item catalog (docs/design/10-inventory.md decision 6).
  *
  * A *template*, not an item: it has no `_id`, no quantity of its own beyond a sensible
@@ -24,6 +99,21 @@ data class CatalogItem(
     val valueGp: Double,
     /** Written onto the created item so the sheet can group and filter it as usual. */
     val tags: List<String>,
+    /**
+     * What this entry **is** (13 decision 7) — carried onto a local row, which has no [tags]
+     * to be classified by.
+     *
+     * No default, deliberately. Every entry states its own category at the point it is written,
+     * so adding a longsword to this list is a line that cannot compile without answering the
+     * question — which is the one moment a reader has the SRD's own statistics in front of them.
+     * A defaulted `GEAR` would let a weapon join the catalog silently mis-filed, and the defect
+     * would surface as "the equip chip is missing on my new sword", months later.
+     *
+     * It must agree with [tags] under 11 decision 1's taxonomy — `ItemCatalogCategoryTest` pins
+     * that against `InventoryEngine`'s own tag sets, so a catalog entry and a server-discovered
+     * item cannot disagree about what the same object is.
+     */
+    val category: CatalogCategory,
     /** One line. The picker shows it under the name; the created item carries it. */
     val description: String,
     /**
@@ -81,6 +171,29 @@ data class CatalogItem(
  * DiceCloud's own `value` field both use: 1 sp = 0.1 gp, 1 cp = 0.01 gp. Weights the SRD
  * leaves as "—" are `0.0` — the SRD's own claim that the item is too light to track, not a
  * missing measurement (contrast [InventoryItem.weightLb], where `null` means "unknown").
+ *
+ * ### Every entry is [CatalogCategory.GEAR] today, and that is the honest answer
+ *
+ * 13 decision 7 asks for every entry to carry a category, classified *by the same tag-set 11
+ * decision 1 uses*. Applying that rule to this list returns **gear for all thirty-five entries**,
+ * because this list is the SRD's *Adventuring Gear* table and nothing else: it has never carried
+ * a weapon or a suit of armor, and the two entries that come closest do not survive contact with
+ * the rule either — ammunition (`arrows`, `crossbow-bolts`) is what a weapon consumes rather
+ * than a weapon, and the flask of oil is an improvised thrown object, which is a *use* of an
+ * item and not a class of one.
+ *
+ * That is worth writing down rather than leaving as a coincidence a reader has to re-derive,
+ * because it makes the category look like dead weight when it is not:
+ *
+ *  - It is the **capture point** decision 9 names. `NewItemSpec.of` carries it onto the created
+ *    row, so the moment this list gains a longsword the local board classifies it correctly with
+ *    no further change anywhere.
+ *  - [CatalogItem.category] has **no default** precisely so that moment cannot pass unnoticed.
+ *  - `ItemCatalogCategoryTest` asserts the agreement in both directions — including that the
+ *    catalog carries no weapon or armor *tag* today, so a future entry that adds one and leaves
+ *    the category at gear fails a test rather than shipping mis-filed.
+ *
+ * Nothing here should be re-categorised to make the field look busier. A tinderbox is gear.
  */
 object ItemCatalog {
 
@@ -141,6 +254,11 @@ object ItemCatalog {
             // Not `mundane`: this is the one magic item in the list, and a sheet that filters
             // its inventory by tag should see it filed where it belongs.
             tags = listOf("potion", "magic", "common"),
+            // Gear like the rest, and worth stating because it is the one entry that had to be
+            // decided rather than inherited from [gear]: a potion is drunk, not worn or wielded,
+            // and 11 decision 1's taxonomy does not name it either. See the object KDoc's
+            // "Every entry is GEAR today" section.
+            category = CatalogCategory.GEAR,
             description = "Drink as an action to regain 2d4 + 2 hit points.",
         ),
     ).sortedBy { it.name.lowercase() }
@@ -162,6 +280,10 @@ object ItemCatalog {
         weightLb = weightLb,
         valueGp = valueGp,
         tags = listOfNotNull(TAG_ADVENTURING_GEAR, TAG_MUNDANE, extraTag),
+        // The helper's own name is the claim: everything it builds carries `adventuring gear`,
+        // so a weapon or a suit of armor cannot be created through it and must use the full
+        // constructor — which has no category default. See the object KDoc.
+        category = CatalogCategory.GEAR,
         description = description,
         defaultQuantity = defaultQuantity,
     )

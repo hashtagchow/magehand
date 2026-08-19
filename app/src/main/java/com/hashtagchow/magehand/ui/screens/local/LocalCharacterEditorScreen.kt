@@ -46,9 +46,11 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.components.CategoryChooser
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.core.data.local.LocalCharacterForm
 import com.hashtagchow.magehand.core.model.Ability
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.ResetRule
 
@@ -251,6 +253,7 @@ fun LocalCharacterEditorScreen(
                     onLabel = { viewModel.setRowLabel(index, it) },
                     onTotal = { viewModel.setRowTotal(index, it) },
                     onReset = { viewModel.setRowReset(index, it) },
+                    onCategory = { viewModel.setRowCategory(index, it) },
                     onRemove = { viewModel.removeRow(index) },
                 )
             }
@@ -309,9 +312,9 @@ fun LocalCharacterEditorScreen(
  * One tracker row's editor (09 decision 4's three kinds).
  *
  * The kind chips are first because they change what the rest of the card means: a slot has a
- * total, an item has a quantity, and only a resource has a reset rule. Rendering the reset
- * chips for the other two would be offering a control whose value is discarded on save (see
- * [LocalRowFormState.toRowForm]).
+ * total, an item has a quantity, only a resource has a reset rule, and only an item has a
+ * category. Rendering either of the last two for the wrong kind would be offering a control
+ * whose value is discarded on save (see [LocalRowFormState.toRowForm]).
  */
 @Composable
 private fun RowEditor(
@@ -323,6 +326,7 @@ private fun RowEditor(
     onLabel: (String) -> Unit,
     onTotal: (String) -> Unit,
     onReset: (ResetRule?) -> Unit,
+    onCategory: (CatalogCategory) -> Unit,
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -399,6 +403,21 @@ private fun RowEditor(
                         )
                     }
                 }
+            }
+
+            // FR-10b (13 decision 9's third capture point). Items only, for the reset chips'
+            // reason exactly: a spell slot is not a weapon, and a control whose value the save
+            // discards is a control that lies about what it does.
+            //
+            // This is the *only* way an existing local item's category can be corrected — the
+            // add form asks once, and the editor is where a player goes back to a row. That is
+            // the same "the form is the editor" arrangement 09 decision 4 sets up.
+            if (row.kind == LocalRowKind.ITEM) {
+                CategoryChooser(
+                    category = row.category,
+                    onCategory = onCategory,
+                    testTagPrefix = "local:row:$index:category",
+                )
             }
         }
     }

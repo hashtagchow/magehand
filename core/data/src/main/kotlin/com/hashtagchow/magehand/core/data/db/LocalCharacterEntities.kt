@@ -5,7 +5,9 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity.Companion.CATEGORY_GEAR
 import com.hashtagchow.magehand.core.model.AbilityScores
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CoinPurse
 import com.hashtagchow.magehand.core.model.LocalCharacter
 import com.hashtagchow.magehand.core.model.LocalRowKind
@@ -119,9 +121,45 @@ data class LocalTrackerRowEntity(
     val value: Double? = null,
     val description: String? = null,
     @ColumnInfo(defaultValue = "0") val equipped: Boolean = false,
+    /**
+     * The one column schema **version 5** adds
+     * (docs/design/13-collapsible-sections-local-gear.md decision 8).
+     *
+     * [CatalogCategory.storedValue] — `"weapon"` / `"armor"` / `"gear"`.
+     *
+     * `NOT NULL DEFAULT 'gear'`, with the same `defaultValue` discipline the v4 columns get and
+     * for the same reason (see the coin columns' KDoc): SQLite refuses `ADD COLUMN … NOT NULL`
+     * without a default, so the migrated column *will* carry one, and the entity has to declare
+     * it or a fresh install's `CREATE TABLE` would not — two schemas differing in a way that is
+     * invisible until it is not.
+     *
+     * **The default is a claim about data, not a convenience.** Every row that predates this
+     * column was collected by a build that asked no such question, and 13 decision 8 reads that
+     * as gear rather than as the all-equippable interim `LocalInventoryBoard` used to render.
+     * Nothing a player did becomes undone by it: an equipped row keeps its control through the
+     * rule's `equipped` disjunct, and any other row can be rescued by 11 decision 2's override —
+     * which is exactly what that override has existed for since 1.4.0.
+     *
+     * `NOT NULL` with an explicit `'gear'` rather than a nullable column, matching [resetRule]'s
+     * argument: there is no second meaning available for a null here, so allowing one would put
+     * "never collected" and "collected as nothing" on one absence.
+     */
+    @ColumnInfo(defaultValue = "'${CATEGORY_GEAR}'")
+    val category: String = CATEGORY_GEAR,
 ) {
     companion object {
         const val RESET_NONE: String = "none"
+
+        /**
+         * The v5 column's default, as a compile-time constant so the `@ColumnInfo` annotation
+         * and the Kotlin default cannot drift.
+         *
+         * Not `CatalogCategory.GEAR.storedValue`, much as that would be the tidier spelling: an
+         * annotation argument must be a compile-time constant, and a `when` on an enum is not
+         * one. `CatalogCategoryTest` asserts the two agree, which is the check that would
+         * otherwise be a comment nobody runs.
+         */
+        const val CATEGORY_GEAR: String = "gear"
     }
 }
 
@@ -188,6 +226,10 @@ fun LocalTrackerRowEntity.toDomain(): LocalTrackerRow? {
         valueGp = value,
         description = description,
         equipped = equipped,
+        // Never `null`, and never a dropped row: an unrecognised category from a future build
+        // reads as gear. See [CatalogCategory.fromStored] for why that differs from `kind`'s
+        // null-and-drop.
+        category = CatalogCategory.fromStored(category),
     )
 }
 
@@ -204,4 +246,5 @@ fun LocalTrackerRow.toEntity(): LocalTrackerRowEntity = LocalTrackerRowEntity(
     value = valueGp,
     description = description,
     equipped = equipped,
+    category = category.storedValue,
 )

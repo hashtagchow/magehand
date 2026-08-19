@@ -615,4 +615,265 @@ class InventoryLayoutTest {
         assertTrue(state.customize.hasHiddenRows)
         assertFalse(map().customize.hasHiddenRows)
     }
+
+    // --- FR-16: collapse (13 decisions 2, 3, 4 and 6) ----------------------------
+
+    private fun collapse(vararg keys: String) =
+        keys.map { InventoryLayoutEntry(it, collapsed = true) }
+
+    /** Every section the tab is drawing a header for, and whether its rows are showing. */
+    private fun InventoryUiState.openSections(): Map<String, Boolean> =
+        blocks.filterIsInstance<InventoryBlock.Items>()
+            .associate { it.section.key to !it.section.collapsed }
+
+    @Test
+    fun `every section starts expanded, which is decision 2's default`() {
+        // Stated as *absence*: nothing is stored, so nothing is collapsed. A player opening
+        // Inventory wants to see items, not six closed headers.
+        assertTrue(map().openSections().values.all { it })
+    }
+
+    @Test
+    fun `a collapsed section keeps its header and loses its rows`() {
+        val state = map(layout = collapse("armor"))
+
+        val armor = state.sections.single { it.key == "armor" }
+        assertTrue("the header must stay, or this is a hide", armor.collapsed)
+        // The rows are still *on the section* — the composable is what stops drawing them —
+        // because a collapsed section still has to say how many things are in it.
+        assertEquals(listOf("a1"), armor.rows.map { it.propertyId })
+        assertEquals(1, armor.itemCount)
+    }
+
+    @Test
+    fun `collapsing is orthogonal to hiding — the folded rows land in whatever Gear is`() {
+        // Weapons folded into Gear, and Gear itself shut. Both facts hold at once, which is
+        // decision 4's "orthogonal" in one assertion.
+        val state = map(
+            layout = listOf(
+                InventoryLayoutEntry("weapons", hidden = true),
+                InventoryLayoutEntry("gear", collapsed = true),
+            ),
+        )
+
+        assertTrue(state.blocks.none { it.key == "weapons" })
+        val gear = state.sections.single { it.key == "gear" }
+        assertTrue(gear.collapsed)
+        assertTrue("the folded weapon is filed under Gear, shut or not", "w1" in gear.rows.map { it.propertyId })
+    }
+
+    @Test
+    fun `every hide by collapse combination leaves every item at most two taps away`() {
+        // 13 decision 4's extended invariant, asserted **exhaustively** over the same grid the
+        // hide test uses — 16 hide combinations × 16 collapse combinations = 256 states.
+        //
+        // "At most two taps" is not directly assertable — taps are the composable's — so it is
+        // decomposed into the three properties the state has to hold for it to be true:
+        //
+        //   1. **Nothing is lost.** Every item is still on the tab, under some section the tab
+        //      is drawing a header for. Hiding folds into Gear rather than removing, and
+        //      collapsing keeps the rows on the section.
+        //   2. **Nothing is duplicated.** An item in two sections would make the count come out
+        //      right while putting one object in two places — the exact failure the board's
+        //      precedence rule exists to prevent, re-checked after the fold has moved things.
+        //   3. **Every drawn section has rows.** A rendered section is one tap from showing its
+        //      contents *because its header is drawn and it has contents to show*. A header over
+        //      nothing would be a tap that opens onto an empty list, which is the shape a
+        //      collapsed-and-emptied section would take if the fold ever ran the wrong way round.
+        //   4. **Collapse landed where it was asked for.** The three properties above are all
+        //      true of an implementation that ignores the collapse flag entirely — the grid
+        //      would sweep 256 states and pass on the 16 that matter, which is what the 1.6.0
+        //      review caught. So the collapsed set is asserted outright: exactly the sections
+        //      that were asked to shut and are still drawn are shut, and nothing else is.
+        //      A folded section is not in it because it draws no header at all.
+        val hideable = listOf("weapons", "armor", CONT1, CONT2)
+        val collapsible = listOf("equipped", "weapons", "armor", "gear")
+
+        (0 until (1 shl hideable.size)).forEach { hideMask ->
+            val folded = hideable.filterIndexed { index, _ -> (hideMask shr index) and 1 == 1 }
+            (0 until (1 shl collapsible.size)).forEach { collapseMask ->
+                val shut = collapsible.filterIndexed { index, _ -> (collapseMask shr index) and 1 == 1 }
+                val layout = (folded.toSet() + shut.toSet()).map { key ->
+                    InventoryLayoutEntry(key, hidden = key in folded, collapsed = key in shut)
+                }
+                val state = map(layout = layout)
+                val where = "hidden=$folded collapsed=$shut"
+
+                val drawn = state.blocks.filterIsInstance<InventoryBlock.Items>().map { it.section }
+                val placements = drawn.flatMap { section -> section.rows.map { it.propertyId } }
+
+                assertEquals("$where lost or invented an item", EVERY_ITEM, placements.toSet())
+                assertEquals("$where filed an item in two sections", EVERY_ITEM.size, placements.size)
+                // The collapse dimension itself. Every section the fixture can draw is non-empty
+                // and therefore drawn unless it was folded, so the expected set is exactly "shut
+                // minus folded" — no intersection with what happened to render, which would let
+                // a dropped section satisfy this vacuously.
+                assertEquals(
+                    "$where: the drawn sections that are shut are not the ones that were asked to be",
+                    shut.toSet() - folded.toSet(),
+                    drawn.filter { it.collapsed }.map { it.key }.toSet(),
+                )
+                drawn.forEach { section ->
+                    assertFalse(
+                        "$where: ${section.key} draws a header over nothing",
+                        section.isEmpty,
+                    )
+                    assertEquals(section.rows.size, section.itemCount)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `collapse survives a move, which is what makes the whole arrangement one value`() {
+        // The regression this exists for: every gesture persists the *whole* arrangement, so a
+        // move computed against a lossy copy of it would silently re-open every shut section.
+        val stored = listOf(
+            InventoryLayoutEntry("wallet"),
+            InventoryLayoutEntry("equipped"),
+            InventoryLayoutEntry("weapons", collapsed = true),
+            InventoryLayoutEntry("armor", collapsed = true),
+            InventoryLayoutEntry(CONT1),
+            InventoryLayoutEntry(CONT2),
+            InventoryLayoutEntry("gear"),
+        )
+        val resolved = map(layout = stored).customize.resolved
+
+        val next = InventoryLayoutPlan.move(resolved, stored, "equipped", +1)
+
+        assertEquals(
+            listOf("weapons", "armor"),
+            next.filter { it.collapsed }.map { it.key },
+        )
+    }
+
+    @Test
+    fun `setCollapsed shuts one section and leaves the rest of the arrangement alone`() {
+        val stored = emptyList<InventoryLayoutEntry>()
+        val resolved = map().customize.resolved
+
+        val next = InventoryLayoutPlan.setCollapsed(resolved, stored, "armor", collapsed = true)
+
+        assertEquals(DEFAULT_ORDER, next.map { it.key })
+        assertEquals(listOf("armor"), next.filter { it.collapsed }.map { it.key })
+        assertTrue("collapse must not fold anything", next.none { it.hidden })
+    }
+
+    @Test
+    fun `collapsing what is already collapsed is not a write`() {
+        val stored = collapse("armor")
+        val resolved = map(layout = stored).customize.resolved
+
+        assertTrue(InventoryLayoutPlan.setCollapsed(resolved, stored, "armor", true).isEmpty())
+        assertTrue(
+            "and neither is opening what is already open",
+            InventoryLayoutPlan.setCollapsed(resolved, stored, "weapons", false).isEmpty(),
+        )
+        assertTrue(
+            "nor is collapsing a section this board does not have",
+            InventoryLayoutPlan.setCollapsed(resolved, stored, "container:gone", true).isEmpty(),
+        )
+    }
+
+    /**
+     * L5: every key this object can mint **starts with a letter or a digit**.
+     *
+     * The codec's whole forward-compatibility story rests on it. `InventoryLayoutCodec.decode`
+     * defines the prefix run *negatively* — "everything before the first alphanumeric" — which is
+     * the only definition that can absorb a mark this build has never heard of. That definition
+     * is safe exactly while no key begins with a non-alphanumeric character; a key spelled
+     * `_gear` or `:gear` would have its first characters eaten as marks and would decode to a
+     * different section, silently, on a file already on players' devices.
+     *
+     * The constants live here and the scan lives in `:core:data`, so neither module can state
+     * this on its own — the same "it is a statement about the pair" argument
+     * `ItemCatalogCategoryTest`'s KDoc makes. Asserted by **reflection** over the object rather
+     * than as a list of five names, so a sixth constant added tomorrow is covered without anyone
+     * remembering to add it here.
+     */
+    @Test
+    fun `every layout key starts alphanumeric, which is what the prefix scan depends on`() {
+        val constants = InventoryLayoutKeys::class.java.declaredFields
+            .filter { it.type == String::class.java }
+            .onEach { it.isAccessible = true }
+            .associate { it.name to it.get(InventoryLayoutKeys) as String }
+
+        assertTrue("reflection found no key constants at all", constants.size >= 5)
+        // Sanity: the five section names are among them, so a refactor that moved them out
+        // would fail here rather than make this test vacuous.
+        assertTrue(
+            constants.values.containsAll(listOf("wallet", "equipped", "weapons", "armor", "gear")),
+        )
+
+        constants.forEach { (field, value) ->
+            assertTrue("$field is empty", value.isNotEmpty())
+            assertTrue(
+                "$field = '$value' must start with a letter or a digit — `decode` reads every " +
+                    "leading non-alphanumeric character as a mark and would eat it",
+                value.first().isLetterOrDigit(),
+            )
+        }
+
+        // And the one key that is *built* rather than declared. Its id comes from Meteor, whose
+        // alphabet is alphanumeric, but the prefix is ours and it is the half that leads.
+        assertTrue(InventoryLayoutKeys.CONTAINER_PREFIX.first().isLetterOrDigit())
+        assertTrue(InventoryLayoutKeys.container("abc123").first().isLetterOrDigit())
+        assertTrue(
+            "the colon must stay in the middle, never at the front",
+            InventoryLayoutKeys.container("abc123").indexOf(':') > 0,
+        )
+    }
+
+    @Test
+    fun `the wallet is the one section whose collapse is never stored`() {
+        // 13 decision 3's exception, enforced at the plan rather than only in the composable.
+        val resolved = map().customize.resolved
+        assertTrue(
+            InventoryLayoutPlan.setCollapsed(resolved, emptyList(), "wallet", true).isEmpty(),
+        )
+        assertFalse(InventoryLayoutKeys.persistsCollapse("wallet"))
+        // Everything else collapses and remembers it — including Equipped and Gear, which is
+        // the whole difference from `isHideable`.
+        listOf("equipped", "weapons", "armor", "gear", CONT1).forEach {
+            assertTrue(it, InventoryLayoutKeys.persistsCollapse(it))
+        }
+    }
+
+    @Test
+    fun `a stored collapse of the wallet reads as expanded rather than as a stuck purse`() {
+        // The read-side half of the same guardrail: a hand-edited or future-version preferences
+        // file cannot leave the wallet shut in a way the composable's rememberSaveable would
+        // then disagree with.
+        val resolved = InventoryLayoutPlan.resolve(
+            defaultKeys = DEFAULT_ORDER,
+            stored = collapse("wallet", "armor"),
+        )
+
+        assertFalse(resolved.single { it.key == "wallet" }.collapsed)
+        assertTrue(resolved.single { it.key == "armor" }.collapsed)
+    }
+
+    @Test
+    fun `Reset clears collapse along with the order, because it is one key`() {
+        // 13 decision 3's "Reset clears collapse too (it deletes the key)". The store's clear
+        // is pinned in `InventoryLayoutStoreTest`; this is the reading side of it — an empty
+        // arrangement is decision 2's default, every section open.
+        assertTrue(map(layout = emptyList()).openSections().values.all { it })
+    }
+
+    @Test
+    fun `the customize sheet carries collapse without showing it`() {
+        // 13 decision 6: the sheet manages order and hide. It must still *hold* the flag — see
+        // `InventoryCustomizeRow.collapsed` — because its `resolved` is what every plan edits.
+        val state = map(layout = collapse("armor"))
+
+        assertEquals(
+            listOf("armor"),
+            state.customize.rows.filter { it.collapsed }.map { it.key },
+        )
+        assertEquals(
+            state.customize.rows.map { it.collapsed },
+            state.customize.resolved.map { it.collapsed },
+        )
+    }
 }

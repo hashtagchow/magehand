@@ -1,6 +1,7 @@
 package com.hashtagchow.magehand.core.data.local
 
 import com.hashtagchow.magehand.core.model.Ability
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.EquipGroup
 import com.hashtagchow.magehand.core.model.InventoryBoard
@@ -37,25 +38,40 @@ import com.hashtagchow.magehand.core.model.WalletRow
  *   available number, and the server path chose it too, so the two agree by construction
  *   rather than by coincidence.
  *
- * ### Equippability: every local item is equippable, and that is not the rule being ignored
+ * ### Equippability: the same rule as the server's, with a category where the tags are
  *
- * 11 decision 1's rule reads a **tag taxonomy** — `simple weapon`, `medium armor`, `shield` —
- * and a local character has no tags at all. The form captures none, `LocalTrackerRow` stores
- * none, and 11 decision 2 forbids the schema change that would add them.
+ * 11 decision 1's rule is **equipped OR a tag naming a weapon or armor**, read off a sheet's tag
+ * taxonomy. A local character has no taxonomy — the form captures no tags and [LocalTrackerRow]
+ * stores none — so 13 decision 10 gives the rule the input it was missing instead of a
+ * substitute for it: [LocalTrackerRow.category], collected at the point the item is created
+ * (13 decision 9) and stored in `local_tracker_rows.category` (decision 8).
  *
- * So the rule's second disjunct has no *input* here, which is a different thing from having a
- * negative answer. Running it anyway would return `false` for every unequipped row and strip
- * the equip control from the whole of a local character's inventory — a control they have had
- * since FR-8 shipped, removed on the strength of data that was never collected. That is the
- * mirror image of the mistake 10 decision 9 avoids with the attunement chip: an absent field
- * is not a `false`, and this app does not answer questions its source never asked.
+ * The rule below is therefore the same shape, term for term:
  *
- * The honest reading is therefore "unclassified", and the honest rendering of unclassified is
- * the control the player already had — [InventoryItem.isEquippable] `= true` for every row,
- * [EquipGroup.GEAR] for every row, and a Carried section that does not subdivide because there
- * is nothing to subdivide it by. FR-10's own text puts the local half — a category on catalog
- * entries and an "equippable" switch on the custom form — in a later wave, and this is the
- * behaviour that leaves that wave something to improve rather than something to undo.
+ * | | server (`InventoryEngine`) | here |
+ * |---|---|---|
+ * | classification | `tags ∪ libraryTags` ∩ `EQUIPPABLE_TAGS` | `category != GEAR` |
+ * | rescue for what it cannot classify | `equipped` | `equipped` |
+ * | player's own correction | 11 decision 2's override, applied in the UI | the same override, the same place |
+ *
+ * — and [EquipGroup] comes from the same field, so a local Carried list subdivides into
+ * Weapons · Armor · Gear exactly as a server one does (11 decision 3).
+ *
+ * ### What this replaced, and why the interim was right at the time
+ *
+ * Until 1.6.0 every local item was [InventoryItem.isEquippable] `= true` and [EquipGroup.GEAR],
+ * on the argument that *the rule's second disjunct had no input, which is not the same as having
+ * a negative answer* — running it against absent data would have stripped the equip control from
+ * the whole of a local inventory on the strength of a question nobody had been asked. That was
+ * the correct reading of a table with no category column in it, and it is the mirror of the
+ * mistake 10 decision 9 avoids with the attunement chip.
+ *
+ * FR-10b collects the data, so the argument's premise is gone and the interim retires with it.
+ * What does **not** change is the honesty requirement it was protecting (13 decision 11): a row
+ * that predates the column reads as gear, and every such row is still either in Equipped with
+ * its unequip control (the `equipped` disjunct) or one override toggle away from the control it
+ * had. Nothing a player did before the upgrade becomes undoable by it, and
+ * `MageHandDatabaseMigrationTest` pins that through this board rather than through the column.
  *
  * ### The wallet
  *
@@ -132,11 +148,14 @@ object LocalInventoryBoard {
         attuned = null,
         containerId = null,
         sortOrder = sortIndex,
-        // 11 decision 1's rule is *stated in terms of a tag taxonomy this source does not
-        // have*, and running it anyway would answer "no" for every unequipped row — which is
-        // not the rule's answer, it is the absence of an input. See the class KDoc.
-        isEquippable = true,
-        equipGroup = EquipGroup.GEAR,
+        // 13 decision 10, and the whole of it: the same two disjuncts 11 decision 1 states,
+        // with the category standing where the tag test stands on the server path. The third
+        // disjunct — the player's per-item override — is applied one layer up in
+        // `InventoryRowState.showsEquipControl`, exactly as it is for a DiceCloud item, so it
+        // is deliberately absent here rather than duplicated. See the class KDoc.
+        isEquippable = category != CatalogCategory.GEAR || equipped,
+        // 11 decision 3's grouping, from the same field, so "what it is" is answered once.
+        equipGroup = category.equipGroup,
     )
 
     /** The stable id of one local wallet row. */

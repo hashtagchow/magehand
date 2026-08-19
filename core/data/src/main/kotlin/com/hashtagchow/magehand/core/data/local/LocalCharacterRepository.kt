@@ -9,6 +9,7 @@ import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.LocalCharacter
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.LocalTrackerRow
@@ -84,6 +85,10 @@ class LocalCharacterRepository(
                     label = row.label,
                     total = row.total,
                     reset = row.reset,
+                    // 13 decision 9: the editor's chooser opens on what the row already says,
+                    // so re-saving an untouched form is a no-op for the category rather than a
+                    // silent reset to gear.
+                    category = row.category,
                 )
             },
         )
@@ -108,9 +113,36 @@ class LocalCharacterRepository(
      * - **`currentHp`** — likewise clamped into the new `maxHp`. Lowering max HP below the
      *   current value and leaving the character above its own maximum would put the HP row in
      *   a state the tracker's own clamps say is impossible.
+     * - **A row's `weight`, `value`, `description` and `equipped`** — the four FR-8 inventory
+     *   columns (10 decision 10). The form has never had fields for them, and
+     *   [LocalCharacterDao.save] upserts **whole rows**, so building the entity from the form
+     *   alone wrote each one back at its Kotlin default: saving the editor after changing a
+     *   character's name silently stripped every item's weight, price, note and equipped state.
+     *   Found while wiring 13 decision 9's chooser through this same path; carried across from
+     *   the stored row rather than added to the form, because a value the player cannot see or
+     *   edit here is not a *form* field — it is state this screen has no business rewriting.
+     *   Pinned by `LocalCharacterRepositoryTest`.
+     *
+     * ### …and what does not survive **changing a row's kind**
+     *
+     * All four of them, plus `category`. Carrying them across was right for the case they were
+     * written for — the same item row, saved again after an unrelated edit — and wrong for the
+     * case where the player retyped a row from an item into a resource or a slot: a spell-slot
+     * row does not weigh 3 lb, is not priced at 15 gp, does not describe itself as a sword, and
+     * above all cannot be *equipped*. `category` already made this argument for itself — *"a slot
+     * that once was an item must not keep claiming to be a sword"* — and it is the same argument,
+     * so it now governs the same set of columns. The row keeps its id and its `current`; it drops
+     * every field that was a claim about an object. Found in the 1.6.0 review; pinned below.
+     *
+     * ### Rows the form drops take their overrides with them
      *
      * Rows the form no longer carries are deleted by [LocalCharacterDao.save]; the tracker
-     * rows and the character can never be half-saved.
+     * rows and the character can never be half-saved. What `ON DELETE CASCADE` cannot follow is
+     * the row's 11 decision 2 equippability override, which is a DataStore key rather than a
+     * row — so this path clears it by hand, exactly as [delete] does one level up. Row ids are
+     * UUIDs and never recur, so a key left behind here is unreachable **forever** rather than
+     * merely stale; `LocalOpenCharacter.removeItem` is the other half of the same reap. Found in
+     * the 1.6.0 review.
      *
      * ### An edit of a deleted character is [LocalSaveResult.Missing], not a create
      *
@@ -157,10 +189,14 @@ class LocalCharacterRepository(
         val rowEntities = form.rows.mapIndexed { index, row ->
             val rowId = row.id ?: newId()
             val previous = previousRows[rowId]
+            // Asked once, because five columns below turn on the same question: is this slot
+            // still an item? A row whose kind changed keeps its id and its `current`, and loses
+            // everything that was a claim about an object.
+            val isItem = row.kind == LocalRowKind.ITEM
             val current = when {
                 // An item's quantity *is* what the form typed — there is no separate
                 // "remaining" for it, so an edit sets it outright.
-                row.kind == LocalRowKind.ITEM -> row.total
+                isItem -> row.total
                 previous == null -> row.total
                 else -> previous.current.coerceIn(0, row.total)
             }
@@ -175,8 +211,32 @@ class LocalCharacterRepository(
                 // The form's order is the tracker's order — the one ordering mechanism
                 // (09 decision 8). Assigned from the list position so it is always dense.
                 sortIndex = index,
+                // The four inventory columns the form has never carried — see the "what
+                // survives an edit" section above. Taken from the stored row, not from the
+                // form, because there is no field on the form to take them from — but only
+                // while the row is still an item. Off an item they go, for `category`'s own
+                // reason: a row that stopped being a sword must not keep claiming to weigh
+                // 3 lb, cost 15 gp, describe itself as one, or be *worn*.
+                weight = previous?.weight?.takeIf { isItem },
+                value = previous?.value?.takeIf { isItem },
+                description = previous?.description?.takeIf { isItem },
+                equipped = isItem && (previous?.equipped ?: false),
+                // The one inventory column the form *does* carry (13 decision 9), so the form
+                // is authoritative for it — and forced back to gear off an item row, matching
+                // how `reset` is dropped off a resource. A slot that once was an item must not
+                // keep claiming to be a sword.
+                category = (if (isItem) row.category else CatalogCategory.GEAR).storedValue,
             )
         }
+
+        // The rows this save drops. `LocalCharacterDao.save` deletes them, and their
+        // equippability overrides have to go the same way — see the "rows the form drops" note
+        // above. Computed before the write and cleared before it, so a failure between the two
+        // leaves an override on a row that still exists (recoverable) rather than a key on a row
+        // that does not (unreachable forever).
+        val reaped = previousRows.keys - rowEntities.map { it.id }.toSet()
+        val overrideKey = EquippableOverrideStore.localKey(characterId)
+        reaped.forEach { equippableOverrideStore.setOverridden(overrideKey, it, overridden = false) }
 
         dao.save(entity, rowEntities)
         return LocalSaveResult.Saved(characterId)

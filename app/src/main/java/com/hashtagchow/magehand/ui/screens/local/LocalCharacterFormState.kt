@@ -8,6 +8,7 @@ import com.hashtagchow.magehand.core.data.local.LocalCharacterFormError
 import com.hashtagchow.magehand.core.data.local.LocalRowForm
 import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.AbilityScores
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.ResetRule
 
@@ -184,6 +185,11 @@ data class LocalRowFormState(
     val total: String = "1",
     /** `null` is "none". Only meaningful for [LocalRowKind.RESOURCE] — see [toRowForm]. */
     val reset: ResetRule? = null,
+    /**
+     * What the item is (FR-10b, 13 decision 9). Only meaningful for [LocalRowKind.ITEM] — see
+     * [toRowForm], which drops it for the other two exactly as it drops [reset].
+     */
+    val category: CatalogCategory = CatalogCategory.GEAR,
 ) {
     fun toRowForm(): LocalRowForm = LocalRowForm(
         id = id,
@@ -195,6 +201,11 @@ data class LocalRowFormState(
         // not lose the rule the player picked, while what gets saved is still only ever what
         // the kind allows.
         reset = reset.takeIf { kind == LocalRowKind.RESOURCE },
+        // The same shape for the same reason: a row switched to a slot and back keeps the
+        // category the player picked on screen, while a slot never saves one. The repository
+        // forces it back to gear as well — a rule enforced at the state *and* at the write, per
+        // this app's habit with anything that reaches the database.
+        category = if (kind == LocalRowKind.ITEM) category else CatalogCategory.GEAR,
     )
 
     /** The valid range for this row's number, so the field can cap what it accepts. */
@@ -207,6 +218,7 @@ data class LocalRowFormState(
             label = row.label,
             total = row.total.toString(),
             reset = row.reset,
+            category = row.category,
         )
 
         /** A freshly added row of [kind], with 09 decision 4's starting values. */

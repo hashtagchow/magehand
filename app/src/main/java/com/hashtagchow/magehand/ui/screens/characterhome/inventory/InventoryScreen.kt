@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -36,11 +37,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hashtagchow.magehand.R
@@ -91,6 +94,21 @@ data class InventoryActions(
      * carried root — see `InventoryMoveTargetState`.
      */
     val onMove: (propertyId: String, containerId: String?) -> Unit = { _, _ -> },
+
+    /**
+     * A section header was tapped: remember that this character wants it shut, or open
+     * (FR-16, docs/design/13-collapsible-sections-local-gear.md decisions 1 and 3).
+     *
+     * `collapsed` is the state being **requested**, as [onEquip]'s `equipped` is, and for a
+     * weaker version of the same reason: the ViewModel re-reads the stored arrangement before
+     * writing, so a tap that raced a re-sync writes against what is on disk rather than against
+     * a frame that may already be stale.
+     *
+     * The **Wallet never reaches this** — its chevron is wired to a `rememberSaveable` in
+     * [InventoryTab], which is decision 3's exception. `InventoryLayoutPlan.setCollapsed` refuses
+     * the key as well, so the exception holds even if a future caller forgets.
+     */
+    val onCollapse: (key: String, collapsed: Boolean) -> Unit = { _, _ -> },
 )
 
 /**
@@ -186,19 +204,24 @@ fun InventoryTab(
                         val section = block.section
                         item(key = "${section.key}-header") {
                             SectionHeader(
-                                title = section.containerName
-                                    ?: stringResource(section.kind.titleRes),
-                                weight = section.weight,
-                                testTag = "inventory:section:${section.key}",
+                                section = section,
+                                onToggle = {
+                                    actions.onCollapse(section.key, !section.collapsed)
+                                },
                             )
                         }
-                        items(section.rows, key = { "${section.key}-${it.propertyId}" }) { row ->
-                            InventoryRow(
-                                row = row,
-                                canWrite = state.canWrite,
-                                onEquip = actions.onEquip,
-                                onTap = actions.onRowTap,
-                            )
+                        // FR-16 (13 decision 1). The header stays and the rows go — which is the
+                        // whole difference from a *hidden* section, whose rows are still on the
+                        // tab under Gear. See `toInventoryUiState`'s collapse section.
+                        if (!section.collapsed) {
+                            items(section.rows, key = { "${section.key}-${it.propertyId}" }) { row ->
+                                InventoryRow(
+                                    row = row,
+                                    canWrite = state.canWrite,
+                                    onEquip = actions.onEquip,
+                                    onTap = actions.onRowTap,
+                                )
+                            }
                         }
                     }
                 }
@@ -312,24 +335,14 @@ private fun WalletHeader(
     )
     val spoken = wallet.spokenLabel(title = title, emptyLabel = emptyLabel, action = action)
 
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .clickable(onClick = onToggle)
-            .semantics(mergeDescendants = true) { contentDescription = spoken }
-            .testTag("inventory:section:wallet"),
-        verticalAlignment = Alignment.CenterVertically,
+    ExpanderRow(
+        expanded = expanded,
+        spoken = spoken,
+        onToggle = onToggle,
+        testTag = "inventory:section:${InventoryLayoutKeys.WALLET}",
+        modifier = modifier,
     ) {
-        Text(
-            // Uppercased for the eye only — the spoken sentence above uses the title as
-            // written, because a screen reader may spell an all-caps word out letter by letter.
-            text = title.uppercase(),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-        )
+        SectionTitle(title)
         Text(
             text = wallet.summary ?: emptyLabel,
             style = MaterialTheme.typography.labelMedium,
@@ -341,12 +354,87 @@ private fun WalletHeader(
                 .padding(start = 12.dp)
                 .testTag("inventory:wallet:summary"),
         )
-        Icon(
-            imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
+}
+
+/**
+ * The chrome every expander on this tab shares (FR-16, 13 decision 1): one 48 dp clickable row,
+ * one merged accessibility node carrying [spoken], and a chevron that points the way the tap
+ * goes.
+ *
+ * ### Why the chrome is shared and the headers are not
+ *
+ * Decision 1 asks for the wallet's affordance on every section — *"same chevron + tap-target
+ * chrome"* — and this is that, literally: the parts that must not drift are the touch target
+ * (04's large-targets rule), the `mergeDescendants` semantics that make a clickable row one node,
+ * and which direction the arrow points. Those are here, once.
+ *
+ * What is *not* shared is the middle. [WalletHeader] prints a coin line and no weight figure at
+ * all (10 decision 10: the coins count towards the top line and print no section figure), while
+ * [SectionHeader] prints a count and a weight. Folding both into one composable would have meant
+ * three nullable slots each used by exactly one caller — the shape `InventorySectionKind`'s KDoc
+ * already refuses for the wallet, arriving at the same answer one layer up. Two headers, one
+ * chrome, and the `content` slot is where they differ.
+ *
+ * @param spoken the whole sentence. **Not** an action fragment: a clickable merges its
+ *   descendants, so whatever is set here *replaces* everything inside [content] for a screen
+ *   reader rather than adding to it. See [WalletUiState.spokenLabel].
+ * @param content the row's middle, laid out in a `RowScope` — at least one child must take the
+ *   remaining width (`Modifier.weight(1f)`) or the chevron floats in against the title.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun ExpanderRow(
+    expanded: Boolean,
+    spoken: String,
+    onToggle: () -> Unit,
+    testTag: String,
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clickable(onClick = onToggle)
+            .semantics(mergeDescendants = true) { contentDescription = spoken }
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+        content = {
+            content()
+            Icon(
+                imageVector = if (expanded) {
+                    Icons.Filled.KeyboardArrowUp
+                } else {
+                    Icons.Filled.KeyboardArrowDown
+                },
+                // Silent: the merged node above already says "collapsed, tap to expand" in
+                // words, and a chevron that also announced itself would say it twice.
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+    )
+}
+
+/**
+ * A section's name as the eye reads it.
+ *
+ * Uppercased **here and not in the spoken sentence**, which is the point of it being its own
+ * composable: a screen reader may spell an all-caps word out letter by letter, so every
+ * `spokenLabel` on this tab is handed the title as written while the row draws it shouting.
+ */
+@Composable
+private fun SectionTitle(title: String, modifier: Modifier = Modifier) {
+    Text(
+        text = title.uppercase(),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        fontWeight = FontWeight.Bold,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
 }
 
 /**
@@ -528,47 +616,88 @@ private fun InventoryRow(
 }
 
 /**
- * A section heading, with its weight on the right.
+ * A section heading: its name, a summary of what is in it, and a chevron
+ * (FR-16, docs/design/13-collapsible-sections-local-gear.md decisions 1 and 5).
  *
- * The two numbers are not the same sum and that is argued on [toInventoryUiState]: a
- * container prints the **server's** rollup so it cannot disagree with DiceCloud's own UI,
- * while Equipped and the three Carried subsections print client sums so they cannot disagree
- * with the removed-filtered grand total above them. 11 decision 3 keeps every one of those
- * weights — three smaller sections rather than one Carried figure, and each still says what
- * its own rows come to.
+ * ### What changed, and what did not
  *
- * [weight] is non-null because **every** section rendered through here has one. The wallet is
- * the deliberate exception (10 decision 10: the coins count towards the top line but print no
- * section figure of their own), and it does not come through here at all — see [WalletHeader],
- * which is a different control with a summary and a chevron.
+ * This used to be a plain label with a weight on the right. FR-16 makes it an **expander** — the
+ * wallet's affordance, generalized to every section, per the standing convention in 00-DESIGN.md
+ * that sectioned surfaces are collapsible. What did not change is the weight itself, which is
+ * still the two different sums argued on [toInventoryUiState]: a container prints the **server's**
+ * rollup so it cannot disagree with DiceCloud's own UI, while Equipped and the three Carried
+ * subsections print client sums so they cannot disagree with the removed-filtered grand total
+ * above them.
+ *
+ * Every section drawn through here has a weight; the wallet is the deliberate exception
+ * (10 decision 10) and has its own header. What the two share is [ExpanderRow] — see there.
+ *
+ * ### The spoken sentence
+ *
+ * Built by [InventorySectionState.spokenLabel] from five resolved fragments, because the row is a
+ * clickable and a clickable merges its descendants into **one** accessibility node: a description
+ * naming only the action would replace the name, the count and the weight rather than adding to
+ * them. Every word is `strings.xml`'s and the order is the state's; see there for the rule.
+ *
+ * The count is a **plural resource** rather than a format string, and that is not pedantry: this
+ * sentence is read aloud, and "1 items" is the kind of thing a screen-reader user hears in full.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun SectionHeader(
-    title: String,
-    weight: String,
+    section: InventorySectionState,
+    onToggle: () -> Unit,
     modifier: Modifier = Modifier,
-    testTag: String? = null,
 ) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
-        verticalAlignment = Alignment.CenterVertically,
+    val title = section.containerName ?: stringResource(section.kind.titleRes)
+    val countLabel = pluralStringResource(
+        R.plurals.inventory_section_items,
+        section.itemCount,
+        section.itemCount,
+    )
+    val weightLabel = stringResource(R.string.inventory_weight, section.weight)
+    val stateLabel = stringResource(
+        if (section.collapsed) {
+            R.string.inventory_section_collapsed
+        } else {
+            R.string.inventory_section_expanded
+        },
+    )
+    val action = stringResource(
+        if (section.collapsed) {
+            R.string.inventory_section_expand
+        } else {
+            R.string.inventory_section_collapse
+        },
+    )
+
+    ExpanderRow(
+        expanded = !section.collapsed,
+        spoken = section.spokenLabel(
+            title = title,
+            countLabel = countLabel,
+            weightLabel = weightLabel,
+            stateLabel = stateLabel,
+            action = action,
+        ),
+        onToggle = onToggle,
+        testTag = "inventory:section:${section.key}",
+        modifier = modifier,
     ) {
+        SectionTitle(title)
         Text(
-            text = title.uppercase(),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = stringResource(R.string.inventory_weight, weight),
+            text = section.summary(countLabel = countLabel, weightLabel = weightLabel),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            // Right-aligned into the remaining width, so a column of headers keeps the weight
+            // figures lined up the way the old label-plus-weight row did.
+            textAlign = TextAlign.End,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 12.dp)
+                .testTag("inventory:section:${section.key}:summary"),
         )
     }
 }

@@ -311,6 +311,9 @@ fun CharacterHomeScreen(
                             // confirm and the picker live — nothing on the list can reach them.
                             onDelete = viewModel::removeItem,
                             onMove = viewModel::moveItem,
+                            // FR-16. On the tab rather than in the customize sheet
+                            // (13 decision 6), but stored in the same per-character key.
+                            onCollapse = viewModel::setInventorySectionCollapsed,
                         ),
                     )
 
@@ -391,6 +394,10 @@ fun CharacterHomeScreen(
 
             if (addItemOpen) {
                 AddItemSheet(
+                    // A DiceCloud character: no category chooser, because a DiceCloud item is
+                    // classified by its tags and `NewItemSpec.category` never reaches the wire.
+                    // See `AddItemSheet`'s KDoc.
+                    isLocal = false,
                     onAdd = viewModel::addItem,
                     onDismiss = { addItemOpen = false },
                 )

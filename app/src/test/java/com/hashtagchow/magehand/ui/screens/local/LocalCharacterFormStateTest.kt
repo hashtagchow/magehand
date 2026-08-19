@@ -12,6 +12,7 @@ import com.hashtagchow.magehand.core.data.local.LocalCharacterFormError
 import com.hashtagchow.magehand.core.data.local.LocalRowForm
 import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.AbilityScores
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.ResetRule
 
@@ -196,6 +197,40 @@ class LocalCharacterFormStateTest {
         assertNull(row.toRowForm().reset)
         // …but flipping the kind back must not have lost what the player picked.
         assertEquals(ResetRule.SHORT_REST, row.copy(kind = LocalRowKind.RESOURCE).toRowForm().reset)
+    }
+
+    @Test
+    fun `a category is kept while editing but only saved on an item`() {
+        // 13 decision 9's chooser, in exactly the shape the reset rule has above — which is the
+        // point of the test being written as its twin. A slot that kept claiming to be a sword
+        // would put a tracker row in the inventory's Weapons section.
+        val row = LocalRowFormState(
+            kind = LocalRowKind.SLOT,
+            label = "1st Level",
+            total = "4",
+            category = CatalogCategory.WEAPON,
+        )
+
+        assertEquals(CatalogCategory.GEAR, row.toRowForm().category)
+        assertEquals(
+            CatalogCategory.WEAPON,
+            row.copy(kind = LocalRowKind.ITEM).toRowForm().category,
+        )
+    }
+
+    @Test
+    fun `a row form opens on Gear and round-trips whatever it was given`() {
+        assertEquals(CatalogCategory.GEAR, LocalRowFormState.new(LocalRowKind.ITEM).category)
+        assertEquals(
+            CatalogCategory.ARMOR,
+            LocalRowFormState.from(
+                LocalRowForm(
+                    kind = LocalRowKind.ITEM,
+                    label = "Chain Shirt",
+                    category = CatalogCategory.ARMOR,
+                ),
+            ).category,
+        )
     }
 
     @Test

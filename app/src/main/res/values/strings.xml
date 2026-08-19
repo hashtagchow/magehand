@@ -30,6 +30,34 @@
     <string name="inventory_wallet_empty">Empty</string>
     <string name="inventory_wallet_expand">Show the coin steppers</string>
     <string name="inventory_wallet_collapse">Hide the coin steppers</string>
+    <!-- FR-16 (13 decisions 1 and 5): every other section header is an expander too. The
+         wallet keeps its own two action strings above — its chevron opens *steppers*, which
+         is a different promise from "show me this list", and 13 decision 3 makes the wallet
+         the one section whose state is not remembered anyway.
+
+         The state word and the action are two separate strings on purpose (13 decision 5's
+         sentence): the first states a FACT about the section, the second offers an ACTION —
+         the same verb-versus-state split the equip chip draws above. Lower case and
+         verb-first because both are the tail of a spoken sentence, not labels:
+         "Armor, 3 items, 41 lb, collapsed, tap to expand". -->
+    <string name="inventory_section_collapsed">collapsed</string>
+    <string name="inventory_section_expanded">expanded</string>
+    <string name="inventory_section_expand">tap to expand</string>
+    <string name="inventory_section_collapse">tap to collapse</string>
+    <!-- A plural and not "%1$d items", because this one is read aloud by TalkBack on every
+         section header and "1 items" is heard in full. -->
+    <plurals name="inventory_section_items">
+        <item quantity="one">%1$d item</item>
+        <item quantity="other">%1$d items</item>
+    </plurals>
+    <!-- FR-10b (13 decision 9): the Weapon / Armor / Gear chooser, on the custom item form and
+         on the local editor's item rows. Singular, and separate strings from the section
+         headings above even though two of them read the same today: a heading names a list,
+         these name what one item IS. See `CategoryChooser`. -->
+    <string name="inventory_category_label">What is it?</string>
+    <string name="inventory_category_weapon">Weapon</string>
+    <string name="inventory_category_armor">Armor</string>
+    <string name="inventory_category_gear">Gear</string>
     <!-- 11 decision 2: the per-item equippability override, shown only where this app could
          not tell from the sheet's own tags. -->
     <string name="inventory_detail_equippable">Can be equipped</string>

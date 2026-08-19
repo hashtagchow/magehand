@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.core.data.local
 
 import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.AbilityScores
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.ResetRule
 
@@ -103,6 +104,20 @@ data class LocalRowForm(
     val total: Int = 1,
     /** `null` is "none" — 09 decision 4's third reset option. */
     val reset: ResetRule? = null,
+    /**
+     * What an item row **is** (13 decision 9's third capture point).
+     *
+     * Carried on the form rather than left to the row it edits, because the form's save is a
+     * whole-row upsert and a field the form does not carry is a field the save cannot preserve —
+     * see [LocalCharacterRepository.save]'s "what survives an edit" section, which had to gain a
+     * paragraph about exactly that when this arrived.
+     *
+     * Meaningless for [LocalRowKind.SLOT] and [LocalRowKind.RESOURCE] — the editor draws the
+     * chooser on item rows only, and the save path forces it back to gear for the other two,
+     * the same way [reset] is dropped for everything but a resource. That is what keeps a row
+     * that was switched to a slot and back from carrying a stale claim about itself.
+     */
+    val category: CatalogCategory = CatalogCategory.GEAR,
 )
 
 /**

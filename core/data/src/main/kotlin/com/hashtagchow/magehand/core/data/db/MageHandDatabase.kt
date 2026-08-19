@@ -13,12 +13,13 @@ import androidx.room.migration.Migration
  * | 2 | WP4 | + `characters`, `snapshots`, `tracker_prefs`, `theme_prefs` |
  * | 3 | FR-5 | + `local_characters`, `local_tracker_rows` |
  * | 4 | FR-8 | + coin and inventory **columns** on those two (no new table) |
+ * | 5 | FR-10b | + `local_tracker_rows.category` (one column, no new table) |
  *
  * Every **shipped** version's exported JSON under `core/data/schemas/` is **immutable** —
  * each one is the input to the migration that leaves it and to
  * `MageHandDatabaseMigrationTest`. Every migration so far is additive: 1→2 and 2→3 add tables
- * and name no existing one, and 3→4 adds columns with `ALTER TABLE` and re-creates nothing.
- * So no account or token binding can be lost on upgrade, and
+ * and name no existing one, and 3→4 and 4→5 add columns with `ALTER TABLE` and re-create
+ * nothing. So no account or token binding can be lost on upgrade, and
  * (docs/design/09-local-characters.md decision 10) sign-out cannot reach the local tables
  * because they carry no `accountId` to key on.
  *
@@ -35,7 +36,7 @@ import androidx.room.migration.Migration
         LocalCharacterEntity::class,
         LocalTrackerRowEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class MageHandDatabase : RoomDatabase() {
@@ -51,6 +52,7 @@ abstract class MageHandDatabase : RoomDatabase() {
         const val NAME: String = "magehand.db"
 
         /** Every migration, in order. Hand this to `RoomDatabase.Builder.addMigrations`. */
-        val MIGRATIONS: Array<Migration> get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+        val MIGRATIONS: Array<Migration>
+            get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
     }
 }

@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.CatalogItem
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.ui.components.CategoryChooser
 
 /**
  * The add-item flow (docs/design/10-inventory.md decision 6): a curated catalog with a search
@@ -69,12 +70,32 @@ import com.hashtagchow.magehand.core.model.NewItemSpec
  * release (decision 12) — so the confirmation snackbar carries no UNDO action. A control that
  * silently behaves differently from every other write in the app is worth one sentence.
  *
+ * ### Why the category chooser is on one kind of character only
+ *
+ * 13 decision 9 collects a category so that a **local** row can be filed under Weapons, Armor
+ * or Gear; a DiceCloud item is classified by its `tags`, and 13 lists server-side category
+ * editing as explicitly **out of scope**. `NewItemSpec.category` is therefore discarded on the
+ * server path — `WriteOp.insertItem` builds the insert body from the tags and never writes it
+ * — so a chooser drawn there would be a control that reads back a state nothing stored: the
+ * player picks *Weapon*, saves, and the item lands in Gear with no explanation.
+ *
+ * Wave FR-10b offered it on both kinds on the argument that a control appearing and
+ * disappearing is a second add form to explain. That trade is the wrong way round here,
+ * because the majority path is the server one: the commit's own rule is that a control must
+ * not lie, and this one lied on the path most players are on. So it is gated on [isLocal], and
+ * the gate lives in [AddItemFormState] rather than in this `if` — see `offersCategoryChooser`.
+ *
  * @param onAdd handed a validated [NewItemSpec]. Both paths produce one; `OpenCharacter.addItem`
  *   neither knows nor cares which it came from.
+ * @param isLocal whether the character being added to is an on-device one. `true` from
+ *   `LocalCharacterHomeScreen`, `false` from `CharacterHomeScreen`. It decides one thing — the
+ *   category chooser above — and it is a required parameter rather than a defaulted one so a
+ *   third call site cannot silently take the wrong half of that decision.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun AddItemSheet(
+    isLocal: Boolean,
     onAdd: (NewItemSpec) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
@@ -85,7 +106,7 @@ fun AddItemSheet(
     // the query: a half-typed item is not a preference, and the sheet is dismissed on save.
     var custom by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
-    var form by remember { mutableStateOf(AddItemFormState()) }
+    var form by remember { mutableStateOf(AddItemFormState(isLocal = isLocal)) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -325,6 +346,20 @@ private fun CustomItemForm(
             singleLine = false,
             testTag = "inventory:add:custom:description",
         )
+        // FR-10b (13 decision 9). Last, under the optional text fields, because it is the one
+        // control here that is never *wrong*: it always has an answer, so it never holds the
+        // save up, and putting it above the required name field would make the form open on a
+        // question the player has not got to yet.
+        //
+        // Local characters only — the state decides, not this composable. See the sheet's
+        // "Why the category chooser is on one kind of character only".
+        if (form.offersCategoryChooser) {
+            CategoryChooser(
+                category = form.category,
+                onCategory = { onChange(form.copy(category = it)) },
+                testTagPrefix = "inventory:add:custom:category",
+            )
+        }
 
         Button(
             onClick = onSave,

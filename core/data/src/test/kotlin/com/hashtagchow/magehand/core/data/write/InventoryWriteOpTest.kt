@@ -12,6 +12,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ItemCatalog
 import com.hashtagchow.magehand.core.model.NewItemSpec
@@ -240,6 +241,57 @@ class InventoryWriteOpTest {
         val property = WriteOp.insertItem(spec, "f1", 1).body["creatureProperty"]!!.jsonObject
         assertFalse(property.containsKey("catalogId"))
         assertFalse(property.toString().contains("catalogId"))
+    }
+
+    /**
+     * The same, for `NewItemSpec.category` — the claim its KDoc makes, run rather than read.
+     *
+     * "Never sent to the server" was a **comment** until the 1.6.0 review, which is the exact
+     * shape `ItemCatalogCategoryTest`'s KDoc condemns: a check that would otherwise be a comment
+     * nobody runs. It is load-bearing twice over. It is why 13 lists server-side category editing
+     * as out of scope, and it is therefore why `AddItemFormState.offersCategoryChooser` is false
+     * on a server character — a chooser drawn over a field this method drops would take the
+     * player's answer and discard it silently.
+     *
+     * Asserted for **every** category, not just the non-default one, so the test cannot pass by
+     * the value happening to equal `GEAR`; and asserted against the whole serialized body, so a
+     * future field spelled `itemCategory` is caught too.
+     */
+    @Test
+    fun `the category is never sent to the server, whatever it is set to`() {
+        CatalogCategory.entries.forEach { category ->
+            val spec = NewItemSpec(name = "Torch", category = category)
+            assertEquals(category, spec.category)
+
+            val op = WriteOp.insertItem(spec, "f1", 1)
+            val property = op.body["creatureProperty"]!!.jsonObject
+
+            assertFalse("$category: the insert body must carry no category", property.containsKey("category"))
+            assertFalse(
+                "$category: nothing in the body may spell it, however the field is named — " +
+                    "a DiceCloud item is classified by its tags",
+                op.body.toString().lowercase().contains("categor") ||
+                    op.body.toString().contains(category.storedValue),
+            )
+        }
+    }
+
+    /**
+     * …and the catalog path is the case that would actually have leaked one.
+     *
+     * `NewItemSpec.of` copies the entry's own category (13 decision 9's first capture point), so
+     * the catalog add is the one server-reachable path whose spec carries a category nobody
+     * typed. The tags ride; the category does not.
+     */
+    @Test
+    fun `a catalog add sends the entry's tags and not the entry's category`() {
+        val spec = NewItemSpec.of(ItemCatalog.byId("torch")!!)
+        assertEquals(CatalogCategory.GEAR, spec.category)
+
+        val property = WriteOp.insertItem(spec, "f1", 1).body["creatureProperty"]!!.jsonObject
+
+        assertTrue("the tags are the server's own vocabulary and do ride", property.containsKey("tags"))
+        assertFalse(property.containsKey("category"))
     }
 
     @Test

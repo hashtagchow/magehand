@@ -339,8 +339,13 @@ object DataModule {
      * hands back an object whose lifetime is one character screen.
      */
     @Provides
-    fun provideLocalOpenCharacterFactory(dao: LocalCharacterDao): LocalOpenCharacterFactory =
-        LocalOpenCharacterFactory(dao)
+    fun provideLocalOpenCharacterFactory(
+        dao: LocalCharacterDao,
+        // FR-9's local delete reaps the deleted row's equippability override — a DataStore key
+        // no `ON DELETE CASCADE` can follow. See `LocalOpenCharacter.removeItem`.
+        equippableOverrideStore: EquippableOverrideStore,
+    ): LocalOpenCharacterFactory =
+        LocalOpenCharacterFactory(dao, equippableOverrideStore)
 
     /**
      * Application-lifetime scopes are created here rather than bound, for the same

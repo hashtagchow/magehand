@@ -145,8 +145,11 @@ class LocalOpenCharacterTest {
         total = 999,
     )
 
+    /** Shared, so a test can assert what a delete did to it. */
+    private val equippableOverrides = FakeEquippableOverrideStore()
+
     private fun open(): LocalOpenCharacter =
-        LocalOpenCharacter(characterId, dao, scope, now = { clock })
+        LocalOpenCharacter(characterId, dao, equippableOverrides, scope, now = { clock })
 
     // --- posture ------------------------------------------------------------
 
@@ -635,7 +638,7 @@ class LocalOpenCharacterTest {
     @Test
     fun `the factory refuses an id that names no local character`() = runTest {
         seed()
-        val factory = LocalOpenCharacterFactory(dao)
+        val factory = LocalOpenCharacterFactory(dao, FakeEquippableOverrideStore())
 
         assertNull(factory.open("nope"))
         val opened = factory.open(characterId)

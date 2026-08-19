@@ -621,6 +621,24 @@ class CharacterHomeViewModel @Inject constructor(
         }
 
     /**
+     * Shuts an inventory section, or opens it (FR-16, 13 decision 3).
+     *
+     * The same write path as the two customize-sheet gestures above, and that is decision 3's
+     * mechanism rather than an economy: collapse is *"a preference over whatever exists"* exactly
+     * as the order and the folds are, so it rides in the same key and is cleared by the same
+     * Reset. The gesture happens on the tab (decision 6 keeps the sheet out of it); only the
+     * storage is shared.
+     *
+     * The **Wallet cannot reach this** — [InventoryTab] wires its chevron to a `rememberSaveable`
+     * — and `InventoryLayoutPlan.setCollapsed` refuses the key regardless, which is what keeps
+     * decision 3's exception true rather than merely intended.
+     */
+    fun setInventorySectionCollapsed(key: String, collapsed: Boolean) =
+        mutateInventoryLayout { resolved, stored ->
+            InventoryLayoutPlan.setCollapsed(resolved, stored, key, collapsed)
+        }
+
+    /**
      * The sheet's Reset: forget this character's arrangement, so 12 decision 1's default draws.
      *
      * A key deletion rather than a write of the default order, which is decision 5's own wording

@@ -4,6 +4,9 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.hashtagchow.magehand.core.data.local.LocalInventoryBoard
+import com.hashtagchow.magehand.core.model.CatalogCategory
+import com.hashtagchow.magehand.core.model.EquipGroup
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -13,6 +16,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -517,13 +521,251 @@ class MageHandDatabaseMigrationTest {
         }
     }
 
+    // --- v4 → v5 (FR-10b) ---------------------------------------------------
+
     /**
-     * The full chain in one open. A device still on v1 must cross three migrations, and the
+     * The upgrade every 1.4.x/1.5.x install will take, against the schema that is actually in
+     * the field — and, like v3→v4, one that **alters a table already holding player data**.
+     *
+     * Both local tables are populated first for [MIGRATION_3_4]'s reason, unchanged: "additive"
+     * is a claim about what did not happen, and the only way to test it is to have a character
+     * and their rows sitting there that could have been lost. The v4 columns are populated too,
+     * because they are the ones a careless `ALTER` on this table would take with it.
+     */
+    @Test
+    fun `migrating v4 to v5 preserves every local character, row and v4 column`() = runTest {
+        createDatabaseAtVersion(4).use { v4 ->
+            v4.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', 3, 8, 14, 12, 16, 10, 13, 22, 17, 15, 1, 109, 57, 351, 100, 200)",
+            )
+            v4.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped) " +
+                    "VALUES ('row-1', 'local-1', 'slot', '1st Level', 4, 2, 'longRest', 0, " +
+                    "null, null, null, 0)",
+            )
+            v4.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped) " +
+                    "VALUES ('row-2', 'local-1', 'item', 'Quarterstaff', 1, 1, 'none', 1, " +
+                    "4.0, 0.2, 'A simple melee weapon.', 1)",
+            )
+        }
+
+        val db = openCurrent()
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
+
+        val dao = db.localCharacterDao()
+        with(dao.find("local-1")!!) {
+            assertEquals("Brambles", name)
+            assertEquals(3, level)
+            // Play state, and money: an upgrade that healed the character or emptied their
+            // purse would be a data loss nobody would report as one.
+            assertEquals(17, currentHp)
+            assertEquals(109, gp)
+            assertEquals(351, cp)
+            assertEquals(100L, createdAt)
+        }
+
+        val rows = dao.getRows("local-1")
+        assertEquals(listOf("row-1", "row-2"), rows.map { it.id })
+        assertEquals(2, rows.first().current) // two slots already spent — still spent
+        with(rows.last()) {
+            assertEquals(4.0, weight)
+            assertEquals(0.2, value)
+            assertEquals("A simple melee weapon.", description)
+            assertEquals(true, equipped)
+        }
+    }
+
+    /**
+     * The new column takes its default on every row that already existed — which is what
+     * `ALTER TABLE … ADD COLUMN … NOT NULL DEFAULT 'gear'` buys, SQLite refusing the statement
+     * without one.
+     *
+     * `'gear'` and not `"gear"`: the inner single quotes are what make it a SQL **string
+     * literal** rather than a column reference, and they are the one thing this migration does
+     * that the v4 integer defaults did not. A missing pair fails at `ALTER` time, on a device.
+     */
+    @Test
+    fun `the new v5 category column defaults to gear on rows that predate it`() = runTest {
+        createDatabaseAtVersion(4).use { v4 ->
+            v4.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 10, 10, 0, 0, 0, 0, 1, 1)",
+            )
+            v4.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped) " +
+                    "VALUES ('row-1', 'local-1', 'item', 'Torch', 5, 5, 'none', 0, 1.0, 0.01, null, 0)",
+            )
+        }
+
+        val row = openCurrent().localCharacterDao().getRows("local-1").single()
+
+        assertEquals(
+            "a pre-FR-10b row was collected by a build that never asked, which reads as gear",
+            LocalTrackerRowEntity.CATEGORY_GEAR,
+            row.category,
+        )
+        assertEquals(CatalogCategory.GEAR, row.toDomain()!!.category)
+    }
+
+    /**
+     * **13 decision 11, end to end**: the migration, then the board the player actually sees.
+     *
+     * This is the test the design asks for by name, and it is deliberately not a column
+     * assertion. The column default *is* a behaviour change — 1.5.x rendered every local item as
+     * equippable, and after this upgrade an uncategorised one is gear — so the honest question is
+     * not "did the column default correctly" but **"can the player still do everything they
+     * could do yesterday"**. Two rows answer it, and they are the two shapes a real 1.5.x
+     * character has:
+     *
+     *  - a row they had **equipped**, which must still be in Equipped with its unequip control
+     *    (the rule's `equipped` disjunct, which is why the disjunct exists);
+     *  - a row they had **not** equipped but could have, which must still be equippable — via 11
+     *    decision 2's override, whose switch has to be *offered* on it.
+     *
+     * Nothing they did becomes undoable, and nothing is silently promoted either: the unequipped
+     * row is gear until they say otherwise, which is the claim FR-10b is entitled to make.
+     */
+    @Test
+    fun `after the v5 upgrade an equipped row stays equipped and an unequipped one stays rescuable`() =
+        runTest {
+            createDatabaseAtVersion(4).use { v4 ->
+                v4.execSQL(
+                    "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                        "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                        "createdAt, updatedAt) " +
+                        "VALUES ('local-1', 'Brambles', 3, 14, 10, 10, 10, 10, 10, 20, 20, 12, 0, 0, 0, 0, 1, 1)",
+                )
+                v4.execSQL(
+                    "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                        "resetRule, sortIndex, weight, value, description, equipped) " +
+                        "VALUES ('worn', 'local-1', 'item', 'A Small Knife', 1, 1, 'none', 0, " +
+                        "1.0, 2.0, null, 1)",
+                )
+                v4.execSQL(
+                    "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                        "resetRule, sortIndex, weight, value, description, equipped) " +
+                        "VALUES ('stowed', 'local-1', 'item', 'A quill', 1, 1, 'none', 1, " +
+                        "0.0, 0.02, null, 0)",
+                )
+            }
+
+            val dao = openCurrent().localCharacterDao()
+            val board = LocalInventoryBoard.build(
+                character = dao.find("local-1")!!.toDomain(),
+                rows = dao.getRows("local-1").mapNotNull { it.toDomain() },
+            )
+
+            // The equipped row: still in Equipped, still equippable, so the chip it is wearing
+            // is still a control the player can tap to take it off.
+            val worn = board.equipped.single()
+            assertEquals("A Small Knife", worn.name)
+            assertTrue("an equipped row must never lose its unequip control", worn.isEquippable)
+
+            // The unequipped row: honestly gear now, and honestly rescuable. `isEquippable` is
+            // false, which is exactly the state 11 decision 2's switch renders on — and the
+            // player's override is applied one layer up, in `InventoryRowState`.
+            val stowed = board.carried.single()
+            assertEquals("A quill", stowed.name)
+            assertEquals(EquipGroup.GEAR, stowed.equipGroup)
+            assertFalse(
+                "gear is what 'nobody said' reads as — the override is the way back",
+                stowed.isEquippable,
+            )
+
+            // And nothing was dropped by the upgrade: both rows are still there, in order.
+            assertEquals(2, board.equipped.size + board.carried.size)
+        }
+
+    /** Round-trips the new column through the real DAO on a migrated database. */
+    @Test
+    fun `the migrated database stores and reads back every category`() = runTest {
+        createDatabaseAtVersion(4).close()
+        val db = openCurrent()
+        val dao = db.localCharacterDao()
+
+        dao.save(
+            LocalCharacterEntity(
+                id = "local-1",
+                name = "Brambles",
+                level = 3,
+                strength = 8,
+                dexterity = 14,
+                constitution = 12,
+                intelligence = 16,
+                wisdom = 10,
+                charisma = 13,
+                maxHp = 22,
+                currentHp = 22,
+                armorClass = 15,
+                createdAt = 100,
+                updatedAt = 100,
+            ),
+            CatalogCategory.entries.mapIndexed { index, category ->
+                LocalTrackerRowEntity(
+                    id = "row-$index",
+                    characterId = "local-1",
+                    kind = "item",
+                    label = category.name,
+                    total = 1,
+                    current = 1,
+                    resetRule = "none",
+                    sortIndex = index,
+                    category = category.storedValue,
+                )
+            },
+        )
+
+        assertEquals(
+            CatalogCategory.entries.toList(),
+            dao.getRows("local-1").mapNotNull { it.toDomain() }.map { it.category },
+        )
+    }
+
+    /**
+     * The foreign key must survive this `ALTER TABLE` too — `the cascade still works after the
+     * v4 columns are added`'s assertion, re-made against the table as v5 leaves it.
+     */
+    @Test
+    fun `the cascade still works after the v5 category column is added`() = runTest {
+        createDatabaseAtVersion(4).use { v4 ->
+            v4.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 10, 10, 0, 0, 0, 0, 1, 1)",
+            )
+            v4.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped) " +
+                    "VALUES ('row-1', 'local-1', 'resource', 'Rage', 3, 3, 'longRest', 0, null, null, null, 0)",
+            )
+        }
+
+        val dao = openCurrent().localCharacterDao()
+        assertEquals(1, dao.getRows("local-1").size)
+
+        dao.delete("local-1")
+
+        assertNull(dao.find("local-1"))
+        assertTrue("rows outlived their character", dao.getRows("local-1").isEmpty())
+    }
+
+    /**
+     * The full chain in one open. A device still on v1 must cross every migration, and the
      * chained result has to satisfy the same validator the single-step path does — which is
      * the assertion `openCurrent()` makes on every test here just by succeeding.
      */
     @Test
-    fun `migrating from v1 crosses all three migrations and keeps the account`() = runTest {
+    fun `migrating from v1 crosses every migration and keeps the account`() = runTest {
         createVersion1Database().use { v1 ->
             v1.execSQL(
                 "INSERT INTO accounts (id, serverUrl, userId, username, addedAt, lastUsedAt) " +
@@ -620,6 +862,6 @@ class MageHandDatabaseMigrationTest {
 
     private companion object {
         /** Keep in step with `@Database(version = …)`. */
-        const val CURRENT_VERSION = 4
+        const val CURRENT_VERSION = 5
     }
 }

@@ -83,13 +83,13 @@ class LocalCharacterHomeLifecycleTest {
             selectedRollStore = FakeSelectedRollStore,
             equippableOverrideStore = FakeEquippableOverrideStore,
             inventoryLayoutStore = FakeInventoryLayoutStore,
-            factory = LocalOpenCharacterFactory(dao),
+            factory = LocalOpenCharacterFactory(dao, FakeEquippableOverrideStore),
         )
     }
 
     /** A character built directly, so the test owns both ends of the hand-off. */
     private fun character() =
-        LocalOpenCharacter(characterId, EmptyLocalCharacterDao, scope)
+        LocalOpenCharacter(characterId, EmptyLocalCharacterDao, FakeEquippableOverrideStore, scope)
 
     @Test
     fun `a character adopted before the screen is popped is handed back by onCleared`() = runTest {

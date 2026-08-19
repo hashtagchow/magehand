@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.local.LocalCharacterRepository
 import com.hashtagchow.magehand.core.data.local.LocalSaveResult
 import com.hashtagchow.magehand.core.model.Ability
+import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.ResetRule
 import javax.inject.Inject
@@ -95,6 +96,11 @@ class LocalCharacterEditorViewModel @Inject constructor(
     fun setRowTotal(index: Int, total: String) = editRow(index) { it.copy(total = total) }
 
     fun setRowReset(index: Int, reset: ResetRule?) = editRow(index) { it.copy(reset = reset) }
+
+    /** FR-10b (13 decision 9). Kept on the state for every kind; dropped on save for all but
+     * an item — see [LocalRowFormState.toRowForm]. */
+    fun setRowCategory(index: Int, category: CatalogCategory) =
+        editRow(index) { it.copy(category = category) }
 
     // --- save / delete ----------------------------------------------------------
 

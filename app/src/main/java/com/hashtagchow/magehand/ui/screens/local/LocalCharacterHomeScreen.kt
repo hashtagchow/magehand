@@ -290,6 +290,9 @@ fun LocalCharacterHomeScreen(
                         // confirm and the picker live — nothing on the list can reach them.
                         onDelete = viewModel::removeItem,
                         onMove = viewModel::moveItem,
+                        // FR-16. Same gesture, same store, same key namespace as the DiceCloud
+                        // screen's — see the view model.
+                        onCollapse = viewModel::setInventorySectionCollapsed,
                     ),
                 )
             }
@@ -318,6 +321,9 @@ fun LocalCharacterHomeScreen(
 
         if (addItemOpen) {
             AddItemSheet(
+                // An on-device character: `local_tracker_rows.category` is the whole of the
+                // answer here, so the chooser is offered. See `AddItemSheet`'s KDoc.
+                isLocal = true,
                 onAdd = viewModel::addItem,
                 onDismiss = { addItemOpen = false },
             )
