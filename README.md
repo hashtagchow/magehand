@@ -22,6 +22,12 @@ rule matches — the same operations the DiceCloud UI itself performs.
 - **Tracker** — auto-discovered from your character's properties: spell slots,
   resources, HP, pinned items. Reorder, pin and hide rows per character; layout stays
   on your device.
+- **Rolls reference** — pick a skill, save or ability check from one dropdown and the
+  app shows the modifier it resolves to, advantage and disadvantage included. It gives
+  you the number; the dice stay on the table.
+- **Local characters** — a tracker without a DiceCloud account at all. Create a
+  character on the device with level, ability scores, max HP and AC, then add the spell
+  slots, resources and items you want on its tracker. Stored on the device only.
 - **Full sheet & character creator** — the DiceCloud PWA embedded with automatic
   sign-on, so the app always matches your server's features.
 - **Live** — DDP (Meteor websocket) subscriptions keep the tracker in sync in real
@@ -33,9 +39,19 @@ rule matches — the same operations the DiceCloud UI itself performs.
   Exactly two Android permissions: `INTERNET`, `ACCESS_NETWORK_STATE`.
   [Privacy policy](https://hashtagchow.github.io/magehand/).
 
-| Tracker | Customize |
+## Screenshots
+
+| | |
 |---|---|
-| ![Tracker](docs/store-listing/screenshot-01-tracker.png) | ![Customize](docs/store-listing/screenshot-02-customize.png) |
+| ![Character list](screenshots/01-character-list.png) | ![Tracker](screenshots/02-tracker.png) |
+| Server characters and device-local ones in one list. | The tracker: HP, rolls, spell slot pips, resources. |
+| ![Rolls](screenshots/03-rolls.png) | ![Sheet](screenshots/04-sheet.png) |
+| Pick a roll, read the modifier. | The full DiceCloud sheet, signed in automatically. |
+| ![Local character](screenshots/05-local-tracker.png) | ![Customize](screenshots/07-customize.png) |
+| A local character: ability reference strip, HP, rolls. | Reorder, hide and pin rows per character. |
+
+The full set — including the local-character editor and settings — is in
+[`screenshots/`](screenshots/).
 
 ## Architecture
 
@@ -70,8 +86,8 @@ integration probes need a real server — endpoints and credentials come from
 
 ## Status
 
-v1.0.1 — on Google Play (internal/closed testing). The tracker, sheet SSO, rests,
-undo/history, and per-character customization are table-tested.
+On Google Play (internal/closed testing). The tracker, sheet SSO, rests, undo/history,
+per-character customization, local characters and the rolls reference are table-tested.
 
 ## License
 
