@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.hashtagchow.magehand.declaredString
+import com.hashtagchow.magehand.stringsXml
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.ResetRule
@@ -15,7 +17,6 @@ import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
 import com.hashtagchow.magehand.core.model.TrackerWriteKind
-import java.io.File
 import java.time.ZoneId
 
 /**
@@ -341,40 +342,6 @@ class TrackerWriteStateTest {
             emptyList<String>(),
             offenders,
         )
-    }
-
-    /**
-     * The declared value of one `<string>` in the file that ships.
-     *
-     * Fails rather than returning `null` for a missing name: every caller here is asserting
-     * what a resource *says*, and a resource that does not exist is a `Resources.NotFoundException`
-     * at runtime — a louder failure than the value being wrong, so it earns the louder message.
-     */
-    private fun declaredString(name: String): String =
-        Regex("""<string name="$name">(.*?)</string>""")
-            .find(stringsXml().readText())
-            ?.groupValues
-            ?.get(1)
-            ?: throw AssertionError("no <string name=\"$name\"> in ${stringsXml()}")
-
-    /**
-     * `app/src/main/res/values/strings.xml`, found by walking up from the working directory —
-     * the same lookup `InventoryUiStateTest` uses, and for the same reason: Gradle's
-     * module-directory working directory is a default rather than a promise, and an IDE runner
-     * may disagree.
-     */
-    private fun stringsXml(): File {
-        val relative = "app/src/main/res/values/strings.xml"
-        var dir: File? = File(System.getProperty("user.dir")).absoluteFile
-        while (dir != null) {
-            val candidate = File(dir, relative)
-            if (candidate.isFile) return candidate
-            // Also the case where the working directory already *is* `app/`.
-            val fromModule = File(dir, "src/main/res/values/strings.xml")
-            if (fromModule.isFile) return fromModule
-            dir = dir.parentFile
-        }
-        throw AssertionError("could not find $relative from ${System.getProperty("user.dir")}")
     }
 
     private fun failure(

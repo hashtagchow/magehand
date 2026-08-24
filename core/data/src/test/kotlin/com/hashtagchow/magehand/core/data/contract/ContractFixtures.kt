@@ -86,6 +86,21 @@ object ContractFixtures {
     val removedItemId: String = fakeId("item-removed")
     val ropeInBackpackId: String = fakeId("item-rope-in-backpack")
 
+    val abilityIntelligenceId: String = fakeId("ability-intelligence")
+    val abilityStrengthCheckId: String = fakeId("ability-strength-check")
+    val abilityNoModifierId: String = fakeId("ability-no-modifier")
+    val skillArcanaId: String = fakeId("skill-arcana")
+    val skillStealthAdvantageId: String = fakeId("skill-stealth-advantage")
+    val saveDexterityId: String = fakeId("save-dexterity")
+    val saveWisdomDisadvantageId: String = fakeId("save-wisdom-disadvantage")
+    val checkInitiativeId: String = fakeId("check-initiative")
+    val skillLanguageId: String = fakeId("skill-language-common")
+    val skillWeaponProficiencyId: String = fakeId("skill-weapon-proficiency")
+    val skillArmorProficiencyId: String = fakeId("skill-armor-proficiency")
+    val skillInactiveDeathSaveId: String = fakeId("skill-death-save-inactive")
+    val skillRemovedId: String = fakeId("skill-removed")
+    val skillNamelessId: String = fakeId("skill-nameless")
+
     val goldId: String = fakeId("coin-gold")
     val silverId: String = fakeId("coin-silver")
     val platinumId: String = fakeId("coin-platinum")
@@ -164,6 +179,115 @@ object ContractFixtures {
             toggle(id = rageToggleId, name = "Rage", enabled = true, order = 30),
             toggle(id = concentrationToggleId, name = "Concentration: Bless", enabled = true, order = 31),
             toggle(id = computedToggleId, name = "Bloodied", enabled = null, order = 32),
+        ),
+    )
+
+    /**
+     * Roll discovery (FR-7) — ability checks, saves, skills, and the advantage rollup.
+     *
+     * Written from the shapes re-confirmed live on 2026-08-24
+     * (docs/verification/probe-p5-rolls.md), and synthetic like everything else here: the
+     * numbers are chosen to make each rule *falsifiable*, not to resemble any sheet.
+     *
+     * Three of those choices carry the whole vector:
+     *
+     *  - **An ability's [FIELD_MODIFIER][com.hashtagchow.magehand.core.data.tracker.TrackerEngine.FIELD_MODIFIER]
+     *    and its score disagree by more than the 5e formula.** Intelligence is scored 14 with
+     *    a modifier of 3, which `floor((14 − 10) / 2)` does not produce. A consumer that
+     *    re-derives the modifier from the score gets 2 and fails the vector — which is the
+     *    point: the server has already folded in whatever a feature contributed, and the
+     *    export exists to stop a second client re-implementing that arithmetic badly.
+     *  - **A skill's `value` is not `abilityMod + proficiency`.** Arcana reads 7 over
+     *    ingredients that sum to 6, for the same reason.
+     *  - **The advantage rollup is read for its SIGN, never for `== 1`.** Stealth carries
+     *    `advantage: 2` and the Wisdom save carries `advantage: -3`; a magic-constant
+     *    comparison answers NONE for both.
+     */
+    fun rollsSheetBody(): JsonObject = snapshotBody(
+        creature = creature(),
+        properties = listOf(
+            // Ability checks: `type: attribute`, `attributeType: ability`, read off `modifier`.
+            abilityScore(
+                id = abilityIntelligenceId, name = "Intelligence", variableName = "intelligence",
+                score = 14, modifier = 3, advantage = 0, order = 10,
+            ),
+            // The sign convention: a modifier is a signed whole number and may be negative.
+            abilityScore(
+                id = abilityStrengthCheckId, name = "Strength", variableName = "strength",
+                score = 8, modifier = -1, advantage = null, order = 11,
+            ),
+            // No `modifier` key at all: SKIPPED, never back-derived from the score. An
+            // attribute that does not say what it adds is not a roll this app can answer.
+            abilityScore(
+                id = abilityNoModifierId, name = "Constitution", variableName = "constitution",
+                score = 12, modifier = null, advantage = null, order = 12,
+            ),
+
+            // Skills / saves / checks: one `type: skill` property class, sorted by `skillType`.
+            skill(
+                id = skillArcanaId, name = "Arcana", skillType = "skill", variableName = "arcana",
+                value = 7, abilityMod = 2, proficiency = 4, ability = "intelligence", order = 20,
+            ),
+            skill(
+                id = skillStealthAdvantageId, name = "Stealth", skillType = "skill",
+                variableName = "stealth", value = 3, abilityMod = 3, proficiency = 0,
+                ability = "dexterity", advantage = 2, order = 21,
+            ),
+            skill(
+                id = saveDexterityId, name = "Dexterity Save", skillType = "save",
+                variableName = "dexteritySave", value = 5, abilityMod = 3, proficiency = 2,
+                ability = "dexterity", advantage = 0, order = 22,
+            ),
+            skill(
+                id = saveWisdomDisadvantageId, name = "Wisdom Save", skillType = "save",
+                variableName = "wisdomSave", value = -1, abilityMod = -1, proficiency = 0,
+                ability = "wisdom", advantage = -3, order = 23,
+            ),
+            // `check` is a rollable kind and must NOT be filtered out — the exclusion list is
+            // an exclusion list precisely so an unfamiliar kind surfaces rather than vanishes.
+            skill(
+                id = checkInitiativeId, name = "Initiative", skillType = "check",
+                variableName = "initiative", value = 3, abilityMod = 3, proficiency = 0,
+                ability = "dexterity", order = 24,
+            ),
+
+            // The three excluded `skillType`s: a proficiency you hold, not a roll you make.
+            // Each carries the same `value` field (the proficiency bonus) purely because the
+            // property type has one, which is why a client keyed on `type: skill` alone puts
+            // "make a Common check" in the dropdown.
+            skill(
+                id = skillLanguageId, name = "Common", skillType = "language",
+                variableName = "commonLanguage", value = 3, abilityMod = 0, proficiency = 3,
+                ability = null, order = 30,
+            ),
+            skill(
+                id = skillWeaponProficiencyId, name = "Simple Melee Weapons", skillType = "weapon",
+                variableName = "simpleMeleeWeapon", value = 3, abilityMod = 0, proficiency = 3,
+                ability = null, order = 31,
+            ),
+            skill(
+                id = skillArmorProficiencyId, name = "Light Armor", skillType = "armor",
+                variableName = "lightArmor", value = 3, abilityMod = 0, proficiency = 3,
+                ability = null, order = 32,
+            ),
+
+            // The blanket skip, on both of its fields.
+            skill(
+                id = skillInactiveDeathSaveId, name = "Death Save", skillType = "save",
+                variableName = "deathSave", value = 0, abilityMod = 0, proficiency = 0,
+                ability = null, order = 33, inactive = true,
+            ),
+            skill(
+                id = skillRemovedId, name = "Perception", skillType = "skill",
+                variableName = "perception", value = 4, abilityMod = 1, proficiency = 3,
+                ability = "wisdom", order = 34, removed = true,
+            ),
+            // Nameless: the dropdown IS a list of names, so a blank one is an un-pickable row.
+            skill(
+                id = skillNamelessId, name = "", skillType = "skill",
+                variableName = "unnamed", value = 2, abilityMod = 2, proficiency = 0,
+                ability = "charisma", order = 35,
+            ),
         ),
     )
 
@@ -304,6 +428,74 @@ object ContractFixtures {
         if (reset != null) put("reset", reset) else if (explicitNullReset) put("reset", JsonNull)
         if (spellSlotLevel != null) put("spellSlotLevel", spellSlotLevel)
         if (variableName != null) put("variableName", variableName)
+        if (removed) put("removed", true)
+        if (inactive) put("inactive", true)
+    }
+
+    /**
+     * One of the six ability scores, in the shape a live sheet publishes it.
+     *
+     * @param modifier `null` omits the key entirely — the "does not say what it adds" case.
+     * @param advantage `null` omits the key. Absent and `0` are the same answer, and the
+     *   fixture carries both so a consumer cannot pass by handling only the shape it saw.
+     */
+    @Suppress("LongParameterList")
+    fun abilityScore(
+        id: String,
+        name: String,
+        variableName: String,
+        score: Int,
+        modifier: Int?,
+        advantage: Int?,
+        order: Int,
+    ): JsonObject = buildJsonObject {
+        put("_id", id)
+        put("type", "attribute")
+        put("attributeType", "ability")
+        put("name", name)
+        put("variableName", variableName)
+        // `value` and `total` are the SCORE, not the modifier. Adding either to a d20 is the
+        // off-by-about-ten a client makes when it reads the field whose name it recognises.
+        put("value", score)
+        put("total", score)
+        if (modifier != null) put("modifier", modifier)
+        if (advantage != null) put("advantage", advantage)
+        put("order", order)
+    }
+
+    /**
+     * A `type: "skill"` property — the one class covering skills, saves, checks, tools and
+     * the weapon/armor/language proficiencies that are not rolls at all.
+     *
+     * `abilityMod` and `proficiency` are written because a real sheet carries them, and the
+     * fixture deliberately makes them disagree with `value`; see [rollsSheetBody].
+     */
+    @Suppress("LongParameterList")
+    fun skill(
+        id: String,
+        name: String,
+        skillType: String,
+        variableName: String,
+        value: Int,
+        abilityMod: Int,
+        proficiency: Int,
+        ability: String?,
+        order: Int,
+        advantage: Int? = null,
+        removed: Boolean = false,
+        inactive: Boolean = false,
+    ): JsonObject = buildJsonObject {
+        put("_id", id)
+        put("type", "skill")
+        put("skillType", skillType)
+        put("name", name)
+        put("variableName", variableName)
+        put("value", value)
+        put("abilityMod", abilityMod)
+        put("proficiency", proficiency)
+        if (ability != null) put("ability", ability) else put("ability", JsonNull)
+        if (advantage != null) put("advantage", advantage)
+        put("order", order)
         if (removed) put("removed", true)
         if (inactive) put("inactive", true)
     }

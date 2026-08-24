@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.ui.screens.characterhome.inventory
 
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.data.local.LocalInventoryBoard
+import com.hashtagchow.magehand.stringsXml
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.model.AbilityScores
 import com.hashtagchow.magehand.core.model.CatalogCategory
@@ -23,7 +24,6 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 import java.util.Locale
 
 /**
@@ -696,28 +696,6 @@ class InventoryUiStateTest {
         assertEquals("0 items", String.format(Locale.US, forms.getValue("other"), 0))
         assertEquals("2 items", String.format(Locale.US, forms.getValue("other"), 2))
         assertEquals("11 items", String.format(Locale.US, forms.getValue("other"), 11))
-    }
-
-    /**
-     * `app/src/main/res/values/strings.xml`, found by walking up from the working directory.
-     *
-     * Gradle runs a unit test with the *module* directory as its working directory, but that is
-     * a default rather than a promise and an IDE runner may disagree. Walking up until the path
-     * resolves makes the test say what it means — "the strings file this module ships" — instead
-     * of encoding one runner's convention.
-     */
-    private fun stringsXml(): File {
-        val relative = "app/src/main/res/values/strings.xml"
-        var dir: File? = File(System.getProperty("user.dir")).absoluteFile
-        while (dir != null) {
-            val candidate = File(dir, relative)
-            if (candidate.isFile) return candidate
-            // Also the case where the working directory already *is* `app/`.
-            val fromModule = File(dir, "src/main/res/values/strings.xml")
-            if (fromModule.isFile) return fromModule
-            dir = dir.parentFile
-        }
-        throw AssertionError("could not find $relative from ${System.getProperty("user.dir")}")
     }
 
     // --- FR-11: the collapsed wallet's summary (11 decision 4) ------------------------

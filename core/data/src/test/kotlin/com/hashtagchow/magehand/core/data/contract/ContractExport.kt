@@ -41,6 +41,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
 import java.security.MessageDigest
 import kotlin.random.Random
@@ -98,8 +99,18 @@ object ContractExport {
      * tick is the storm against the shared 50-per-10 s subscription bucket that these two knobs
      * exist to prevent, and it costs the whole table, not the client that ships it. A pin on the
      * version is how a vendored copy finds out there is something new to port.
+     *
+     * **4** — FR-7 roll discovery (`domain/rules.json#discovery.rolls`, the `rolls-discovery`
+     * vector), the `#capacity` rule, and — the reason this is a bump rather than a quiet
+     * addition — `#discovery.hitPoints.tempMatch` is **corrected**, not extended. Schema 3
+     * exported `variableName == 'tempHitPoints'`, which is design 03's text and is not what
+     * any real sheet writes; the live sheets write `tempHP`. A consumer that implemented the
+     * schema-3 rule finds no temp-HP row on any character and gets no error while doing it,
+     * which is the silent-wrong-answer class the previous two bumps exist for. `tempMatch`
+     * now names a SET, so a consumer still reading it as a single literal has a shape change
+     * to trip over rather than a value it can keep mis-reading.
      */
-    const val SCHEMA_VERSION: Int = 3
+    const val SCHEMA_VERSION: Int = 4
 
     /** Where the export lives, relative to the repository root. */
     const val DIRECTORY: String = "contract-export"
@@ -951,6 +962,11 @@ object ContractExport {
         CreatureSheet.fromSnapshotJson(ContractFixtures.trackerSheetBody(), ContractFixtures.creatureId)
     }
 
+    /** The FR-7 roll-discovery fixture. See [ContractFixtures.rollsSheetBody]. */
+    internal val rollsSheet: CreatureSheet by lazy {
+        CreatureSheet.fromSnapshotJson(ContractFixtures.rollsSheetBody(), ContractFixtures.creatureId)
+    }
+
     /** The rows the write vectors are built from — produced by the engine, not written down. */
     private val trackerBoard: TrackerBoard by lazy { TrackerEngine.build(trackerSheet) }
 
@@ -1286,9 +1302,62 @@ object ContractExport {
         put("discovery", discoveryRules())
         put("softRemove", softRemoveRule())
         put("equippable", equippableRule())
+        put("capacity", capacityRule())
         put("wallet", walletRule())
         put("quantity", quantityRule())
         put("writeSemantics", writeSemanticsRule())
+    }
+
+    /**
+     * `#capacity` — the carried-weight ceiling.
+     *
+     * Stated as a rule because WP-C found the *number* pinned in a discovery vector
+     * (`capacityLb` on the inventory board) with nothing anywhere saying where it came from.
+     * A consumer could read 225 off that vector and have no way to know whether it was
+     * `STR × 15`, a sheet field, or a constant — so the vector proved the arithmetic without
+     * ever stating it.
+     */
+    private fun capacityRule(): JsonObject = buildJsonObject {
+        put(
+            "rule",
+            "carriedWeightLb ceiling = strength score × ${InventoryBoard.CAPACITY_PER_STRENGTH} " +
+                "(5e's carrying capacity). `null` — no capacity line at all — when the sheet " +
+                "expresses no Strength score; a client must not substitute 10.",
+        )
+        put("perStrength", InventoryBoard.CAPACITY_PER_STRENGTH)
+        put(
+            "match",
+            "type == 'attribute' && attributeType == '${TrackerEngine.ATTR_ABILITY}' && " +
+                "variableName == '${InventoryEngine.VAR_STRENGTH}' && !inactive",
+        )
+        put(
+            "matchedByVariableName",
+            "Keyed on `variableName`, NOT on the display name: the name is whatever the sheet's " +
+                "author typed, and `variableName` is what every formula on the sheet already " +
+                "references.",
+        )
+        put(
+            "score",
+            "`total`, falling back to `value`. `total` is the score AFTER every effect the " +
+                "server folded in — a belt of giant strength must move the capacity line, and " +
+                "reading `value` would ignore it.",
+        )
+        put(
+            "note",
+            "This is the SCORE, not the `${TrackerEngine.FIELD_MODIFIER}` field that the same " +
+                "property carries for roll discovery. Two different numbers on one document: " +
+                "capacity multiplies the score, a roll adds the modifier.",
+        )
+        put(
+            "encumbranceTiers",
+            "Deliberately absent (design 10 decision 8's fence). One number and a ceiling, not " +
+                "a rules engine. `isOverCapacity` is the only derived flag.",
+        )
+        put(
+            "drawnAgainst",
+            "The bar is drawn against the CLIENT's own removed-filtered sum, never against a " +
+                "server container rollup — see `#softRemove.consequence`.",
+        )
     }
 
     private fun discoveryRules(): JsonObject = buildJsonObject {
@@ -1332,11 +1401,32 @@ object ContractExport {
         put(
             "hitPoints",
             buildJsonObject {
-                put("match", "type == 'attribute' && variableName == 'hitPoints'")
-                put("tempMatch", "variableName == 'tempHitPoints'")
+                put(
+                    "match",
+                    "type == 'attribute' && variableName == '${TrackerEngine.VAR_HIT_POINTS}'",
+                )
+                put(
+                    "tempMatch",
+                    "type == 'attribute' && variableName ∈ tempVariableNames",
+                )
+                put(
+                    "tempVariableNames",
+                    JsonArray(TrackerEngine.TEMP_HP_VARIABLE_NAMES.sorted().map { JsonPrimitive(it) }),
+                )
+                put(
+                    "tempAlias",
+                    "**Correction to schema 3, which exported `tempHitPoints` alone.** Design 03's " +
+                        "text says `tempHitPoints`; every real sheet writes `tempHP`, re-confirmed " +
+                        "live on 2026-08-24. A client implementing the schema-3 rule literally " +
+                        "never finds a temp-HP row — the failure is silent (no row, no error), so " +
+                        "it reads as 'this character has no temp HP' rather than as a bug. " +
+                        "Production accepts BOTH and always has; only the export was narrow. " +
+                        "Match the SET, do not pick one.",
+                )
                 put("note", "Found by `variableName`, NOT by `attributeType`.")
             },
         )
+        put("rolls", rollsRule())
         put(
             "toggles",
             buildJsonObject {
@@ -1365,6 +1455,138 @@ object ContractExport {
             "remaining",
             "`value` when the server published it, else `total − damage`. Never compute over a " +
                 "value the server already stated.",
+        )
+    }
+
+    /**
+     * FR-7 roll discovery: checks, saves and skills, plus the advantage rollup.
+     *
+     * Live-verified 2026-08-24 (docs/verification/probe-p5-rolls.md). The one correction that
+     * report forced into this block is [sourceCollection]: rolls come off
+     * `creatureProperties`, not off the fat `creatureVariables` document a reader of design
+     * 03 would reasonably reach for first.
+     */
+    private fun rollsRule(): JsonObject = buildJsonObject {
+        put(
+            "sourceCollection",
+            "creatureProperties — NOT `creatureVariables`. The `creatureVariables` document is a " +
+                "map of variableName → a COPY of the same property document, and it also carries " +
+                "server calculation scaffolding (`_calculation` wrappers, parse trees, effect " +
+                "lists) that no client needs. Discovery reads the property list, which is the " +
+                "same list every other rule here reads and the only one with a stable `order`.",
+        )
+        put(
+            "abilityCheck",
+            buildJsonObject {
+                put(
+                    "match",
+                    "type == 'attribute' && attributeType == '${TrackerEngine.ATTR_ABILITY}'",
+                )
+                put("modifierField", TrackerEngine.FIELD_MODIFIER)
+                put(
+                    "modifierFieldWarning",
+                    "`${TrackerEngine.FIELD_MODIFIER}`, NOT `value` or `total`. Those two are the " +
+                        "SCORE — the 3-to-20 number — and adding a score to a d20 is off by about " +
+                        "ten. This is the single most likely way a second client gets rolls wrong.",
+                )
+                put(
+                    "missingModifier",
+                    "SKIP the property. Never re-derive `floor((score − 10) / 2)`: the server has " +
+                        "already folded every effect into the real number, and an attribute that " +
+                        "does not state what it adds is not a roll a client can answer.",
+                )
+            },
+        )
+        put(
+            "skillSaveOrCheck",
+            buildJsonObject {
+                put("match", "type == '${TrackerEngine.TYPE_SKILL}'")
+                put("modifierField", "value")
+                put(
+                    "modifierFieldNote",
+                    "`value` is the TOTAL the sheet already computed. `abilityMod` and " +
+                        "`proficiency` are its ingredients and must NOT be re-added: they do not " +
+                        "account for what a feature contributed, so a client that sums them " +
+                        "disagrees with the sheet exactly where the character is interesting.",
+                )
+                put(
+                    "excludedSkillTypes",
+                    JsonArray(TrackerEngine.NON_ROLL_SKILL_TYPES.sorted().map { JsonPrimitive(it) }),
+                )
+                put(
+                    "excludedSkillTypesWhy",
+                    "DiceCloud files weapon, armour and language PROFICIENCIES under the same " +
+                        "`${TrackerEngine.TYPE_SKILL}` type, each carrying a `value` (the " +
+                        "proficiency bonus) purely because the type has the field. A client that " +
+                        "keys on `type` alone offers the player a 'Common check'.",
+                )
+                put(
+                    "exclusionNotAllowList",
+                    "An EXCLUSION list on purpose. An allow-list silently drops a kind DiceCloud " +
+                        "adds later, and dropping a real roll is the failure a player can neither " +
+                        "see nor work around. `check` and `tool` are both live-observed kinds that " +
+                        "an allow-list of skills-and-saves would have lost.",
+                )
+            },
+        )
+        put(
+            "shared",
+            buildJsonObject {
+                put("id", "_id — the creatureProperties id; a selection is remembered against it.")
+                put("name", "Required and non-blank. A nameless roll is an un-pickable blank row; drop it.")
+                put("sortOrder", "`order`, then the name. The SHEET's order, never alphabetical.")
+                put("skip", "The blanket rule: `inactive: true` or `removed: true` → skipped.")
+            },
+        )
+        put(
+            "modifierSign",
+            "A signed whole number, already totalled by the source, and it MAY BE NEGATIVE — a " +
+                "Strength 8 character's check modifier is −1 and their Athletics is −1. Render " +
+                "with an explicit sign (`+5` / `−1`); never `abs()`, never clamp at zero.",
+        )
+        put(
+            "advantage",
+            buildJsonObject {
+                put("field", TrackerEngine.FIELD_ADVANTAGE)
+                put(
+                    "encoding",
+                    "READ THE SIGN: > 0 → ADVANTAGE, < 0 → DISADVANTAGE, 0 or absent → NONE.",
+                )
+                put(
+                    "notAMagicConstant",
+                    "The field is a ROLLUP — every active effect aimed at the roll accumulates " +
+                        "into it — so `== 1` is wrong and `== -1` is wrong. Values of 2 and −3 " +
+                        "occur the moment two effects stack.",
+                )
+                put(
+                    "absentEqualsZero",
+                    "The key is present on some rolls and absent on others ON THE SAME SHEET. " +
+                        "Absent and 0 are ONE answer (NONE); do not distinguish them.",
+                )
+                put(
+                    "cancellation",
+                    "One of each arrives as 0, indistinguishable from neither. That is the only " +
+                        "reading the wire supports, and it is also what 5e says the result is.",
+                )
+                put(
+                    "clientDoesNotInterpretEffects",
+                    "A sheet carries `type: 'effect'` documents with `operation: " +
+                        "'advantage'|'disadvantage'` and a `stats` array naming their targets. A " +
+                        "client MUST NOT evaluate those. The server recomputes the rollup when the " +
+                        "condition toggles, and reading the rollup is how the flip arrives.",
+                )
+            },
+        )
+        put(
+            "absentSection",
+            "A character whose data names no roll yields an EMPTY list, and the Rolls section is " +
+                "then absent rather than an empty dropdown. This is not hypothetical: a minimal " +
+                "sheet with no ability scores and no skill properties discovers zero rolls.",
+        )
+        put(
+            "readOnly",
+            "No DiceCloud method changes a modifier. This is reference data; expose no control " +
+                "that implies otherwise.",
         )
     }
 
@@ -1590,9 +1812,77 @@ object ContractExport {
                     ),
                 )
                 add(
+                    discoveryVector(
+                        name = "rolls-discovery",
+                        purpose = "FR-7 roll discovery, run by the production engine over a " +
+                            "synthetic sheet built so that every wrong implementation produces a " +
+                            "different answer. The excluded properties are in the input; the " +
+                            "`rolls` array is what the engine returned.",
+                        exercises = listOf(
+                            "ability check: read `modifier`, NOT `value`/`total` (the score)",
+                            "the ability's modifier disagrees with floor((score-10)/2) — " +
+                                "re-deriving it fails this vector",
+                            "an ability with no `modifier` key at all is skipped, never back-derived",
+                            "skill: read `value`, the sheet's own total — `abilityMod + proficiency` " +
+                                "is SHORT by what a feature contributed",
+                            "save: same shape as a skill, distinguished only by `skillType`",
+                            "`check` (Initiative) survives — the filter is an exclusion list",
+                            "advantage as a rollup read for its SIGN: +2 → ADVANTAGE, -3 → DISADVANTAGE",
+                            "advantage present-and-zero, and advantage absent, both → NONE",
+                            "modifier sign convention: negative modifiers on both a check and a save",
+                            "excluded skillTypes: language / weapon / armor are proficiencies, not rolls",
+                            "the blanket skip on `inactive` and on `removed`",
+                            "a nameless roll is dropped",
+                            "ordering is the sheet's `order`, then the name",
+                        ),
+                        input = ContractFixtures.rollsSheetBody(),
+                        expected = buildJsonObject {
+                            put("rolls", JsonArray(TrackerEngine.build(rollsSheet).rolls.map { it.toJson() }))
+                            put(
+                                "excludedPropertyIds",
+                                excludedRollIds(),
+                            )
+                            put("propertiesDelivered", rollsSheet.propertyList.size)
+                            put("rollsDiscovered", TrackerEngine.build(rollsSheet).rolls.size)
+                        },
+                    ),
+                )
+                add(
                     softRemovedVector(),
                 )
             },
+        )
+    }
+
+    /**
+     * The rolls fixture's property ids that discovery did **not** return, each labelled with
+     * the `skillType`/shape that got it excluded.
+     *
+     * Derived — input ids minus discovered ids — rather than listed. A hand-written exclusion
+     * list would be a second implementation of the filter, and it would keep passing after
+     * the filter changed underneath it.
+     */
+    private fun excludedRollIds(): JsonArray {
+        val discovered = TrackerEngine.build(rollsSheet).rolls.map { it.id }.toSet()
+        fun JsonObject.text(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+        return JsonArray(
+            rollsSheet.propertyList
+                .filter { it.text("_id").orEmpty() !in discovered }
+                .map { p ->
+                    buildJsonObject {
+                        put("_id", p.text("_id").orEmpty())
+                        put("name", p.text("name").orEmpty())
+                        put("type", p.text("type").orEmpty())
+                        put("skillType", p.text("skillType")?.let { JsonPrimitive(it) } ?: JsonNull)
+                        put(
+                            "attributeType",
+                            p.text("attributeType")?.let { JsonPrimitive(it) } ?: JsonNull,
+                        )
+                        put("inactive", p["inactive"] != null)
+                        put("removed", p["removed"] != null)
+                        put("hasModifierField", p[TrackerEngine.FIELD_MODIFIER] != null)
+                    }
+                },
         )
     }
 
@@ -1942,7 +2232,10 @@ object ContractExport {
         appendLine("| `ddp/subscriptions.json` | The two publications used, with recorded `sub` frames. |")
         appendLine("| `ddp/rate-limits.json` | The server's rate-limit classes and the client rules that stay inside them. |")
         appendLine("| `ddp/method-vectors.json` | One canonical method frame per catalogued call, plus its inverse and its rate class. |")
-        appendLine("| `domain/rules.json` | Discovery, soft-delete, equippability, wallet, quantity and write semantics. |")
+        appendLine(
+            "| `domain/rules.json` | Discovery (tracker rows AND rolls), soft-delete, " +
+                "equippability, carry capacity, wallet, quantity and write semantics. |",
+        )
         appendLine("| `domain/discovery-vectors.json` | Input sheets paired with the output the production engines produced. |")
         appendLine("| `item-catalog.json` | The built-in add-item catalog and its categories. |")
         appendLine()

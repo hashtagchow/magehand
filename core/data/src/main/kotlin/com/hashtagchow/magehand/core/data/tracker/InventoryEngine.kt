@@ -71,7 +71,9 @@ object InventoryEngine {
     private const val FIELD_CONTENTS_VALUE = "contentsValue"
 
     private const val ATTR_ABILITY = "ability"
-    private const val VAR_STRENGTH = "strength"
+
+    /** Public so the contract export's `#capacity` rule names the variable the code matches on. */
+    const val VAR_STRENGTH = "strength"
 
     private const val FIELD_TAGS = "tags"
     private const val FIELD_LIBRARY_TAGS = "libraryTags"

@@ -9,13 +9,14 @@ import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.PipRowState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerUiState
 import com.hashtagchow.magehand.core.model.TrackerKind
+import com.hashtagchow.magehand.stringsXml
+import com.hashtagchow.magehand.walkUpFor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 import java.util.Locale
 
 /**
@@ -444,31 +445,9 @@ class DmCardUiStateTest {
         )
     }
 
-    /** `DmCard.kt`, found by walking up — `InventoryUiStateTest.stringsXml`'s reason. */
+    /** `DmCard.kt`, found by walking up — [stringsXml]'s reason. */
     private fun dmCardSource(): String = walkUpFor(
         "app/src/main/java/com/hashtagchow/magehand/ui/screens/dmview/DmCard.kt",
         "src/main/java/com/hashtagchow/magehand/ui/screens/dmview/DmCard.kt",
     ).readText()
-
-    /**
-     * `app/src/main/res/values/strings.xml`, found by walking up from the working directory.
-     *
-     * Gradle runs a unit test with the *module* directory as its working directory, but that is
-     * a default rather than a promise and an IDE runner may disagree — `InventoryUiStateTest`
-     * carries the same walk for the same reason.
-     */
-    private fun stringsXml(): File = walkUpFor(
-        "app/src/main/res/values/strings.xml",
-        "src/main/res/values/strings.xml",
-    )
-
-    private fun walkUpFor(fromRoot: String, fromModule: String): File {
-        var dir: File? = File(System.getProperty("user.dir")).absoluteFile
-        while (dir != null) {
-            File(dir, fromRoot).takeIf { it.isFile }?.let { return it }
-            File(dir, fromModule).takeIf { it.isFile }?.let { return it }
-            dir = dir.parentFile
-        }
-        throw AssertionError("could not find $fromRoot from ${System.getProperty("user.dir")}")
-    }
 }

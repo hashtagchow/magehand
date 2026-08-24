@@ -1,6 +1,7 @@
 package com.hashtagchow.magehand.core.ddp
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -103,9 +104,24 @@ class TestDummyProvisioningTest {
 
             // Insert whatever is missing, so a half-provisioned dummy heals rather than
             // failing the probe three steps in.
-            REQUIRED.forEach { required ->
+            //
+            // `insertedByLabel` is what lets a child be inserted in the SAME pass as its
+            // parent: [Required.parentLabel] names the entry to hang under, and the parent's
+            // id is either one the sheet already had or one this loop just minted a step ago.
+            val insertedByLabel = mutableMapOf<String, String>()
+            REQUIRED.forEachIndexed { index, required ->
                 if (properties.none(required.matches)) {
-                    val id = insertProperty(client, creatureId, required.document(properties.size))
+                    val parentId = required.parentLabel?.let { label ->
+                        insertedByLabel[label]
+                            ?: properties.first(REQUIRED.first { it.label == label }.matches).text("_id")
+                    }
+                    val id = insertProperty(
+                        client,
+                        creatureId,
+                        required.document(properties.size + index),
+                        parentPropertyId = parentId,
+                    )
+                    if (id != null) insertedByLabel[required.label] = id
                     println("== inserted ${required.label} → $id")
                 }
             }
@@ -147,10 +163,17 @@ class TestDummyProvisioningTest {
         return id!!
     }
 
+    /**
+     * @param parentPropertyId when non-null, the property is inserted UNDER that property
+     *   (`{collection:'creatureProperties', id:…}`) rather than at the creature root. That is
+     *   the only difference between a loose item and one inside a container — containment is
+     *   the parent ref, not a field on the item.
+     */
     private suspend fun insertProperty(
         client: DdpClient,
         creatureId: String,
         property: JsonObject,
+        parentPropertyId: String? = null,
     ): String? = (
         client.call(
             "creatureProperties.insert",
@@ -158,8 +181,13 @@ class TestDummyProvisioningTest {
                 buildJsonObject {
                     put("creatureProperty", property)
                     putJsonObject("parentRef") {
-                        put("collection", "creatures")
-                        put("id", creatureId)
+                        if (parentPropertyId == null) {
+                            put("collection", "creatures")
+                            put("id", creatureId)
+                        } else {
+                            put("collection", "creatureProperties")
+                            put("id", parentPropertyId)
+                        }
                     }
                 },
             ),
@@ -167,13 +195,17 @@ class TestDummyProvisioningTest {
         )?.contentOrNull
 
     /**
-     * The five shapes WP7's probe exercises, one per write path in
-     * docs/design/03-data-model.md §Write semantics.
+     * One shape the dummy must carry, one per write path in
+     * docs/design/03-data-model.md §Write semantics plus the coverage gaps
+     * docs/verification/probe-p5-seeding.md lists.
+     *
+     * @param parentLabel the [label] of the entry this one hangs under. `null` = creature root.
      */
     private class Required(
         val label: String,
         val matches: (JsonObject) -> Boolean,
         val document: (order: Int) -> JsonObject,
+        val parentLabel: String? = null,
     )
 
     private companion object {
@@ -224,6 +256,24 @@ class TestDummyProvisioningTest {
                 },
             ),
             Required(
+                // FR-7 / the clear-temp-HP sweep step: the control is only exercisable when
+                // the dummy HAS temp HP, so the baseline is 2 rather than 0. `tempHP` (not
+                // design 03's `tempHitPoints`) is what a real sheet writes — see
+                // docs/verification/probe-p5-rolls.md §tempHP.
+                label = "temp HP",
+                matches = { it.text("variableName") in setOf("tempHP", "tempHitPoints") },
+                document = { order ->
+                    buildJsonObject {
+                        put("order", order)
+                        put("type", "attribute")
+                        put("attributeType", "healthBar")
+                        put("name", "Temporary Hit Points")
+                        put("variableName", "tempHP")
+                        putJsonObject("baseValue") { put("calculation", "2") }
+                    }
+                },
+            ),
+            Required(
                 label = "spell slot",
                 matches = { it.text("attributeType") == "spellSlot" && it.text("reset") == "longRest" },
                 document = { order ->
@@ -267,6 +317,70 @@ class TestDummyProvisioningTest {
                 },
             ),
             Required(
+                // FR-10's POSITIVE equippability case, which no device sweep has exercised
+                // since 1.4.0 because the dummy carried only a potion. `martial weapon` and
+                // `melee weapon` are both in `InventoryEngine.WEAPON_TAGS`, so this item must
+                // render an Equip control and file under Weapons.
+                label = "weapon",
+                matches = { it.text("type") == "item" && it.tags().any { t -> t == "melee weapon" } },
+                document = { order ->
+                    buildJsonObject {
+                        put("order", order)
+                        put("type", "item")
+                        put("name", "Longsword")
+                        put("quantity", 1)
+                        put("weight", 3)
+                        put("value", 15)
+                        put("equipped", false)
+                        put("tags", JsonArray(listOf("martial weapon", "melee weapon").map(::JsonPrimitive)))
+                        // The wrapper the insert vector requires; a bare string is refused.
+                        putJsonObject("description") { put("text", "A versatile martial blade.") }
+                    }
+                },
+            ),
+            Required(
+                // magehand N6: multi-container coverage. A container is only interesting when
+                // it HAS contents — an empty one exercises neither the rollup nor the
+                // group-by-container layout.
+                //
+                // NOT YET APPLIED TO THE LIVE DUMMY (stopped for an operator reboot,
+                // 2026-08-24) — see docs/verification/probe-p5-seeding.md. The next run of
+                // this test inserts both.
+                label = "container",
+                matches = { it.text("type") == "container" },
+                document = { order ->
+                    buildJsonObject {
+                        put("order", order)
+                        put("type", "container")
+                        put("name", "Backpack")
+                        put("quantity", 1)
+                        put("weight", 5)
+                        put("value", 2)
+                        putJsonObject("description") { put("text", "A sturdy leather pack.") }
+                    }
+                },
+            ),
+            Required(
+                // The container's contents. Containment is the PARENT REF, not a field on the
+                // item — hence [Required.parentLabel] and the non-root branch of insertProperty.
+                label = "container contents",
+                matches = { it.text("type") == "item" && it.text("name") == "Rope, Hempen (50 feet)" },
+                parentLabel = "container",
+                document = { order ->
+                    buildJsonObject {
+                        put("order", order)
+                        put("type", "item")
+                        put("name", "Rope, Hempen (50 feet)")
+                        put("quantity", 1)
+                        put("weight", 10)
+                        put("value", 1)
+                        put("equipped", false)
+                        put("tags", JsonArray(listOf("adventuring gear").map(::JsonPrimitive)))
+                        putJsonObject("description") { put("text", "50 feet of hempen rope.") }
+                    }
+                },
+            ),
+            Required(
                 // Condition-free, so `TrackerEngine`'s flippable-toggle rule surfaces it as
                 // a chip (docs/verification/WP4.md §6.2).
                 label = "toggle",
@@ -282,5 +396,8 @@ class TestDummyProvisioningTest {
         )
 
         fun JsonObject.text(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+
+        fun JsonObject.tags(): List<String> =
+            (this["tags"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
     }
 }

@@ -7,6 +7,7 @@ import com.hashtagchow.magehand.core.data.write.WriteOp
 import com.hashtagchow.magehand.core.data.write.WriteQueueConfig
 import com.hashtagchow.magehand.core.ddp.DdpClientConfig
 import com.hashtagchow.magehand.core.ddp.MeteorId
+import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.ItemCatalog
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -14,6 +15,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -697,6 +699,211 @@ class ContractExportTest {
         val carried = InventoryEngine.build(sheet).carriedWeightLb
         assertEquals(carried, expected["carriedWeightLb"]!!.jsonPrimitive().content.toDouble(), 1e-9)
         assertTrue("the fixture must carry less than the removed anvil's own weight", carried < 100.0)
+    }
+
+    @Test
+    fun `the rolls vector covers a check a save a skill and both advantage directions`() {
+        val expected = discoveryVector("rolls-discovery").expected()
+        val rolls = expected["rolls"]!!.jsonArray.map { it.jsonObject }
+        fun roll(id: String) = rolls.firstOrNull { it.str("id") == id }
+
+        // The FR-7 shapes the section is made of, one each.
+        val check = roll(ContractFixtures.abilityIntelligenceId)
+        assertNotNull("an ability check must be discovered", check)
+        val save = roll(ContractFixtures.saveDexterityId)
+        assertNotNull("a saving throw must be discovered", save)
+        val skill = roll(ContractFixtures.skillArcanaId)
+        assertNotNull("a skill must be discovered", skill)
+
+        // Advantage is the SIGN of a rollup, and the fixture's magnitudes are 2 and -3
+        // precisely so a `== 1` / `== -1` implementation answers NONE and fails here.
+        assertEquals(
+            "advantage: 2 is ADVANTAGE — the field is a rollup, not a flag",
+            "ADVANTAGE",
+            roll(ContractFixtures.skillStealthAdvantageId)?.str("advantage"),
+        )
+        assertEquals(
+            "advantage: -3 is DISADVANTAGE",
+            "DISADVANTAGE",
+            roll(ContractFixtures.saveWisdomDisadvantageId)?.str("advantage"),
+        )
+        assertEquals(
+            "advantage present and zero is NONE",
+            "NONE",
+            check!!.str("advantage"),
+        )
+        assertEquals(
+            "advantage absent is the same answer as advantage zero",
+            "NONE",
+            skill!!.str("advantage"),
+        )
+
+        // The modifier's provenance, stated as the two numbers a wrong client produces.
+        assertEquals(
+            "an ability check reads `modifier`, not the score — 14 would be the score",
+            3,
+            check["modifier"]?.jsonPrimitive()?.intOrNull,
+        )
+        assertEquals(
+            "a skill reads `value`, the sheet's own total — abilityMod + proficiency is 6",
+            7,
+            skill["modifier"]?.jsonPrimitive()?.intOrNull,
+        )
+
+        // The sign convention, on both roll kinds.
+        assertEquals(
+            "a check modifier may be negative",
+            -1,
+            roll(ContractFixtures.abilityStrengthCheckId)?.get("modifier")?.jsonPrimitive()?.intOrNull,
+        )
+        assertEquals(
+            "a save modifier may be negative",
+            -1,
+            roll(ContractFixtures.saveWisdomDisadvantageId)?.get("modifier")?.jsonPrimitive()?.intOrNull,
+        )
+
+        // Ordering is the sheet's, never alphabetical: Intelligence (10) before Arcana (20).
+        assertEquals(
+            rolls.map { it.str("name") },
+            rolls.sortedBy { it["sortOrder"]!!.jsonPrimitive().int }.map { it.str("name") },
+        )
+    }
+
+    @Test
+    fun `the rolls vector carries its exclusions in the input`() {
+        val vector = discoveryVector("rolls-discovery")
+        val input = vector["input"]!!.jsonObject["creatureProperties"]!!.jsonArray.map { it.jsonObject }
+        val expected = vector.expected()
+        val discovered = expected["rolls"]!!.jsonArray.map { it.jsonObject.str("id") }.toSet()
+        val excluded = expected["excludedPropertyIds"]!!.jsonArray.map { it.jsonObject }
+
+        assertEquals(
+            "every input property is either discovered or listed as excluded",
+            input.size,
+            discovered.size + excluded.size,
+        )
+        assertEquals(input.size, expected["propertiesDelivered"]?.jsonPrimitive()?.intOrNull)
+        assertEquals(discovered.size, expected["rollsDiscovered"]?.jsonPrimitive()?.intOrNull)
+
+        fun excludedIds() = excluded.mapNotNull { it.str("_id") }.toSet()
+
+        // The three proficiency skillTypes: same property type, same `value` field, not rolls.
+        TrackerEngine.NON_ROLL_SKILL_TYPES.forEach { skillType ->
+            assertTrue(
+                "a `$skillType` proficiency must be in the input so the exclusion is provable",
+                input.any { it.str("skillType") == skillType },
+            )
+            assertTrue(
+                "a `$skillType` proficiency must not be offered as a roll",
+                excluded.any { it.str("skillType") == skillType },
+            )
+        }
+        // `check` is NOT excluded — the filter is an exclusion list so unfamiliar kinds surface.
+        assertTrue(
+            "a `check` (Initiative) is a roll and must survive the filter",
+            ContractFixtures.checkInitiativeId in discovered,
+        )
+
+        assertTrue(
+            "an ability with no `modifier` field is skipped, never back-derived from the score",
+            ContractFixtures.abilityNoModifierId in excludedIds(),
+        )
+        assertTrue("`inactive` skips", ContractFixtures.skillInactiveDeathSaveId in excludedIds())
+        assertTrue("`removed` skips", ContractFixtures.skillRemovedId in excludedIds())
+        assertTrue("a nameless roll is dropped", ContractFixtures.skillNamelessId in excludedIds())
+    }
+
+    @Test
+    fun `the rolls rule names the collection the engine actually reads`() {
+        val rule = documentAt("domain/rules.json")["discovery"]!!.jsonObject["rolls"]!!.jsonObject
+        assertTrue(
+            "rolls come off creatureProperties; the export must say so, because " +
+                "`creatureVariables` is the obvious wrong guess",
+            rule.str("sourceCollection").orEmpty().contains("creatureProperties"),
+        )
+        assertEquals(
+            TrackerEngine.NON_ROLL_SKILL_TYPES.sorted(),
+            rule["skillSaveOrCheck"]!!.jsonObject["excludedSkillTypes"]!!.jsonArray
+                .mapNotNull { it.jsonPrimitive().contentOrNull },
+        )
+        assertEquals(
+            "the ability rule must name the field the engine reads, not the one a client guesses",
+            TrackerEngine.FIELD_MODIFIER,
+            rule["abilityCheck"]!!.jsonObject.str("modifierField"),
+        )
+        assertEquals(
+            TrackerEngine.FIELD_ADVANTAGE,
+            rule["advantage"]!!.jsonObject.str("field"),
+        )
+        assertTrue(
+            "the modifier may be negative and the export must say so",
+            rule.str("modifierSign").orEmpty().contains("NEGATIVE", ignoreCase = true),
+        )
+    }
+
+    @Test
+    fun `the temp HP rule exports every variable name production accepts`() {
+        val hp = documentAt("domain/rules.json")["discovery"]!!.jsonObject["hitPoints"]!!.jsonObject
+        val names = hp["tempVariableNames"]!!.jsonArray.mapNotNull { it.jsonPrimitive().contentOrNull }
+        assertEquals(TrackerEngine.TEMP_HP_VARIABLE_NAMES.sorted(), names)
+        assertTrue(
+            "`tempHP` is what live sheets write; an export naming only 03's `tempHitPoints` " +
+                "sends a consumer looking for a row that is never there",
+            "tempHP" in names,
+        )
+        assertTrue("03's spelling stays accepted too", "tempHitPoints" in names)
+        assertEquals(TrackerEngine.VAR_HIT_POINTS, "hitPoints")
+
+        // The engine, not the prose: both spellings must actually produce a temp-HP row.
+        TrackerEngine.TEMP_HP_VARIABLE_NAMES.forEach { variableName ->
+            val body = ContractFixtures.snapshotBody(
+                creature = ContractFixtures.creature(),
+                properties = listOf(
+                    ContractFixtures.attribute(
+                        id = ContractFixtures.tempHitPointsId, name = "Temp HP",
+                        attributeType = "healthBar", variableName = variableName,
+                        total = 5, damage = 0, order = 1,
+                    ),
+                ),
+            )
+            val board = TrackerEngine.build(
+                CreatureSheet.fromSnapshotJson(body, ContractFixtures.creatureId),
+            )
+            assertNotNull("`$variableName` must be found as temp HP", board.tempHp)
+            assertEquals(5, board.tempHp!!.total)
+        }
+    }
+
+    @Test
+    fun `the capacity rule states the arithmetic the vector only demonstrates`() {
+        val rule = documentAt("domain/rules.json")["capacity"]!!.jsonObject
+        assertEquals(
+            InventoryBoard.CAPACITY_PER_STRENGTH,
+            rule["perStrength"]?.jsonPrimitive()?.intOrNull,
+        )
+        assertTrue(
+            "the rule must be keyed on the strength variableName, not the display name",
+            rule.str("match").orEmpty().contains("'${InventoryEngine.VAR_STRENGTH}'"),
+        )
+        assertTrue(
+            "`total` before `value`, so an effect that raises Strength raises the ceiling",
+            rule.str("score").orEmpty().contains("total"),
+        )
+
+        // The number the vector already pins must be exactly what this rule computes.
+        val board = discoveryVector("inventory-discovery").expected()["inventoryBoard"]!!.jsonObject
+        val sheet = CreatureSheet.fromSnapshotJson(
+            ContractFixtures.inventorySheetBody(),
+            ContractFixtures.creatureId,
+        )
+        val strength = sheet.propertyList
+            .first { it.str("variableName") == InventoryEngine.VAR_STRENGTH }["total"]!!
+            .jsonPrimitive().int
+        assertEquals(
+            "the exported capacity must equal STR × ${InventoryBoard.CAPACITY_PER_STRENGTH}",
+            strength * InventoryBoard.CAPACITY_PER_STRENGTH,
+            board["capacityLb"]?.jsonPrimitive()?.intOrNull,
+        )
     }
 
     @Test

@@ -30,20 +30,28 @@ object TrackerEngine {
     private const val TYPE_TOGGLE = "toggle"
     private const val TYPE_BUFF = "buff"
     private const val TYPE_DAMAGE_MULTIPLIER = "damageMultiplier"
-    private const val TYPE_SKILL = "skill"
+    const val TYPE_SKILL = "skill"
 
     private const val ATTR_SPELL_SLOT = "spellSlot"
     private const val ATTR_RESOURCE = "resource"
-    private const val ATTR_ABILITY = "ability"
+    const val ATTR_ABILITY = "ability"
 
-    private const val VAR_HIT_POINTS = "hitPoints"
+    /** Public so the contract export states the rule from the constant that implements it. */
+    const val VAR_HIT_POINTS = "hitPoints"
 
     /**
      * 03 says temp HP is `variableName == "tempHitPoints"`. The live sheet calls it
      * **`tempHP`** — both are accepted so the engine works against 03's text and against
-     * the server. See docs/verification/WP4.md §Deviations.
+     * the server. See docs/verification/WP4.md §Deviations and
+     * docs/verification/probe-p5-rolls.md §tempHP (live re-confirmation, 2026-08-24).
+     *
+     * Public for the same reason as [VAR_HIT_POINTS]: the contract export shipped only
+     * `tempHitPoints` while every real sheet writes `tempHP`, so a consumer implementing
+     * the exported rule literally would never find a temp-HP row. The export now renders
+     * this set, which makes that class of drift a compile-time impossibility rather than a
+     * thing someone has to remember to re-type.
      */
-    private val TEMP_HP_VARIABLE_NAMES = setOf("tempHitPoints", "tempHP")
+    val TEMP_HP_VARIABLE_NAMES = setOf("tempHitPoints", "tempHP")
 
     private const val CONCENTRATION = "concentration"
 
@@ -73,16 +81,16 @@ object TrackerEngine {
      * data seen here: it is the same proficiency shape as the other two, and leaving it out
      * on the grounds that nobody's sheet happens to carry one would be pedantry with a bug in it.)
      */
-    private val NON_ROLL_SKILL_TYPES = setOf("language", "weapon", "armor")
+    val NON_ROLL_SKILL_TYPES = setOf("language", "weapon", "armor")
 
     /**
      * The rollup DiceCloud writes onto a computed roll when an effect pushes it either way.
      * Read for its **sign** — see [RollAdvantage.fromWire].
      */
-    private const val FIELD_ADVANTAGE = "advantage"
+    const val FIELD_ADVANTAGE = "advantage"
 
     /** An ability *score*'s check modifier, which is a different field from the score itself. */
-    private const val FIELD_MODIFIER = "modifier"
+    const val FIELD_MODIFIER = "modifier"
 
     /**
      * Builds the board.
