@@ -63,6 +63,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
@@ -664,7 +665,8 @@ private fun hpBarColor(fraction: Float): Color = when {
 }
 
 /**
- * One spell-slot level or one resource: name, reset rule, and `total` pips.
+ * One spell-slot level or one resource: name and count on the header line, FR-20's reset badge
+ * on the secondary line when the row has a rule, and `total` pips under both.
  *
  * Above [PipRowState.MAX_PIPS] the pips are replaced by `value / total` and a bar. Eight
  * 48 dp targets plus their gaps is already 400 dp — past the width of a 360 dp phone —
@@ -688,16 +690,13 @@ private fun PipRow(
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
+                // FR-20 decision 2. The rule is spoken here, with the name, rather than left to
+                // the badge below — see [PipRowState.spokenLabel] for why the count stays its
+                // own node instead of the three being merged into one sentence.
+                modifier = Modifier
+                    .weight(1f)
+                    .semantics { contentDescription = row.spokenLabel },
             )
-            row.resetLabel?.let {
-                Text(
-                    text = it,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.width(8.dp))
-            }
             Text(
                 // The probe's parity anchor: one string, "value / total", per row.
                 text = "${row.value} / ${row.total}",
@@ -705,6 +704,16 @@ private fun PipRow(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.testTag(testTag),
             )
+        }
+
+        // FR-20 decision 1's badge, on the row's secondary line and only when the row carries a
+        // rule. It moved off the header line, where it used to sit between the name and the
+        // count: there it competed with the two things the eye comes to this row for, and on a
+        // narrow phone it ate the name's ellipsis budget. Under them it is what it actually is
+        // — an annotation on the row, read after the row.
+        row.resetLabel?.let { badge ->
+            Spacer(Modifier.height(2.dp))
+            ResetBadge(text = badge)
         }
 
         Spacer(Modifier.height(4.dp))
@@ -756,6 +765,42 @@ private fun PipRow(
                 )
             }
         }
+    }
+}
+
+/**
+ * FR-20 decision 1's reset badge: *"Long rest"* / *"Short rest"* under a row's name.
+ *
+ * A tinted chip rather than a bare line of text, because it has to read as an annotation *on*
+ * the row and not as a second row — [SectionHeader]'s colour already means "new group", so a
+ * plain small line under a name is ambiguous at a glance in a dim room.
+ *
+ * ### Why it is silent to TalkBack
+ *
+ * [PipRowState.spokenLabel] already states the rule, as a verb phrase, on the row's name one
+ * line above. Leaving this composable in the accessibility tree would have the row read
+ * *"1st Level, restores on a long rest"* and then *"Long rest"* — the same fact twice, the
+ * second time as a fragment. `clearAndSetSemantics {}` is the narrow, stated version of that:
+ * it removes this node only, and the sentence that replaced it is asserted in
+ * `TrackerUiStateTest`.
+ *
+ * It therefore carries no `testTag` either: a tag *is* a semantics property, so one set here
+ * would be cleared on the next line. Nothing is lost — whether the badge exists at all is
+ * [PipRowState.resetLabel]'s decision, and that is where it is pinned.
+ */
+@Composable
+private fun ResetBadge(text: String, modifier: Modifier = Modifier) {
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier.clearAndSetSemantics {},
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+        )
     }
 }
 

@@ -182,8 +182,49 @@ data class PipRowState(
 ) {
     val spent: Int get() = (total - value).coerceAtLeast(0)
 
-    /** "Long rest" / "Short rest", or `null` when the server gives no reset rule. */
+    /**
+     * The reset **badge** the row renders on its secondary line — "Long rest" / "Short rest",
+     * or `null` when this row carries no reset rule (FR-20 decision 1).
+     *
+     * `null` is the common case and it is the whole reason the badge is worth having: a row
+     * with no rule is a row no rest touches, so *absence* is the fact, and printing a third
+     * word ("Never") on every wand and every ammo count would bury the two rows that do reset
+     * — the same reasoning [RollDisplayState.advantageLabel] gives for not printing "Normal".
+     *
+     * Source-blind by construction. A DiceCloud row gets here from the property's `reset`
+     * field and a local row from `local_tracker_rows.resetRule`, but both are already
+     * [ResetRule] by the time they reach [TrackedResource], so this — and the badge — cannot
+     * disagree between the two sources. An unrecognised wire value parses to `null`
+     * ([ResetRule.fromWire]), which lands on "no badge" rather than on a guess: FR-20 decision
+     * 1 says the badge appears *only* when a rule exists, and a sheet carrying `reset: "dawn"`
+     * has told us something this app does not know how to act on.
+     */
     val resetLabel: String? get() = reset?.label()
+
+    /**
+     * What TalkBack says where the row's name is (FR-20 decision 2) — *"1st Level, restores on
+     * a long rest"*, or just the name when the row has no rule.
+     *
+     * The house spoken-sentence pattern — [RollDisplayState.spoken], and the defenses section's
+     * `"$label: $text"` — applied here: the rule is stated *as part of the name*, in words,
+     * rather than left as a stray fragment beside it. The Heroic Inspiration triage
+     * (2026-08-21) was a player who could not predict what a rest would do to a row; the badge
+     * answers that for a player who can see it, and this is the same answer for one who cannot.
+     *
+     * ### Why the count is not in here
+     *
+     * It is already its own node, one swipe to the right, and it has to stay one: that `Text`
+     * carries the row's `testTag`, which `testTagsAsResourceId` turns into the `resource-id`
+     * the WP6 numeric parity probe reads *and whose text it compares*. Folding the whole header
+     * line into one merged sentence would take the count's node — and the probe's anchor — with
+     * it. Repeating the count in this string instead would have a screen reader read it twice.
+     *
+     * So the row speaks as *"1st Level, restores on a long rest"* → *"3 / 4"* → the pips, which
+     * keep their own "Spend one 1st Level" actions. Three focus stops, no duplication, and the
+     * fact this FR exists to deliver arrives on the first one.
+     */
+    val spokenLabel: String
+        get() = listOfNotNull(label, reset?.spokenSuffix()).joinToString(", ")
 
     /**
      * Pips stop being readable — and stop fitting a 48 dp target across a phone — long
@@ -679,6 +720,27 @@ private fun ConditionToggle.toChip() = ConditionChipState(
 fun ResetRule.label(): String = when (this) {
     ResetRule.SHORT_REST -> "Short rest"
     ResetRule.LONG_REST -> "Long rest"
+}
+
+/**
+ * The clause [PipRowState.spokenLabel] appends for a row that has a reset rule (FR-20 decision 2).
+ *
+ * A **verb phrase**, not [label] read aloud. The badge can be a noun because it sits beside the
+ * row's name where the eye supplies the relationship; a sentence cannot — *"1st Level, 3 of 4,
+ * Long rest"* leaves a TalkBack user to guess whether the row *is* a long rest, *costs* one, or
+ * *comes back* after one, and the triage this FR answers was exactly that guess going wrong.
+ *
+ * "Restores", not "resets", for the reason decision 4 rewords the rest dialog: DiceCloud's rest
+ * only ever moves a tracked value *up* toward its total, and "resets" is the word that made a
+ * player expect a zeroing.
+ *
+ * Same "not a string resource" reasoning as [label] — it is asserted in a JVM unit test with no
+ * Android context, and v1 is English-only (docs/design/00-DESIGN.md). Keeping it beside [label]
+ * is also what stops the badge and the sentence from drifting into naming different rests.
+ */
+fun ResetRule.spokenSuffix(): String = when (this) {
+    ResetRule.SHORT_REST -> "restores on a short rest"
+    ResetRule.LONG_REST -> "restores on a long rest"
 }
 
 private fun TrackerWrite.toHistoryRow(canUndo: Boolean, zone: ZoneId) = HistoryRowState(

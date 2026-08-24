@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
+import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DamageDefense
@@ -15,6 +17,7 @@ import com.hashtagchow.magehand.core.model.RollModifier
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerKind
+import com.hashtagchow.magehand.core.model.toTrackedResource
 import java.time.ZoneId
 
 /**
@@ -634,5 +637,106 @@ class TrackerUiStateTest {
         assertEquals("+0", formatSignedModifier(0))
         assertEquals("+3", formatSignedModifier(3))
         assertEquals("\u22122", formatSignedModifier(-2))
+    }
+
+    // --- FR-20: the reset badge and the spoken row ------------------------------------
+
+    /**
+     * A resource row carrying the given rule, as the *server* delivers one \u2014 `TrackerEngine`
+     * has already parsed the property's `reset` field into [ResetRule] by this point, so the
+     * board is where the two sources meet.
+     */
+    private fun serverRow(reset: ResetRule?) = TrackedResource(
+        propertyId = "res1",
+        kind = TrackerKind.RESOURCE,
+        name = "Rage",
+        value = 1,
+        total = 3,
+        reset = reset,
+    )
+
+    /**
+     * The same row as a **local** one, built from the stored `resetRule` string rather than
+     * from a [ResetRule] handed in.
+     *
+     * Deliberately started at the entity and not at `LocalTrackerRow`: FR-20 decision 3 is
+     * "no schema", and the claim worth pinning is that the column the app *already* has
+     * reaches the badge. Starting a row's life as a Kotlin enum would skip the only step that
+     * could go wrong, which is the parse.
+     */
+    private fun localRow(storedResetRule: String) = LocalTrackerRowEntity(
+        id = "local-row-1",
+        characterId = "local-1",
+        kind = "resource",
+        label = "Rage",
+        total = 3,
+        current = 1,
+        resetRule = storedResetRule,
+        sortIndex = 0,
+    ).toDomain()!!.toTrackedResource()
+
+    private fun badgeOf(row: TrackedResource): String? =
+        map(board = TrackerBoard(resources = listOf(row))).resources.single().resetLabel
+
+    @Test
+    fun `a server row's reset rule reaches the badge, in both directions`() {
+        assertEquals("Long rest", badgeOf(serverRow(ResetRule.LONG_REST)))
+        assertEquals("Short rest", badgeOf(serverRow(ResetRule.SHORT_REST)))
+    }
+
+    @Test
+    fun `a server row with no reset rule carries no badge`() {
+        // The third state, and the common one. FR-20 decision 1 keeps the badge to rows a rest
+        // actually touches \u2014 a wand whose charges come back at dawn must say nothing here
+        // rather than say "Never", or the two rows that matter stop standing out.
+        assertNull(badgeOf(serverRow(null)))
+    }
+
+    @Test
+    fun `a local row's stored resetRule reaches the same badge as a server row's`() {
+        // 09 decision 5's "same screen" claim at this feature: `local_tracker_rows.resetRule`
+        // stores DiceCloud's own wire strings, so the two sources cannot render different
+        // words for the same rule.
+        assertEquals("Long rest", badgeOf(localRow("longRest")))
+        assertEquals("Short rest", badgeOf(localRow("shortRest")))
+    }
+
+    @Test
+    fun `a local row stored as none carries no badge`() {
+        // `LocalTrackerRowEntity.RESET_NONE` \u2014 the player's deliberate "no reset" in the form,
+        // which must land on the same absence a server row's missing `reset` does.
+        assertNull(badgeOf(localRow(LocalTrackerRowEntity.RESET_NONE)))
+    }
+
+    @Test
+    fun `an unrecognised reset value carries no badge, from either source`() {
+        // Tolerant, not strict. DiceCloud can grow a reset rule this build has never heard of
+        // (and a sheet author can put anything in the field). `ResetRule.fromWire` answers
+        // `null` for all of it, which lands on "no badge" \u2014 the row simply says nothing about
+        // rests, which is honest. The alternative \u2014 printing the raw wire value \u2014 would put
+        // "dawn" on a row under a heading the rest dialog cannot act on.
+        assertNull(badgeOf(serverRow(ResetRule.fromWire("dawn"))))
+        assertNull(badgeOf(localRow("dawn")))
+        assertNull(badgeOf(localRow("")))
+    }
+
+    private fun spokenLabelOf(row: TrackedResource): String =
+        map(board = TrackerBoard(resources = listOf(row))).resources.single().spokenLabel
+
+    @Test
+    fun `the spoken row name appends the reset rule as a verb phrase`() {
+        // FR-20 decision 2. "restores on", not the badge's noun: a sentence has to say what the
+        // rest does to the row, because there is no layout left to imply it \u2014 and "restores",
+        // not "resets", for decision 4's reason.
+        assertEquals("Rage, restores on a long rest", spokenLabelOf(serverRow(ResetRule.LONG_REST)))
+        assertEquals("Rage, restores on a short rest", spokenLabelOf(localRow("shortRest")))
+    }
+
+    @Test
+    fun `the spoken row name is just the name when there is no rule`() {
+        // No trailing clause, and no "no reset rule" either \u2014 the sentence ends, exactly as the
+        // badge is absent. Same rule as `RollDisplayState.spoken` dropping a null advantage.
+        assertEquals("Rage", spokenLabelOf(serverRow(null)))
+        assertEquals("Rage", spokenLabelOf(localRow("dawn")))
     }
 }

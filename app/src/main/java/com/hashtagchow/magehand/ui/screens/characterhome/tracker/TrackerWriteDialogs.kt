@@ -175,6 +175,20 @@ private fun PadKey(label: String, onClick: () -> Unit, modifier: Modifier = Modi
  * "this will reset your resources" is exactly the sentence a player skims. Naming the rows
  * — *Rage 0/2, 1st Level 1/3* — is what makes the confirmation an actual decision.
  *
+ * ### "Restored to full", not "will reset" (FR-20 decision 4)
+ *
+ * 04's own wording above is where the wrong verb came from, and it survived into the shipped
+ * copy. `creature.methods.rest` **restores**: it clears the qualifying properties' `damage`, so
+ * a row ends the rest at its total and can only move up. "Reset" says something different and
+ * more frightening — that each row returns to some rule-defined starting value — and in the
+ * 2026-08-21 Heroic Inspiration triage that is exactly the reading a player took when a
+ * mis-configured row landed on 0 after a long rest.
+ *
+ * The rows are still listed at their **current** values, which is not a contradiction: the
+ * heading says where they are going and the numbers say where they are now, which together are
+ * what makes *"1st Level — 3 / 4"* worth reading at all. `rowsRestoredBy`'s own test pins that
+ * already-full rows stay in the list for the same reason.
+ *
  * Not-undoable is stated in the dialog and enforced in the type system: `WriteOp.Rest`'s
  * `inverse` is `null`, so a rest physically cannot enter the undo stack
  * (docs/design/03-data-model.md §Write semantics).
@@ -194,9 +208,11 @@ fun RestConfirmDialog(
         title = {
             Text(
                 stringResource(
+                    // The dialog's own titles, not the two one-word buttons that opened it
+                    // (FR-20 decision 4) — see the comment on them in `strings.xml`.
                     when (kind) {
-                        RestKind.SHORT -> R.string.tracker_short_rest
-                        RestKind.LONG -> R.string.tracker_long_rest
+                        RestKind.SHORT -> R.string.tracker_rest_title_short
+                        RestKind.LONG -> R.string.tracker_rest_title_long
                     },
                 ),
             )
@@ -209,7 +225,7 @@ fun RestConfirmDialog(
                 if (affected.isEmpty()) {
                     Text(stringResource(R.string.tracker_rest_nothing))
                 } else {
-                    Text(stringResource(R.string.tracker_rest_will_reset))
+                    Text(stringResource(R.string.tracker_rest_restored_to_full))
                     affected.forEach { row ->
                         Text(
                             text = "•  ${row.label}  —  ${row.value} / ${row.total}",

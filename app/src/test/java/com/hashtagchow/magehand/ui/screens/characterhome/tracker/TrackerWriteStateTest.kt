@@ -15,6 +15,7 @@ import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
 import com.hashtagchow.magehand.core.model.TrackerWriteKind
+import java.io.File
 import java.time.ZoneId
 
 /**
@@ -277,6 +278,103 @@ class TrackerWriteStateTest {
     fun `a failure otherwise quotes the server verbatim`() {
         assertEquals("Not saved: Value must be a number", failure(reason = "Value must be a number").describe())
         assertEquals("That didn't save", failure(reason = null).describe())
+    }
+
+    // --- FR-20 decision 4: the rest dialog's copy ---------------------------------
+
+    /**
+     * The heading over `rowsRestoredBy`'s list says **restored to full**.
+     *
+     * Asserted against the resource that ships rather than against a literal in the
+     * composable, for `InventoryUiStateTest`'s reason: two literals agreeing proves only that
+     * they were typed the same day, and `:app` has no Robolectric harness to resolve an id
+     * through. The file is what a player reads.
+     *
+     * Why it matters enough to pin: `creature.methods.rest` clears the qualifying properties'
+     * `damage`, so a listed row ends the rest **at its total** and can only move up. "This will
+     * reset:" promised something else, and the 2026-08-21 Heroic Inspiration triage is the
+     * recorded case of a player believing it.
+     */
+    @Test
+    fun `the rest dialog says the listed rows are restored to full`() {
+        assertEquals("Restored to full:", declaredString("tracker_rest_restored_to_full"))
+        assertEquals(
+            "Nothing on this tracker is restored by this rest.",
+            declaredString("tracker_rest_nothing"),
+        )
+    }
+
+    /**
+     * The dialog's titles are the rest, not the button that opened it.
+     *
+     * `tracker_short_rest` / `tracker_long_rest` stay one word — they are the two side-by-side
+     * buttons on the tracker and have to fit — so the dialog owns its own pair. Pinned because
+     * the cheap fix is to reuse the button strings again, and "Short" as a heading over
+     * "Restored to full:" is a fragment.
+     */
+    @Test
+    fun `the rest dialog has its own titles, distinct from the two buttons`() {
+        assertEquals("Short rest", declaredString("tracker_rest_title_short"))
+        assertEquals("Long rest", declaredString("tracker_rest_title_long"))
+        assertEquals("Short", declaredString("tracker_short_rest"))
+        assertEquals("Long", declaredString("tracker_long_rest"))
+    }
+
+    /**
+     * **No string this dialog shows may use the word "reset" again.**
+     *
+     * The verb, not one sentence, was the bug: it was in the heading, in the empty-state line
+     * *and* in the hit-points note, and fixing two of three would leave the dialog contradicting
+     * itself. Stated as a rule over every `tracker_rest_*` string so a fourth one added later
+     * cannot quietly reintroduce it.
+     */
+    @Test
+    fun `no string in the rest dialog claims a reset`() {
+        val offenders = Regex("""<string name="(tracker_rest_\w+)">(.*?)</string>""")
+            .findAll(stringsXml().readText())
+            .filter { it.groupValues[2].contains("reset", ignoreCase = true) }
+            .map { it.groupValues[1] }
+            .toList()
+
+        assertEquals(
+            "a rest restores toward the total; it does not reset — see FR-20 decision 4",
+            emptyList<String>(),
+            offenders,
+        )
+    }
+
+    /**
+     * The declared value of one `<string>` in the file that ships.
+     *
+     * Fails rather than returning `null` for a missing name: every caller here is asserting
+     * what a resource *says*, and a resource that does not exist is a `Resources.NotFoundException`
+     * at runtime — a louder failure than the value being wrong, so it earns the louder message.
+     */
+    private fun declaredString(name: String): String =
+        Regex("""<string name="$name">(.*?)</string>""")
+            .find(stringsXml().readText())
+            ?.groupValues
+            ?.get(1)
+            ?: throw AssertionError("no <string name=\"$name\"> in ${stringsXml()}")
+
+    /**
+     * `app/src/main/res/values/strings.xml`, found by walking up from the working directory —
+     * the same lookup `InventoryUiStateTest` uses, and for the same reason: Gradle's
+     * module-directory working directory is a default rather than a promise, and an IDE runner
+     * may disagree.
+     */
+    private fun stringsXml(): File {
+        val relative = "app/src/main/res/values/strings.xml"
+        var dir: File? = File(System.getProperty("user.dir")).absoluteFile
+        while (dir != null) {
+            val candidate = File(dir, relative)
+            if (candidate.isFile) return candidate
+            // Also the case where the working directory already *is* `app/`.
+            val fromModule = File(dir, "src/main/res/values/strings.xml")
+            if (fromModule.isFile) return fromModule
+            dir = dir.parentFile
+        }
+        throw AssertionError("could not find $relative from ${System.getProperty("user.dir")}")
     }
 
     private fun failure(

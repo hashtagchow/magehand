@@ -191,9 +191,28 @@
     <string name="tracker_restore_one">Restore one %1$s</string>
     <string name="tracker_hp_pad_title">Hit points: %1$d / %2$d</string>
     <string name="tracker_pad_set">Set</string>
-    <string name="tracker_rest_will_reset">This will reset:</string>
-    <string name="tracker_rest_nothing">Nothing on this tracker resets on this rest.</string>
-    <string name="tracker_rest_hp_note">The server also applies whatever else this sheet resets on a long rest — hit points, hit dice and any rest triggers on it.</string>
+    <!--
+        FR-20 decision 4. "Reset" was the wrong verb in every one of these: a DiceCloud rest
+        RESTORES a tracked value toward its total (it clears the property's `damage`), it does
+        not set it to some rule-defined starting point — and the 2026-08-21 Heroic Inspiration
+        triage was a player who read "reset" as "zeroed" and was not surprised when a row went
+        to 0. Say what the button does: these rows come back full.
+
+        `tracker_rest_title_short` / `_long` are the dialog's own titles rather than a reuse of
+        `tracker_short_rest` / `tracker_long_rest`: those two are the *buttons*, which must stay
+        one word to fit side by side, and "Short" alone above "Restored to full:" is a fragment
+        rather than a title.
+    -->
+    <string name="tracker_rest_title_short">Short rest</string>
+    <string name="tracker_rest_title_long">Long rest</string>
+    <!--
+        Renamed with the copy. A key still called `tracker_rest_will_reset` holding "Restored to
+        full:" leaves the wrong verb in the one place greps land, which is how the next person
+        re-derives the old sentence.
+    -->
+    <string name="tracker_rest_restored_to_full">Restored to full:</string>
+    <string name="tracker_rest_nothing">Nothing on this tracker is restored by this rest.</string>
+    <string name="tracker_rest_hp_note">The server also applies whatever else this sheet restores on a long rest — hit points, hit dice and any rest triggers on it.</string>
     <string name="tracker_rest_not_undoable">A rest cannot be undone.</string>
     <string name="tracker_rest_confirm">Take the rest</string>
     <string name="tracker_history_title">This session</string>
