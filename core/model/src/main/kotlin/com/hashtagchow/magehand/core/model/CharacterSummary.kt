@@ -24,6 +24,13 @@ package com.hashtagchow.magehand.core.model
  * @param isOwnedByMe `owner == <the signed-in user id>`. False means "shared with
  *   you", which is the DM case: the DungeonMaster account is a reader/writer on
  *   the whole party but owns none of it, so every party row is badged.
+ * @param writers the creature's `writers` array — Meteor user ids the sheet's owner
+ *   has granted write access to. See [isEditableByMe]; the raw list is kept because
+ *   it is the fact the server states, and a derived boolean alone would make a
+ *   future "who else can edit this?" a re-fetch.
+ * @param isEditableByMe FR-19's edit-capability gate (docs/design/14-large-screen-arc.md
+ *   decision 18): `owner == me || writers.contains(me)`, resolved against the **live**
+ *   user id for [isOwnedByMe]'s reason.
  */
 data class CharacterSummary(
     val creatureId: String,
@@ -33,6 +40,8 @@ data class CharacterSummary(
     val picture: String? = null,
     val owner: String = "",
     val isOwnedByMe: Boolean = false,
+    val writers: List<String> = emptyList(),
+    val isEditableByMe: Boolean = false,
 ) {
     /**
      * The one-or-two-word line under the name. Empty when the sheet carries

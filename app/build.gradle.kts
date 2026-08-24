@@ -60,8 +60,8 @@ android {
         // 3 shipped as 1.0.1. Both are live on Play, so both codes are spent for good —
         // a bump is part of preparing a release, not a step to remember at upload time.
         // 4 / 1.0.2 carries the WP8 pre-release review fixes.
-        versionCode = 12
-        versionName = "1.6.0"
+        versionCode = 13
+        versionName = "1.7.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -162,6 +162,8 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.core)
+    // FR-17's window-size gate. Outside the BOM — see the catalog comment.
+    implementation(libs.androidx.compose.material3.adaptive)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     implementation(libs.androidx.navigation.compose)

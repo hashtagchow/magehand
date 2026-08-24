@@ -49,6 +49,14 @@ import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.ui.navigation.LocalCharacterHomeTab
+import com.hashtagchow.magehand.core.data.settings.PaneSurface
+import com.hashtagchow.magehand.ui.panes.CharacterHomeChrome
+import com.hashtagchow.magehand.ui.panes.PanePicker
+import com.hashtagchow.magehand.ui.panes.PaneRow
+import com.hashtagchow.magehand.ui.panes.characterHomeChrome
+import com.hashtagchow.magehand.ui.panes.localPaneSurfaces
+import com.hashtagchow.magehand.ui.panes.surface
+import com.hashtagchow.magehand.ui.window.LocalExpandedWidth
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryActions
@@ -97,6 +105,22 @@ import com.hashtagchow.magehand.ui.theme.mageHandIconButtonColors
  *   is wrong.
  * - **No accent theming.** `theme_prefs` is account-keyed; see `LocalOpenCharacter.accentColor`.
  *   The screen therefore does not nest a `MageHandTheme`, and inherits the app palette.
+ *
+ * ### FR-17 (14 decisions 5-8), with two panes rather than three
+ *
+ * The pane picker and the equal-weight `Row` are the DiceCloud screen's, reached with a local
+ * key and a two-element surface list — decision 6's *"local: Tracker / Inventory"*. Nothing
+ * about the mechanism differs, which is 12 decision 6's precedent applied again: the picker, the
+ * resolution rules and the store are shared, and what a local character has is the only thing
+ * that changes.
+ *
+ * There is no Sheet pane for the reason there is no Sheet tab — `LocalCharacterHomeTab` has no
+ * such constant and `localPaneSurfaces` is derived from it, so 09 decision 8's "the WebView is
+ * never instantiated on this screen" survives FR-17 structurally rather than by a filter.
+ *
+ * The reference strip stays **above** the chrome in both layouts, for the reason it was above
+ * the tab row: Strength is what the inventory's capacity line is computed from, so a strip that
+ * belonged to one column would vanish exactly where it explains something.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -119,6 +143,15 @@ fun LocalCharacterHomeScreen(
     var restToConfirm by rememberSaveable { mutableStateOf<RestKind?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     val tabs = remember { LocalCharacterHomeTab.entries }
+    // 14 decisions 5 + 10, exactly as on the DiceCloud screen: both halves of the state are read
+    // and one is rendered, so crossing the width gate loses neither.
+    val panes by viewModel.panes.collectAsStateWithLifecycle()
+    val chrome = characterHomeChrome(
+        expandedWidth = LocalExpandedWidth.current,
+        selectedTab = selectedTab,
+        storedPanes = panes,
+        available = localPaneSurfaces,
+    )
 
     // The undo snackbar, identical to the DiceCloud tracker's — `showSnackbar` suspends until
     // the snackbar goes away, so a burst of taps queues rather than stacking.
@@ -173,7 +206,7 @@ fun LocalCharacterHomeScreen(
                     // while this screen had one tab; now that it has two, a "Customize
                     // tracker" button sitting over the inventory list would be a control
                     // pointing at a screen the player is not looking at.
-                    if (selectedTab == LocalCharacterHomeTab.Tracker) {
+                    if (LocalCharacterHomeTab.Tracker.isShowing(chrome)) {
                         TextButton(
                             onClick = { restToConfirm = RestKind.SHORT },
                             modifier = Modifier.testTag("tracker:rest:short"),
@@ -202,7 +235,7 @@ fun LocalCharacterHomeScreen(
                             )
                         }
                     }
-                    if (selectedTab == LocalCharacterHomeTab.Inventory) {
+                    if (LocalCharacterHomeTab.Inventory.isShowing(chrome)) {
                         IconButton(
                             onClick = { addItemOpen = true },
                             colors = mageHandIconButtonColors(),
@@ -252,18 +285,10 @@ fun LocalCharacterHomeScreen(
             // it explains something.
             uiState.reference?.let { ReferenceStrip(it) }
 
-            PrimaryTabRow(selectedTabIndex = selectedTab.ordinal) {
-                tabs.forEach { tab ->
-                    Tab(
-                        selected = tab == selectedTab,
-                        onClick = { selectedTab = tab },
-                        text = { Text(stringResource(tab.titleResId)) },
-                    )
-                }
-            }
-
-            when (selectedTab) {
-                LocalCharacterHomeTab.Tracker -> TrackerTab(
+            // One body, two chromes — see the DiceCloud screen's KDoc for why the bodies are
+            // hoisted rather than written twice.
+            val tracker = @Composable {
+                TrackerTab(
                     state = uiState.tracker,
                     actions = TrackerActions(
                         onSpend = viewModel::spend,
@@ -278,8 +303,9 @@ fun LocalCharacterHomeScreen(
                         onConnectionDetails = {},
                     ),
                 )
-
-                LocalCharacterHomeTab.Inventory -> InventoryTab(
+            }
+            val inventory = @Composable {
+                InventoryTab(
                     state = uiState.inventory,
                     actions = InventoryActions(
                         onEquip = viewModel::setEquipped,
@@ -295,6 +321,45 @@ fun LocalCharacterHomeScreen(
                         onCollapse = viewModel::setInventorySectionCollapsed,
                     ),
                 )
+            }
+
+            when (chrome) {
+                is CharacterHomeChrome.Tabs -> {
+                    PrimaryTabRow(selectedTabIndex = chrome.selected.ordinal) {
+                        tabs.forEach { tab ->
+                            Tab(
+                                selected = tab == chrome.selected,
+                                onClick = { selectedTab = tab },
+                                text = { Text(stringResource(tab.titleResId)) },
+                            )
+                        }
+                    }
+
+                    when (chrome.selected) {
+                        LocalCharacterHomeTab.Tracker -> tracker()
+                        LocalCharacterHomeTab.Inventory -> inventory()
+                    }
+                }
+
+                is CharacterHomeChrome.Panes -> {
+                    PanePicker(
+                        panes = chrome.panes,
+                        available = localPaneSurfaces,
+                        onToggle = { viewModel.togglePane(chrome.panes.toSet(), it) },
+                    )
+                    PaneRow(panes = chrome.panes) { surface ->
+                        when (surface) {
+                            PaneSurface.TRACKER -> tracker()
+                            PaneSurface.INVENTORY -> inventory()
+                            // Unreachable: `localPaneSurfaces` comes from a tab enum with no
+                            // Sheet constant, and `resolvePanes` drops anything not in it. The
+                            // branch stays total rather than assuming that from a KDoc — the
+                            // same posture this screen's event collector takes towards
+                            // `TrackerEvent.Failed`.
+                            PaneSurface.SHEET -> Unit
+                        }
+                    }
+                }
             }
         }
 
@@ -383,6 +448,18 @@ fun LocalCharacterHomeScreen(
             )
         }
     }
+}
+
+/**
+ * Whether this tab's surface is on screen right now — the DiceCloud screen's helper, for its
+ * reason: in pane mode there is no selected tab, so the app bar's per-tab actions follow what is
+ * *visible* rather than what is selected.
+ */
+private fun LocalCharacterHomeTab.isShowing(
+    chrome: CharacterHomeChrome<LocalCharacterHomeTab>,
+): Boolean = when (chrome) {
+    is CharacterHomeChrome.Tabs -> chrome.selected == this
+    is CharacterHomeChrome.Panes -> surface in chrome.panes
 }
 
 /**

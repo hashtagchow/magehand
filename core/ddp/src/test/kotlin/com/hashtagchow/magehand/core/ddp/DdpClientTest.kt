@@ -42,6 +42,8 @@ class DdpClientTest {
         token: String? = TOKEN,
         heartbeatInterval: Duration = Duration.ZERO,
         heartbeatTimeout: Duration = 500.milliseconds,
+        resubscribeStagger: Duration = DdpClientConfig().resubscribeStagger,
+        resubscribeRetryDelay: Duration = DdpClientConfig().resubscribeRetryDelay,
         tokenProvider: (suspend () -> String?)? = null,
     ): DdpClient = DdpClient(
         socketFactory = server,
@@ -51,6 +53,8 @@ class DdpClientTest {
             heartbeatInterval = heartbeatInterval,
             heartbeatTimeout = heartbeatTimeout,
             backoff = NoBackoff,
+            resubscribeStagger = resubscribeStagger,
+            resubscribeRetryDelay = resubscribeRetryDelay,
             logger = { println("[ddp] $it") },
         ),
         resumeTokenProvider = tokenProvider ?: { token },
@@ -538,6 +542,350 @@ class DdpClientTest {
         )
     }
 
+    // ------------------------------------------- reconnect: stagger and one retry
+
+    /**
+     * FR-19 hangs up to seven subscriptions off this one connection, and the server's
+     * 50-per-10 s subscription limit is shared by every client at the table
+     * (14-large-screen-arc.md decision 17). Firing the whole replay in a single tick
+     * is the storm that rule forbids, so the *spacing* is the behaviour under test —
+     * "all the subs came back" would pass just as happily against the old code.
+     */
+    @Test
+    fun reconnect_replays_subscriptions_with_a_stagger() = runBlocking {
+        val client = newClient(resubscribeStagger = 200.milliseconds)
+        client.start()
+        val first = server.awaitSocket(0)
+        first.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val ids = (1..3).map { client.subscribe("singleCharacter", ejsonParams("creature-$it")).id }.toSet()
+        awaitUntil(what = "3 subs sent") { first.sentFramesOf("sub").size == 3 }
+
+        first.dropConnection()
+        val second = server.awaitSocket(1)
+        second.completeHandshake(session = "session-2")
+        awaitUntil(what = "3 subs replayed") { second.sentFramesOf("sub").size == 3 }
+
+        val gaps = second.sentTimesOf("sub").zipWithNext { earlier, later -> later - earlier }
+        assertTrue("replayed subs must not go out in one tick; gaps were $gaps ms", gaps.all { it >= 150 })
+        assertEquals(ids, second.sentFramesOf("sub").mapNotNull { it.string("id") }.toSet())
+    }
+
+    /**
+     * The stagger is paid *between* subs and never before the first, so every screen
+     * that is not the DM view — all of which hold one or two subscriptions — must
+     * reconnect at exactly the speed it did before decision 17 existed. Pinned with an
+     * absurd 3 s stagger: a leading delay would be unmissable.
+     */
+    @Test
+    fun a_single_subscription_reconnects_without_paying_the_stagger() = runBlocking {
+        val client = newClient(resubscribeStagger = 3.seconds)
+        client.start()
+        val first = server.awaitSocket(0)
+        first.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val sub = client.subscribe("singleCharacter", ejsonParams(CREATURE))
+        first.awaitFrame("sub")
+        first.dropConnection()
+
+        val second = server.awaitSocket(1)
+        second.completeHandshake(session = "session-2")
+        val startedAt = System.currentTimeMillis()
+        val replay = second.awaitFrame("sub")
+        val elapsed = System.currentTimeMillis() - startedAt
+
+        assertEquals(sub.id, replay.string("id"))
+        assertTrue("the lone sub waited ${elapsed}ms on a stagger it should not pay", elapsed < 1_000)
+    }
+
+    // ------------------------------------------- the replay window, adversarially
+    //
+    // Decision 17's stagger turned `replaySubscriptions` into a *suspending* function, and
+    // that is the whole of this group's subject: for `stagger × (N - 1)` the socket is open,
+    // the client dispatcher is free between delays, and the connection is NOT yet LIVE. Every
+    // test above drives the replay while nothing else happens. These four drive it while
+    // something does — which is what a Back press, a card opening, or a venue's wifi actually
+    // look like from in here.
+
+    /**
+     * The drain loop's justification, asserted instead of argued.
+     *
+     * `subscribe()` adds to the map and — because the connection is not LIVE — deliberately
+     * sends nothing itself, expecting the replay to carry it. A single `for` over a snapshot
+     * taken before the first delay would therefore drop it silently until the *next* reconnect:
+     * a DM card that stays empty with nothing in the log. The loop re-reads the map until it
+     * stops producing unsent subscriptions, so the late arrival goes out on this session.
+     */
+    @Test
+    fun subscribe_during_the_staggered_replay_is_still_sent() = runBlocking {
+        val client = newClient(resubscribeStagger = 500.milliseconds)
+        client.start()
+        val first = server.awaitSocket(0)
+        first.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val existing = (1..2).map { client.subscribe("singleCharacter", ejsonParams("creature-$it")).id }
+        awaitUntil(what = "2 subs sent") { first.sentFramesOf("sub").size == 2 }
+
+        first.dropConnection()
+        val second = server.awaitSocket(1)
+        second.completeHandshake(session = "session-2")
+        // The replay has started and is now inside its first stagger delay.
+        second.awaitFrame("sub")
+
+        val late = client.subscribe("singleCharacter", ejsonParams("creature-late"))
+        assertTrue(
+            "the fixture is wrong if the client was already LIVE — there would be no window",
+            client.connectionState.value != ConnectionState.LIVE,
+        )
+
+        awaitUntil(what = "the late subscribe is replayed too") {
+            second.sentFramesOf("sub").size == 3
+        }
+        assertEquals(
+            (existing + late.id).toSet(),
+            second.sentFramesOf("sub").mapNotNull { it.string("id") }.toSet(),
+        )
+        client.awaitLive(5.seconds)
+    }
+
+    /**
+     * The same window, the other direction: a **ghost sub**.
+     *
+     * `pending` is a snapshot, so a subscription unsubscribed during one of the stagger delays
+     * was still sent by the pass that had already decided to send it. The server then serves a
+     * publication nobody holds: its documents land in the mirror and stay there — the `unsub`
+     * this client sent was for a sub the server had not been told about yet — and one slot of
+     * the 50-per-10 s bucket the whole table shares is spent on a screen that is gone.
+     * `DmViewViewModel.onCleared` closes up to seven at once, so Back during a reconnect is the
+     * ordinary way in.
+     */
+    @Test
+    fun unsubscribe_during_the_staggered_replay_never_sends_a_ghost_sub() = runBlocking {
+        val client = newClient(resubscribeStagger = 400.milliseconds)
+        client.start()
+        val first = server.awaitSocket(0)
+        first.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val subs = (1..3).map { client.subscribe("singleCharacter", ejsonParams("creature-$it")) }
+        awaitUntil(what = "3 subs sent") { first.sentFramesOf("sub").size == 3 }
+
+        first.dropConnection()
+        val second = server.awaitSocket(1)
+        second.completeHandshake(session = "session-2")
+        second.awaitFrame("sub")
+
+        // Whichever one the replay has not reached yet — the map's iteration order is not the
+        // test's business, only that a not-yet-sent subscription exists to withdraw.
+        val alreadySent = second.sentFramesOf("sub").mapNotNull { it.string("id") }.toSet()
+        val victim = subs.first { it.id !in alreadySent }
+        victim.stop()
+
+        client.awaitLive(5.seconds)
+        val replayed = second.sentFramesOf("sub").mapNotNull { it.string("id") }
+        assertFalse(
+            "a subscription withdrawn mid-replay must not be sent: it would be a ghost " +
+                "publication with no owner and no way to stop it",
+            victim.id in replayed,
+        )
+        assertEquals("the other two must still come back", 2, replayed.size)
+        assertFalse(client.activeSubscriptions().containsKey(victim.id))
+    }
+
+    /**
+     * …and the `unsub` for it has to reach the wire.
+     *
+     * `unsubscribe` used to send only while [ConnectionState.LIVE], which is exactly what the
+     * staggered replay is not. Every `unsub` issued in that window was dropped on the floor:
+     * this client forgot the subscription, the server never heard, and the publication stayed
+     * open against the shared bucket for the life of the session — invisible, and impossible to
+     * attribute to the screen that caused it. The gate is `session != null` now, which is the
+     * question that was always being asked.
+     */
+    @Test
+    fun unsubscribe_during_the_staggered_replay_still_reaches_the_wire() = runBlocking {
+        val client = newClient(resubscribeStagger = 400.milliseconds)
+        client.start()
+        val first = server.awaitSocket(0)
+        first.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val subs = (1..3).map { client.subscribe("singleCharacter", ejsonParams("creature-$it")) }
+        awaitUntil(what = "3 subs sent") { first.sentFramesOf("sub").size == 3 }
+
+        first.dropConnection()
+        val second = server.awaitSocket(1)
+        second.completeHandshake(session = "session-2")
+        second.awaitFrame("sub")
+
+        val alreadySent = second.sentFramesOf("sub").mapNotNull { it.string("id") }.toSet()
+        val victim = subs.first { it.id !in alreadySent }
+        assertTrue(
+            "the whole point is that this happens BEFORE the session goes live",
+            client.connectionState.value != ConnectionState.LIVE,
+        )
+        victim.stop()
+
+        assertEquals(
+            "the unsub must go out on the session that is actually open",
+            listOf(victim.id),
+            second.sentFramesOf("unsub").mapNotNull { it.string("id") },
+        )
+        client.awaitLive(5.seconds)
+    }
+
+    /**
+     * The socket dying *inside* the replay.
+     *
+     * The loop is suspended in a stagger delay when the wifi goes; the remaining sends land on
+     * a dead socket and are lost. That is fine, and this pins why: the subscriptions are still
+     * in the map — nothing about a failed send removes them — so the next session replays the
+     * whole set, including the ones this one never reached. The failure this would catch is a
+     * replay that consumed its subscriptions as it walked them.
+     */
+    @Test
+    fun a_socket_dying_mid_replay_leaves_the_whole_set_for_the_next_one() = runBlocking {
+        val client = newClient(resubscribeStagger = 400.milliseconds)
+        client.start()
+        val first = server.awaitSocket(0)
+        first.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val ids = (1..3).map { client.subscribe("singleCharacter", ejsonParams("creature-$it")).id }.toSet()
+        awaitUntil(what = "3 subs sent") { first.sentFramesOf("sub").size == 3 }
+
+        first.dropConnection()
+        val second = server.awaitSocket(1)
+        second.completeHandshake(session = "session-2")
+        second.awaitFrame("sub")
+        // Mid-stagger, with at least one subscription still unsent.
+        second.dropConnection()
+        assertTrue(
+            "the fixture needs the replay to be genuinely incomplete",
+            second.sentFramesOf("sub").size < 3,
+        )
+
+        val third = server.awaitSocket(2)
+        third.completeHandshake(session = "session-3")
+        awaitUntil(what = "the full set replayed on the third socket") {
+            third.sentFramesOf("sub").size == 3
+        }
+        assertEquals(ids, third.sentFramesOf("sub").mapNotNull { it.string("id") }.toSet())
+        client.awaitLive(5.seconds)
+        assertEquals(ids, client.activeSubscriptions().keys)
+    }
+
+    /**
+     * The defect: the shared subscription bucket can refuse a *replay* for reasons
+     * that have nothing to do with us, and the old code removed such a sub from the
+     * map — parking a live DM card stopped, with no data, forever, on a transient
+     * server mood. One retry brings it back. The mirror must also still be serving the
+     * previous session's documents while that retry is in flight: quiescence may not
+     * close behind a sub that has not gone ready.
+     */
+    @Test
+    fun a_refused_replay_is_retried_once_and_comes_back_live() = runBlocking {
+        val client = newClient(resubscribeRetryDelay = 100.milliseconds)
+        client.start()
+        val first = server.awaitSocket(0)
+        first.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val sub = client.subscribe("singleCharacter", ejsonParams(CREATURE))
+        first.awaitFrame("sub")
+        first.emit(added("creatureProperties", "p1", """"name":"1st Level","value":3"""))
+        first.emit("""{"msg":"ready","subs":["${sub.id}"]}""")
+        sub.awaitReady(5.seconds)
+
+        first.dropConnection()
+        val second = server.awaitSocket(1)
+        second.completeHandshake(session = "session-2")
+        second.awaitFrame("sub")
+        second.emit(rateLimitedNosub(sub.id))
+
+        awaitUntil(what = "the refused replay is re-sent") { second.sentFramesOf("sub").size == 2 }
+        assertEquals(
+            "the retry must reuse the original sub id",
+            listOf(sub.id, sub.id),
+            second.sentFramesOf("sub").map { it.string("id") },
+        )
+        assertTrue("a retried sub must stay active", client.activeSubscriptions().containsKey(sub.id))
+        assertFalse("a retried sub must not be parked stopped", sub.isStopped.value)
+        assertNull("a retried sub must not surface the transient refusal", sub.error.value)
+        assertEquals("stale docs must survive an open resync window", 1, client.mirror.size("creatureProperties"))
+
+        second.emit(added("creatureProperties", "p1", """"name":"1st Level","value":1"""))
+        second.emit("""{"msg":"ready","subs":["${sub.id}"]}""")
+        sub.awaitReady(5.seconds)
+        assertTrue(sub.isReady.value)
+    }
+
+    /**
+     * "Single retry — no storms" (decision 17). A refusal that survives the backoff is
+     * a verdict, not congestion, so the second `nosub` must land on the ordinary path
+     * verbatim: removed, stopped, and reporting the server's own reason.
+     */
+    @Test
+    fun a_replay_refused_twice_stops_with_the_server_reason() = runBlocking {
+        val client = newClient(resubscribeRetryDelay = 100.milliseconds)
+        client.start()
+        val first = server.awaitSocket(0)
+        first.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val sub = client.subscribe("singleCharacter", ejsonParams(CREATURE))
+        first.awaitFrame("sub")
+        first.emit("""{"msg":"ready","subs":["${sub.id}"]}""")
+        sub.awaitReady(5.seconds)
+
+        first.dropConnection()
+        val second = server.awaitSocket(1)
+        second.completeHandshake(session = "session-2")
+        second.awaitFrame("sub")
+        second.emit(rateLimitedNosub(sub.id))
+        awaitUntil(what = "the one retry") { second.sentFramesOf("sub").size == 2 }
+        second.emit(rateLimitedNosub(sub.id))
+
+        val error = runCatching { sub.awaitReady(5.seconds) }.exceptionOrNull()
+        assertTrue("expected the server's DdpError, got $error", error is DdpError)
+        assertEquals("too-many-requests", (error as DdpError).error)
+        assertTrue(sub.isStopped.value)
+        assertFalse(client.activeSubscriptions().containsKey(sub.id))
+        Thread.sleep(400)
+        assertEquals("one retry means one, ever", 2, second.sentFramesOf("sub").size)
+    }
+
+    /**
+     * The fence around the retry. A `nosub` answering a fresh [DdpClient.subscribe] is
+     * a verdict about the request itself — bad publication, bad args, a creature we may
+     * not see — and re-sending it would only argue with the server and spend a slot of
+     * the shared bucket. This pins that the retry is unreachable from the entry path,
+     * which is the half of the change that must be provably inert.
+     */
+    @Test
+    fun a_nosub_for_a_fresh_subscribe_is_never_retried() = runBlocking {
+        val client = newClient(resubscribeRetryDelay = 100.milliseconds)
+        client.start()
+        val socket = server.awaitSocket(0)
+        socket.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val sub = client.subscribe("singleCharacter", ejsonParams("nope"))
+        socket.awaitFrame("sub")
+        socket.emit(
+            """{"msg":"nosub","id":"${sub.id}","error":{"error":404,"reason":"Creature not found","errorType":"Meteor.Error"}}"""
+        )
+
+        val error = runCatching { sub.awaitReady(5.seconds) }.exceptionOrNull()
+        assertEquals("404", (error as? DdpError)?.error)
+        Thread.sleep(400)
+        assertEquals("the entry path must never re-send a refusal", 1, socket.sentFramesOf("sub").size)
+        assertTrue(sub.isStopped.value)
+    }
+
     // ------------------------------------------------------------------- auth
 
     @Test
@@ -607,6 +955,11 @@ class DdpClientTest {
 
         fun added(collection: String, id: String, fields: String) =
             """{"msg":"added","collection":"$collection","id":"$id","fields":{$fields}}"""
+
+        /** What the shared 50/10 s subscription bucket says when it refuses a replay. */
+        fun rateLimitedNosub(subId: String) =
+            """{"msg":"nosub","id":"$subId","error":{"error":"too-many-requests",""" +
+                """"reason":"Too many requests","details":"try again in 5 seconds","errorType":"Meteor.Error"}}"""
     }
 }
 

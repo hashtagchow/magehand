@@ -43,8 +43,17 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.ui.navigation.CharacterHomeTab
+import com.hashtagchow.magehand.ui.panes.CharacterHomeChrome
+import com.hashtagchow.magehand.ui.panes.PanePicker
+import com.hashtagchow.magehand.ui.panes.PaneRow
+import com.hashtagchow.magehand.ui.panes.characterHomeChrome
+import com.hashtagchow.magehand.ui.panes.serverPaneSurfaces
+import com.hashtagchow.magehand.ui.panes.sheetWanted
+import com.hashtagchow.magehand.ui.panes.surface
+import com.hashtagchow.magehand.ui.window.LocalExpandedWidth
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryActions
@@ -81,6 +90,19 @@ import com.hashtagchow.magehand.ui.webview.rememberSheetWebViewState
  * The Sheet WebView is created at screen level and only its host leaves composition on a
  * tab switch — that is what "retained instance" (04 §4) buys. It is created lazily on
  * first visit, so a user who never opens it never pays for the page load.
+ *
+ * ### FR-17: the same screen, two kinds of chrome (14 decisions 5-10)
+ *
+ * On an EXPANDED-width window the tab row becomes a multi-select pane picker and the chosen
+ * surfaces render as equal-weight columns. Everything else on this screen — the app bar, the
+ * sheets, the dialogs, the snackbar, the view model — is unchanged, and that is the point:
+ * `characterHomeChrome` returns which of the two to draw, and both branches call the *same*
+ * three tab bodies with the *same* arguments. The bodies are extracted to [TrackerPane],
+ * [InventoryPane] and [SheetPane] purely so the two branches cannot drift apart.
+ *
+ * The phone path is structurally untouched (decision 5): with `LocalExpandedWidth` false — its
+ * default, and every compact and medium window — this composes exactly the `PrimaryTabRow` and
+ * `when` it composed before FR-17. `PaneSelectionTest` pins that.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -112,40 +134,46 @@ fun CharacterHomeScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val tabs = remember { CharacterHomeTab.entries }
 
-    // 04 §3's two snackbars, from one event stream.
+    // 04 §3's two snackbars, from the view model's two event streams, in **two** coroutines.
     //
-    // `SnackbarHostState.showSnackbar` suspends until the snackbar goes away, so this
-    // collector is *serial by construction*: a burst of taps queues its confirmations
-    // instead of stacking them, and the 5 s undo window is the snackbar's own `Short`
-    // duration rather than a timer we would have to cancel by hand.
+    // `SnackbarHostState.showSnackbar` suspends until the snackbar goes away, so one collector
+    // over both kinds is serial by construction: it queues confirmations rather than stacking
+    // them, which is what the 5 s undo window wants — and it makes a failure wait out every
+    // confirmation ahead of it, which is what it emphatically does not want. Two collectors
+    // decouple them; `writeEvents`' one-deep drop-oldest buffer is the other half, and it only
+    // works because nothing merges the two streams back together on the way here (see its KDoc).
     val undoLabel = stringResource(R.string.action_undo)
     LaunchedEffect(viewModel) {
-        viewModel.events.collect { event ->
-            when (event) {
-                is TrackerEvent.Wrote -> {
-                    if (!event.write.undoable) {
-                        snackbarHostState.showSnackbar(event.write.describe())
-                        return@collect
-                    }
-                    val result = snackbarHostState.showSnackbar(
-                        message = event.write.describe(),
-                        actionLabel = undoLabel,
-                        withDismissAction = false,
-                        duration = SnackbarDuration.Short,
-                    )
-                    if (result == SnackbarResult.ActionPerformed) viewModel.undoLastWrite()
-                }
-
-                is TrackerEvent.Failed -> {
-                    // The number has already snapped back — the optimistic overlay drops a
-                    // failed op rather than reversing it — so all that is left is saying so.
-                    shake = ShakeSignal(event.failure.propertyId, event.failure.id)
-                    snackbarHostState.showSnackbar(
-                        message = event.failure.describe(),
-                        duration = SnackbarDuration.Short,
-                    )
-                }
+        viewModel.writeEvents.collect { event ->
+            if (!event.write.undoable) {
+                snackbarHostState.showSnackbar(event.write.describe())
+                return@collect
             }
+            val result = snackbarHostState.showSnackbar(
+                message = event.write.describe(),
+                actionLabel = undoLabel,
+                withDismissAction = false,
+                duration = SnackbarDuration.Short,
+            )
+            if (result == SnackbarResult.ActionPerformed) viewModel.undoLastWrite()
+        }
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.failureEvents.collect { event ->
+            // The number has already snapped back — the optimistic overlay drops a
+            // failed op rather than reversing it — so all that is left is saying so.
+            shake = ShakeSignal(event.failure.propertyId, event.failure.id)
+            // A confirmation currently on screen is *superseded* by this, not queued behind
+            // it: `showSnackbar` takes a mutex the visible snackbar is holding, so without the
+            // dismiss the failure would still wait out its full `Short` duration. Dismissing
+            // costs the player a receipt whose number they have already seen; keeping it costs
+            // them four seconds of not being told a write was lost.
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(
+                message = event.failure.describe(),
+                duration = SnackbarDuration.Short,
+            )
         }
     }
 
@@ -163,7 +191,23 @@ fun CharacterHomeScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val sheetState = rememberSheetWebViewState(uiState.session.takeIf { sheetEverOpened })
+    // 14 decisions 5 + 10. Both halves of the state are read here and exactly one is rendered;
+    // neither is derived from the other, which is what makes crossing the gate lossless in both
+    // directions. See `characterHomeChrome`.
+    val panes by viewModel.panes.collectAsStateWithLifecycle()
+    val chrome = characterHomeChrome(
+        expandedWidth = LocalExpandedWidth.current,
+        selectedTab = selectedTab,
+        storedPanes = panes,
+        available = serverPaneSurfaces,
+    )
+
+    // 14 decision 9: in pane mode the WebView's lifetime is the Sheet pane's selection, not the
+    // sticky "ever opened" flag the tab path uses. `rememberSheetWebViewState` destroys the
+    // instance when handed a null session, so deselecting the pane is the destroy.
+    val sheetState = rememberSheetWebViewState(
+        uiState.session.takeIf { sheetWanted(chrome, sheetEverOpened) },
+    )
 
     MageHandTheme(accentColor = uiState.accentColor) {
         Scaffold(
@@ -189,7 +233,7 @@ fun CharacterHomeScreen(
                         }
                     },
                     actions = {
-                        if (selectedTab == CharacterHomeTab.Tracker) {
+                        if (CharacterHomeTab.Tracker.isShowing(chrome)) {
                             // 04 §3's Short/Long rest buttons live in the app bar. Neither
                             // writes directly: a rest rewrites the whole sheet and cannot
                             // be undone, so both open the confirm dialog that lists what
@@ -229,7 +273,7 @@ fun CharacterHomeScreen(
                         // it belongs to *one tab* and the bar is where this screen already
                         // puts per-tab actions. A FAB would have floated over the last
                         // Carried row on every scroll, on the one tab that is a long list.
-                        if (selectedTab == CharacterHomeTab.Inventory) {
+                        if (CharacterHomeTab.Inventory.isShowing(chrome)) {
                             IconButton(
                                 onClick = { addItemOpen = true },
                                 enabled = uiState.inventory.canWrite,
@@ -274,18 +318,10 @@ fun CharacterHomeScreen(
                     .fillMaxSize()
                     .padding(innerPadding),
             ) {
-                PrimaryTabRow(selectedTabIndex = selectedTab.ordinal) {
-                    tabs.forEach { tab ->
-                        Tab(
-                            selected = tab == selectedTab,
-                            onClick = { selectedTab = tab },
-                            text = { Text(stringResource(tab.titleResId)) },
-                        )
-                    }
-                }
-
-                when (selectedTab) {
-                    CharacterHomeTab.Tracker -> TrackerTab(
+                // One body, two chromes. Every argument below is identical in both branches
+                // because they are the same call — see the class KDoc.
+                val tracker = @Composable {
+                    TrackerTab(
                         state = uiState.tracker,
                         actions = TrackerActions(
                             onSpend = viewModel::spend,
@@ -299,8 +335,9 @@ fun CharacterHomeScreen(
                         ),
                         shake = shake,
                     )
-
-                    CharacterHomeTab.Inventory -> InventoryTab(
+                }
+                val inventory = @Composable {
+                    InventoryTab(
                         state = uiState.inventory,
                         actions = InventoryActions(
                             onEquip = viewModel::setEquipped,
@@ -316,15 +353,51 @@ fun CharacterHomeScreen(
                             onCollapse = viewModel::setInventorySectionCollapsed,
                         ),
                     )
-
-                    CharacterHomeTab.Sheet ->
-                        if (sheetState == null) {
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator()
-                            }
-                        } else {
-                            SheetWebViewHost(state = sheetState, modifier = Modifier.fillMaxSize())
+                }
+                val sheet = @Composable {
+                    if (sheetState == null) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator()
                         }
+                    } else {
+                        SheetWebViewHost(state = sheetState, modifier = Modifier.fillMaxSize())
+                    }
+                }
+
+                when (chrome) {
+                    is CharacterHomeChrome.Tabs -> {
+                        PrimaryTabRow(selectedTabIndex = chrome.selected.ordinal) {
+                            tabs.forEach { tab ->
+                                Tab(
+                                    selected = tab == chrome.selected,
+                                    onClick = { selectedTab = tab },
+                                    text = { Text(stringResource(tab.titleResId)) },
+                                )
+                            }
+                        }
+
+                        when (chrome.selected) {
+                            CharacterHomeTab.Tracker -> tracker()
+                            CharacterHomeTab.Inventory -> inventory()
+                            CharacterHomeTab.Sheet -> sheet()
+                        }
+                    }
+
+                    is CharacterHomeChrome.Panes -> {
+                        PanePicker(
+                            panes = chrome.panes,
+                            available = serverPaneSurfaces,
+                            // The *resolved* panes, not the stored set — see `togglePane`.
+                            onToggle = { viewModel.togglePane(chrome.panes.toSet(), it) },
+                        )
+                        PaneRow(panes = chrome.panes) { surface ->
+                            when (surface) {
+                                PaneSurface.TRACKER -> tracker()
+                                PaneSurface.INVENTORY -> inventory()
+                                PaneSurface.SHEET -> sheet()
+                            }
+                        }
+                    }
                 }
             }
 
@@ -427,3 +500,18 @@ fun CharacterHomeScreen(
         }
     }
 }
+
+/**
+ * Whether this tab's surface is on screen right now — one tab selected, or one of several panes.
+ *
+ * The app bar's per-tab actions (rest, history, customize, add) hang off this rather than off
+ * `selectedTab`, because in pane mode there is no selected tab: Tracker and Inventory can both be
+ * up, and both sets of actions belong in the bar. That is also why the bar is not split per pane
+ * — 14 decision 6 replaces the *tab row*, not the app bar, and a per-column action bar would have
+ * been a fourth place this screen puts controls.
+ */
+private fun CharacterHomeTab.isShowing(chrome: CharacterHomeChrome<CharacterHomeTab>): Boolean =
+    when (chrome) {
+        is CharacterHomeChrome.Tabs -> chrome.selected == this
+        is CharacterHomeChrome.Panes -> surface in chrome.panes
+    }

@@ -15,6 +15,7 @@ import androidx.navigation.navigation
 import com.hashtagchow.magehand.ui.screens.characterhome.CharacterCreatorScreen
 import com.hashtagchow.magehand.ui.screens.characterhome.CharacterHomeScreen
 import com.hashtagchow.magehand.ui.screens.characterlist.CharacterListScreen
+import com.hashtagchow.magehand.ui.screens.dmview.DmViewScreen
 import com.hashtagchow.magehand.ui.screens.local.LocalCharacterEditorScreen
 import com.hashtagchow.magehand.ui.screens.local.LocalCharacterHomeScreen
 import com.hashtagchow.magehand.ui.screens.login.CredentialsScreen
@@ -126,6 +127,11 @@ fun MageHandNavHost(
                         navController.navigate(LocalCharacterHome(characterId))
                     },
                     onNewLocalCharacterClick = { navController.navigate(LocalCharacterEditor()) },
+                    // FR-19 (14 decisions 11 and 12). The list is the entry point because it is
+                    // where the membership is chosen — the picker needs the `characterList` rows
+                    // this screen already holds, and decision 17 requires the set to be settled
+                    // *before* the dashboard subscribes to it. See `DmPickerState`.
+                    onDmViewClick = { navController.navigate(DmView) },
                 )
             }
 
@@ -166,6 +172,20 @@ fun MageHandNavHost(
                     // character's own tracker, which would render an empty board with its
                     // name gone. Back out to the list instead.
                     onDeleted = { navController.popBackStack(CharacterList, inclusive = false) },
+                )
+            }
+
+            // ---- FR-19: the DM dashboard (docs/design/14-large-screen-arc.md) ----
+            composable<DmView> {
+                DmViewScreen(
+                    onBack = { navController.popBackStack() },
+                    // Decision 12: "tapping a card opens the full character as today" — the very
+                    // same destination the list opens, so a character reached from the dashboard
+                    // is not a second kind of character screen with its own state and its own
+                    // bugs. Back from it lands on the dashboard, which is still subscribed.
+                    onCharacterClick = { creatureId ->
+                        navController.navigate(CharacterHome(creatureId))
+                    },
                 )
             }
 

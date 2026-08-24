@@ -56,6 +56,32 @@ data object CharacterCreator : Destination
 data object Settings : Destination
 
 /**
+ * FR-19's DM dashboard (docs/design/14-large-screen-arc.md decisions 11-19).
+ *
+ * ### Why it carries no arguments
+ *
+ * The obvious signature would be `DmView(val creatureIds: List<String>)` — the membership, passed
+ * from the picker that chose it. It is deliberately not that, for two reasons that point the same
+ * way.
+ *
+ * **The set is already persisted.** Decision 16 keys it at `dm_view:server:<acct>`, so passing it
+ * on the route would mean two sources of truth for one fact, and the route would be the one that
+ * could disagree — a saved back stack restored after process death carries whatever ids were
+ * chosen when the entry was created, which is exactly the state a revoked share invalidates.
+ * Reading the store on entry means the dashboard opens against what is true now.
+ *
+ * **A route is a key, and this one would be a long one.** Type-safe nav serializes arguments into
+ * the destination's identity, so six 17-character Meteor ids would become part of the string every
+ * `rememberSaveable` on the screen is scoped under — and re-picking the same party in a different
+ * order would produce a *different* nav entry for the same dashboard.
+ *
+ * A `data object` rather than a `data class` therefore, matching [CharacterList] and [Settings]:
+ * the screen's identity is "the DM view", and which characters are on it is state, not identity.
+ */
+@Serializable
+data object DmView : Destination
+
+/**
  * A local character's tracker (docs/design/09-local-characters.md decisions 5–8).
  *
  * A separate destination from [CharacterHome] rather than a flag on it, for the reason

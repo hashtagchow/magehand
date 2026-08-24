@@ -4,6 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.ui.screens.settings.SettingsUiState
 import com.hashtagchow.magehand.ui.webview.SheetSession
@@ -70,6 +71,22 @@ class LocalCharacterHomePostureTest {
         assertFalse(
             "a local key must not be reachable by sign-out's per-account prefix sweep",
             key.startsWith(SelectedRollStore.serverKey("", "")),
+        )
+    }
+
+    @Test
+    fun `a local character's chosen panes need no account either`() {
+        // FR-17 (14 decision 8) inherits FR-7's structural claim word for word, which is why it
+        // is asserted beside it: the pane choice is a DataStore key derived from the character id
+        // alone, so no sentinel account has to be invented for a local character to have one
+        // (09 decision 1), and sign-out's per-account prefix sweep provably cannot reach it
+        // (09 decision 10).
+        val key = PaneLayoutStore.localKey("local-character-1")
+
+        assertTrue("a local key must be namespaced apart from every server key", key.contains("local"))
+        assertFalse(
+            "a local key must not be reachable by sign-out's per-account prefix sweep",
+            key.startsWith(PaneLayoutStore.serverKey("", "")),
         )
     }
 

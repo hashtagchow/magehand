@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import com.hashtagchow.magehand.core.data.connection.AccountConnection
@@ -218,6 +219,8 @@ class DefaultCharacterListRepository(
  */
 internal fun JsonObject.toCharacterSummary(myUserId: String?): CharacterSummary {
     val owner = string("owner").orEmpty()
+    val writers = stringArray("writers")
+    val isOwnedByMe = myUserId != null && owner == myUserId
     return CharacterSummary(
         creatureId = string(ID_FIELD).orEmpty(),
         name = string("name")?.takeIf { it.isNotBlank() } ?: UNNAMED,
@@ -227,7 +230,16 @@ internal fun JsonObject.toCharacterSummary(myUserId: String?): CharacterSummary 
         // portrait. Prefer the avatar and fall back, and treat blanks as absent.
         picture = string("avatarPicture") ?: string("picture"),
         owner = owner,
-        isOwnedByMe = myUserId != null && owner == myUserId,
+        isOwnedByMe = isOwnedByMe,
+        writers = writers,
+        // FR-19 decision 18: "a card is editable iff owner == me || writers.contains(me)".
+        //
+        // Against the **live** user id, not the stored `Account.userId`, for `isOwnedByMe`'s
+        // reason — an account row seeded with the wrong id (the debug seeder, WP5 §5) must
+        // not be able to hand out an edit capability. A `null` id is "we are not logged in
+        // yet", which answers false to both halves; that is the fail-closed direction, and
+        // the state resolves itself the moment `login` lands.
+        isEditableByMe = myUserId != null && (isOwnedByMe || myUserId in writers),
     )
 }
 
@@ -236,3 +248,19 @@ private const val UNNAMED = "Unnamed character"
 
 private fun JsonObject.string(key: String): String? =
     (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() }
+
+/**
+ * A `creatures` field that is an array of user ids — today only `writers` (decision 16:
+ * *"Membership REALITY is the per-creature `readers`/`writers` arrays"*).
+ *
+ * Everything that is not a non-blank JSON string is dropped rather than coerced. The field is
+ * absent on most creatures and this app has never written it, so the shapes reaching here are
+ * whatever DiceCloud and its own clients have put on the sheet over the years — and the one
+ * outcome that must not be possible is a malformed entry becoming an id that some `contains`
+ * check later matches. `emptyList()` for an absent or unusable field is the same fail-closed
+ * answer [toCharacterSummary] gives for a null user id.
+ */
+private fun JsonObject.stringArray(key: String): List<String> =
+    (this[key] as? JsonArray)
+        ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.takeIf(String::isNotBlank) }
+        .orEmpty()

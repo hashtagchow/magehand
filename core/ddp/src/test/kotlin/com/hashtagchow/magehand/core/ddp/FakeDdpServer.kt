@@ -63,6 +63,9 @@ class FakeSocket(private val listener: DdpSocketListener) : DdpSocket {
     private val lock = java.lang.Object()
     private val frames = ArrayList<JsonObject>()
 
+    /** Arrival time of each frame in [frames], parallel by index — see [sentTimesOf]. */
+    private val frameTimesMs = ArrayList<Long>()
+
     @Volatile
     private var dead = false
 
@@ -73,6 +76,7 @@ class FakeSocket(private val listener: DdpSocketListener) : DdpSocket {
         val frame = Json.parseToJsonElement(text).jsonObject
         synchronized(lock) {
             frames += frame
+            frameTimesMs += System.nanoTime() / 1_000_000
             lock.notifyAll()
         }
         return true
@@ -88,6 +92,14 @@ class FakeSocket(private val listener: DdpSocketListener) : DdpSocket {
     fun sentFrames(): List<JsonObject> = synchronized(lock) { frames.toList() }
 
     fun sentFramesOf(msg: String): List<JsonObject> = sentFrames().filter { it.msg == msg }
+
+    /**
+     * Millisecond arrival times of the [msg] frames, in order — the only way to assert
+     * on *spacing* rather than presence, which is what the reconnect stagger is.
+     */
+    fun sentTimesOf(msg: String): List<Long> = synchronized(lock) {
+        frames.indices.filter { frames[it].msg == msg }.map { frameTimesMs[it] }
+    }
 
     /** Blocks until the client sends a frame matching [predicate], and returns it. */
     fun awaitFrame(timeoutMs: Long = 5_000, predicate: (JsonObject) -> Boolean): JsonObject {

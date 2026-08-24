@@ -25,10 +25,15 @@ import com.hashtagchow.magehand.core.data.db.AccountEntity
 import com.hashtagchow.magehand.core.data.db.MageHandDatabase
 import com.hashtagchow.magehand.core.data.fake.FakeEquippableOverrideStore
 import com.hashtagchow.magehand.core.data.fake.FakeInventoryLayoutStore
+import com.hashtagchow.magehand.core.data.fake.FakeDmViewStore
+import com.hashtagchow.magehand.core.data.fake.FakePaneLayoutStore
 import com.hashtagchow.magehand.core.data.fake.FakeSelectedRollStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.DmViewStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.db.ThemePrefEntity
 import com.hashtagchow.magehand.core.data.db.TrackerPrefEntity
@@ -75,6 +80,8 @@ class DefaultAccountRepositoryTest {
     private val selectedRolls = FakeSelectedRollStore()
     private val equippableOverrides = FakeEquippableOverrideStore()
     private val inventoryLayouts = FakeInventoryLayoutStore()
+    private val paneLayouts = FakePaneLayoutStore()
+    private val dmView = FakeDmViewStore()
 
     @Before
     fun setUp() {
@@ -104,6 +111,8 @@ class DefaultAccountRepositoryTest {
             selectedRollStore = selectedRolls,
             equippableOverrideStore = equippableOverrides,
             inventoryLayoutStore = inventoryLayouts,
+            paneLayoutStore = paneLayouts,
+            dmViewStore = dmView,
             now = { clock },
             newId = { "acct-${++idCounter}" },
         )
@@ -379,6 +388,49 @@ class DefaultAccountRepositoryTest {
     }
 
     @Test
+    fun `signOut takes the account's pane choices with it`() = runTest {
+        // FR-17 (14 decision 8), asserted on its own rather than folded into the test above,
+        // because it is a *new* wiring line: `PaneLayoutStore` is the fourth store reached from
+        // `signOut`, and the failure it prevents is silent — a reset pane layout on a re-signed-in
+        // account is not a crash, it is a key nothing can ever name again.
+        api.loginResult = { LoginSession("u1", "t1", null) }
+        val account = repository.addAccount("dicecloud.com", "dm", "p").getOrThrow()
+        seedLocalDataFor(account.id)
+
+        assertEquals(
+            "the seed must be real for this test to mean anything",
+            setOf(PaneLayoutStore.serverKey(account.id, CREATURE_ID)),
+            paneLayouts.keys,
+        )
+
+        repository.signOut(account.id)
+
+        assertTrue("the pane choice must be gone: ${paneLayouts.keys}", paneLayouts.keys.isEmpty())
+    }
+
+    @Test
+    fun `signOut takes the account's DM-view table with it`() = runTest {
+        // FR-19 (14 decisions 11 and 16), asserted on its own for the pane-choice test's reason
+        // — a fifth store reached from `signOut` by one wiring line — plus one this store has
+        // that the other four do not: its key is the **account**, so a row left behind is not a
+        // stale preference about a character, it is a whole table of creature ids belonging to
+        // an account id that will never be minted again.
+        api.loginResult = { LoginSession("u1", "t1", null) }
+        val account = repository.addAccount("dicecloud.com", "dm", "p").getOrThrow()
+        seedLocalDataFor(account.id)
+
+        assertEquals(
+            "the seed must be real for this test to mean anything",
+            setOf(DmViewStore.serverKey(account.id)),
+            dmView.keys,
+        )
+
+        repository.signOut(account.id)
+
+        assertTrue("the DM-view table must be gone: ${dmView.keys}", dmView.keys.isEmpty())
+    }
+
+    @Test
     fun `signOut deletes only the signed-out account's local data`() = runTest {
         api.loginResult = { LoginSession("u1", "t1", null) }
         val alice = repository.addAccount("dicecloud.com", "alice", "p").getOrThrow()
@@ -410,6 +462,20 @@ class DefaultAccountRepositoryTest {
             setOf(InventoryLayoutStore.serverKey(bob.id, CREATURE_ID)),
             inventoryLayouts.keys,
         )
+        assertEquals(
+            "nor is bob's pane choice",
+            setOf(PaneLayoutStore.serverKey(bob.id, CREATURE_ID)),
+            paneLayouts.keys,
+        )
+        // FR-19. The one store here whose key is the account itself, which is why it is worth
+        // asserting separately from the four above: `DataStoreDmViewStore.deleteForAccount`
+        // deletes an exact key precisely because `dm_view:server:<id>` values are prefixes of
+        // one another, and this is the assertion that would fail if it ever became a sweep.
+        assertEquals(
+            "nor is bob's DM-view table",
+            setOf(DmViewStore.serverKey(bob.id)),
+            dmView.keys,
+        )
     }
 
     /** One row in every per-account store, so a missed `deleteForAccount` cannot pass. */
@@ -432,6 +498,19 @@ class DefaultAccountRepositoryTest {
         inventoryLayouts.setLayout(
             InventoryLayoutStore.serverKey(accountId, CREATURE_ID),
             listOf(InventoryLayoutEntry("wallet", hidden = true)),
+        )
+        // 14 decision 8's pane choice — the fourth per-character DataStore key sign-out has to
+        // reap, and the fourth time the reason is that `accounts.id` is minted per sign-in, so a
+        // key left behind is unreachable rather than merely stale.
+        paneLayouts.setPanes(
+            PaneLayoutStore.serverKey(accountId, CREATURE_ID),
+            setOf(PaneSurface.TRACKER, PaneSurface.SHEET),
+        )
+        // 14 decision 16's DM-view membership — the fifth key, and the first that is not
+        // per-character: it names the account itself, so nothing but this reap can ever remove it.
+        dmView.setMembers(
+            DmViewStore.serverKey(accountId),
+            setOf(CREATURE_ID, "creature-2"),
         )
     }
 

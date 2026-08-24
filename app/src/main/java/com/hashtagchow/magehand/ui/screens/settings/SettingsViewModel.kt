@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.account.AccountRepository
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.UiScale
 import com.hashtagchow.magehand.core.model.Account
 import javax.inject.Inject
 
@@ -25,6 +26,15 @@ data class SettingsUiState(
      * then flick off under the user's thumb.
      */
     val showToggles: Boolean = AppSettingsStore.DEFAULT_SHOW_TOGGLES,
+    /**
+     * FR-18's chosen scale (docs/design/14-large-screen-arc.md decision 2).
+     *
+     * Seeded from [UiScale.DEFAULT] for the same reason [showToggles] is seeded from its
+     * store constant: the segmented control renders one frame before the first DataStore
+     * read lands, and the option it highlights in that frame is the one the whole app is
+     * being drawn at in that frame.
+     */
+    val uiScale: UiScale = UiScale.DEFAULT,
 )
 
 /**
@@ -42,7 +52,10 @@ class SettingsViewModel @Inject constructor(
         accountRepository.accounts,
         accountRepository.activeAccountId,
         appSettingsStore.showToggles,
-    ) { accounts, activeId, showToggles -> SettingsUiState(accounts, activeId, showToggles) }
+        appSettingsStore.uiScale,
+    ) { accounts, activeId, showToggles, uiScale ->
+        SettingsUiState(accounts, activeId, showToggles, uiScale)
+    }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUiState())
 
     /**
@@ -52,6 +65,15 @@ class SettingsViewModel @Inject constructor(
      */
     fun setShowToggles(value: Boolean) {
         viewModelScope.launch { appSettingsStore.setShowToggles(value) }
+    }
+
+    /**
+     * FR-18. Same write-through shape as [setShowToggles], and here it is not merely tidy:
+     * the app's root provider reads the *store*, so the control showing stored state is what
+     * makes "the highlighted option is the size you are looking at" true rather than hopeful.
+     */
+    fun setUiScale(value: UiScale) {
+        viewModelScope.launch { appSettingsStore.setUiScale(value) }
     }
 
     fun switchTo(accountId: String) {

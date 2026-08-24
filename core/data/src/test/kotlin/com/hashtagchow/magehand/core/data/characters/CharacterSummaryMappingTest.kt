@@ -133,4 +133,81 @@ class CharacterSummaryMappingTest {
         )
         assertEquals("?", doc("""{"_id":"a","owner":"o","name":"12345"}""").toCharacterSummary(null).monogram)
     }
+
+    // ---- FR-19: the edit capability (14 decision 18) -------------------------
+
+    @Test
+    fun `a DM named in writers may edit a character they do not own`() {
+        // Decision 18: "a card is editable iff owner == me || writers.contains(me)". This is the
+        // shape the live table actually has — the DungeonMaster account owns none of the party
+        // and is a reader/writer on all of it — so it is also the *only* shape in which the DM
+        // view's write half does anything at all.
+        val summary = elowen.toCharacterSummary(dmUserId)
+
+        assertFalse("the DM owns none of the party", summary.isOwnedByMe)
+        assertEquals(listOf(dmUserId), summary.writers)
+        assertTrue(summary.isEditableByMe)
+    }
+
+    @Test
+    fun `a reader who is not a writer may not edit`() {
+        // The capability that the DM view's toggle must not be able to override. A sheet shared
+        // read-only is the common case for a player who wants the DM to *see* their character.
+        val readOnly = doc(
+            """
+            {"_id":"c1","owner":"someone-else","name":"Sabriel",
+             "readers":["$dmUserId"],"writers":[]}
+            """.trimIndent(),
+        ).toCharacterSummary(dmUserId)
+
+        assertFalse(readOnly.isEditableByMe)
+        assertEquals(emptyList<String>(), readOnly.writers)
+    }
+
+    @Test
+    fun `the owner may always edit, writers array or not`() {
+        val mine = doc("""{"_id":"c1","owner":"$dmUserId","name":"Sabriel"}""")
+            .toCharacterSummary(dmUserId)
+
+        assertTrue(mine.isOwnedByMe)
+        assertTrue(mine.isEditableByMe)
+    }
+
+    @Test
+    fun `an unknown user id grants nothing`() {
+        // Before `login` lands there is no user id, and the fail-closed answer is the only safe
+        // one: a summary that claimed an edit capability during that window would render write
+        // controls on a sheet whose sharing this client has not yet been told about.
+        val summary = elowen.toCharacterSummary(null)
+
+        assertFalse(summary.isOwnedByMe)
+        assertFalse(summary.isEditableByMe)
+        assertEquals("the raw fact is still carried", listOf(dmUserId), summary.writers)
+    }
+
+    @Test
+    fun `a malformed writers entry cannot become a matching id`() {
+        // The field is absent on most creatures and this app has never written it, so what
+        // arrives is whatever DiceCloud and its own clients have put on the sheet over the years.
+        // Anything that is not a non-blank JSON string is dropped rather than coerced — the one
+        // outcome that must not be possible is a malformed entry that some `contains` later
+        // matches into an edit capability.
+        val messy = doc(
+            """
+            {"_id":"c1","owner":"o","name":"Sabriel","writers":["",null,42,{"id":"$dmUserId"},"  "]}
+            """.trimIndent(),
+        ).toCharacterSummary(dmUserId)
+
+        assertEquals(emptyList<String>(), messy.writers)
+        assertFalse(messy.isEditableByMe)
+    }
+
+    @Test
+    fun `a writers field that is not an array at all is not a crash`() {
+        val wrongType = doc("""{"_id":"c1","owner":"o","name":"Sabriel","writers":"$dmUserId"}""")
+            .toCharacterSummary(dmUserId)
+
+        assertEquals(emptyList<String>(), wrongType.writers)
+        assertFalse(wrongType.isEditableByMe)
+    }
 }

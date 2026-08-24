@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -41,6 +42,22 @@ interface AppSettingsStore {
 
     suspend fun setShowToggles(value: Boolean)
 
+    /**
+     * FR-18: how much bigger than the system's own scale the whole UI renders
+     * (docs/design/14-large-screen-arc.md decisions 1-2).
+     *
+     * App-level and not per-character on purpose — 14 decision 2 puts it "beside FR-6's
+     * `show_toggles`", and this interface's contract is exactly that class of preference.
+     * A per-character scale would also mean the character list, settings and the login
+     * screen had no scale at all, which is where a tablet user first meets the problem.
+     *
+     * Defaults to [UiScale.DEFAULT] via [UiScale.fromKey], so an unset — or unreadable —
+     * value renders at the scale every build before 1.7.0 rendered at.
+     */
+    val uiScale: Flow<UiScale>
+
+    suspend fun setUiScale(value: UiScale)
+
     companion object {
         /** 09 decision 9, stated once. */
         const val DEFAULT_SHOW_TOGGLES: Boolean = false
@@ -59,8 +76,23 @@ class DataStoreAppSettingsStore(
         dataStore.edit { it[KEY_SHOW_TOGGLES] = value }
     }
 
+    /**
+     * FR-18. The degrade-to-default lives in [UiScale.fromKey] rather than here, so the
+     * *reader* of a value this store never wrote — a downgraded install, a corrupted
+     * preference — gets the same answer as a fresh install by construction.
+     */
+    override val uiScale: Flow<UiScale> =
+        dataStore.data.map { UiScale.fromKey(it[KEY_UI_SCALE]) }
+
+    override suspend fun setUiScale(value: UiScale) {
+        dataStore.edit { it[KEY_UI_SCALE] = value.key }
+    }
+
     companion object {
         /** 09 decision 9 names the key `show_toggles`; this is that name, unchanged. */
         private val KEY_SHOW_TOGGLES = booleanPreferencesKey("show_toggles")
+
+        /** 14 decision 2's "app-level string", in the same preferences file. */
+        private val KEY_UI_SCALE = stringPreferencesKey("ui_scale")
     }
 }

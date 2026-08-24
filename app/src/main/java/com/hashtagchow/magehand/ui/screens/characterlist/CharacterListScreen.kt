@@ -29,6 +29,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -41,6 +45,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -51,6 +57,11 @@ import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
+import com.hashtagchow.magehand.ui.screens.dmview.DM_VIEW_MAX_MEMBERS
+import com.hashtagchow.magehand.ui.screens.dmview.DM_VIEW_MIN_MEMBERS
+import com.hashtagchow.magehand.ui.screens.dmview.DmPickerState
+import com.hashtagchow.magehand.ui.screens.dmview.canOfferDmView
+import com.hashtagchow.magehand.ui.window.LocalExpandedWidth
 
 /**
  * Screen 2 — character list (docs/design/04-screens-ux.md §2).
@@ -67,11 +78,21 @@ fun CharacterListScreen(
     onNewCharacterClick: () -> Unit,
     onLocalCharacterClick: (String) -> Unit,
     onNewLocalCharacterClick: () -> Unit,
+    onDmViewClick: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: CharacterListViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val dmPicker by viewModel.dmPicker.collectAsStateWithLifecycle()
     var creatorMenuOpen by rememberSaveable { mutableStateOf(false) }
+
+    // FR-19 decisions 11 and 12, joined here — this is the app's ONE width question, read from
+    // the local `WindowSizeGate` publishes at the activity root, and `canOfferDmView` is the one
+    // place the two halves of the entry rule meet. See `LocalExpandedWidth`.
+    val offersDmView = canOfferDmView(
+        serverCharacterCount = uiState.characters.size,
+        expandedWidth = LocalExpandedWidth.current,
+    )
 
     Scaffold(
         contentWindowInsets = screenContentWindowInsets,
@@ -93,6 +114,17 @@ fun CharacterListScreen(
                     }
                 },
                 actions = {
+                    // Decision 12: on smaller widths the entry is **absent**, not disabled. A
+                    // greyed-out button would teach the user the app has a feature they cannot
+                    // have, rather than that their window is small.
+                    if (offersDmView) {
+                        TextButton(
+                            onClick = viewModel::openDmPicker,
+                            modifier = Modifier.testTag("list:dm-view"),
+                        ) {
+                            Text(stringResource(R.string.dm_view_open))
+                        }
+                    }
                     IconButton(onClick = onSettingsClick) {
                         Icon(
                             imageVector = Icons.Filled.Settings,
@@ -148,6 +180,15 @@ fun CharacterListScreen(
             }
         },
     ) { innerPadding ->
+        dmPicker?.let { picker ->
+            DmViewPickerSheet(
+                state = picker,
+                onToggle = viewModel::toggleDmMember,
+                onDismiss = viewModel::dismissDmPicker,
+                onConfirm = { viewModel.confirmDmSelection(onDmViewClick) },
+            )
+        }
+
         Column(Modifier.padding(innerPadding)) {
             // Absent, not "Connecting…", when there is no account — see
             // CharacterListUiState.showsConnection.
@@ -437,5 +478,127 @@ private fun CenteredMessage(content: @Composable () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
     ) {
         content()
+    }
+}
+
+/**
+ * FR-19's membership picker (docs/design/14-large-screen-arc.md decisions 11 and 16).
+ *
+ * ### Why the picker is here and not inside the dashboard
+ *
+ * Decision 17's binding rule is *"subscribe the set ONCE on entry"*. A picker inside the
+ * dashboard would make changing the table a tear-down and a fresh burst against a subscription
+ * rate limit the **whole table** shares (50 per 10 s, global across users). Choosing on the list
+ * means the dashboard opens knowing its members and never changes them. `DmPickerState`'s KDoc
+ * carries the full argument.
+ *
+ * ### The over-cap rows stay tappable
+ *
+ * Decision 16's maximum of six is enforced in `toggleDmMember`, not by disabling every unticked
+ * row the moment the sixth is ticked — a list that goes half-dead reads as broken, where a sheet
+ * that says *"That is the maximum — untick one to swap"* reads as a rule. Same argument the pane
+ * picker makes for its last-checked segment.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DmViewPickerSheet(
+    state: DmPickerState,
+    onToggle: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .testTag("list:dm-picker"),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.dm_view_picker_title),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                text = stringResource(
+                    R.string.dm_view_picker_body,
+                    DM_VIEW_MIN_MEMBERS,
+                    DM_VIEW_MAX_MEMBERS,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = if (state.isFull) {
+                    stringResource(R.string.dm_view_picker_full)
+                } else {
+                    stringResource(R.string.dm_view_picker_remaining, state.remaining)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            LazyColumn(Modifier.weight(1f, fill = false)) {
+                items(state.candidates, key = { "dm-${it.creatureId}" }) { character ->
+                    val selected = character.creatureId in state.selected
+                    // One merged node per row carrying name *and* membership: a `Checkbox` beside
+                    // an unlabelled `Text` announces "checked" about nothing in particular, which
+                    // on a list of six similar names is the one thing a screen-reader user cannot
+                    // reconstruct. Same rule as the inventory tab's summary rows.
+                    val spoken = stringResource(
+                        R.string.dm_view_picker_row,
+                        character.name,
+                        stringResource(
+                            if (selected) {
+                                R.string.dm_view_picker_selected
+                            } else {
+                                R.string.dm_view_picker_unselected
+                            },
+                        ),
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics(mergeDescendants = true) { contentDescription = spoken }
+                            .testTag("list:dm-picker:${character.creatureId}"),
+                    ) {
+                        Checkbox(
+                            checked = selected,
+                            onCheckedChange = { onToggle(character.creatureId) },
+                        )
+                        Text(
+                            text = character.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = onDismiss) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+                TextButton(
+                    onClick = onConfirm,
+                    // Decision 16's minimum of two. `canConfirm` is the rule, stated once in
+                    // `DmPickerState` and read here — the sheet's own copy already says why.
+                    enabled = state.canConfirm,
+                    modifier = Modifier.testTag("list:dm-picker:confirm"),
+                ) {
+                    Text(stringResource(R.string.dm_view_picker_confirm))
+                }
+            }
+        }
     }
 }

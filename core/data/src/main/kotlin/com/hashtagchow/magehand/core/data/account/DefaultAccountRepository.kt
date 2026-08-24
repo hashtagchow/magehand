@@ -18,6 +18,8 @@ import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.server.ServerUrlResult
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.DmViewStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.server.normalizeServerUrl
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
@@ -48,6 +50,8 @@ class DefaultAccountRepository(
     private val selectedRollStore: SelectedRollStore,
     private val equippableOverrideStore: EquippableOverrideStore,
     private val inventoryLayoutStore: InventoryLayoutStore,
+    private val paneLayoutStore: PaneLayoutStore,
+    private val dmViewStore: DmViewStore,
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) : AccountRepository {
@@ -217,6 +221,18 @@ class DefaultAccountRepository(
         // neither a DAO nor cascadable, and an account id that will never be minted again makes
         // anything left behind unreachable rather than stale.
         inventoryLayoutStore.deleteForAccount(accountId)
+        // FR-17's per-character pane choice (14 decision 8). Fourth store, same shape, same file,
+        // same argument: a preference keyed by character rather than by table, so it is neither a
+        // DAO nor cascadable, and an account id that will never be minted again makes anything
+        // left behind unreachable rather than stale.
+        paneLayoutStore.deleteForAccount(accountId)
+        // FR-19's DM-view membership (14 decisions 11 and 16). Fifth store in this list and the
+        // first whose key is the **account itself** rather than a character under it — so this
+        // is an exact-key delete, not a prefix sweep, and it is the one that would otherwise
+        // outlive its account most visibly: the id it names is the account signing out, and a
+        // row left behind would be a table of characters belonging to nobody. See
+        // `DataStoreDmViewStore.deleteForAccount` for why the prefix form would be a bug here.
+        dmViewStore.deleteForAccount(accountId)
 
         // The token also rests in the WebView's localStorage, because that is how
         // Meteor SSO works (docs/design/05-security.md §"WebView SSO"). WP5 found it

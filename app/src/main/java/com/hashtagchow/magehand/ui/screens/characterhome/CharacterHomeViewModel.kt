@@ -8,10 +8,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -30,6 +30,11 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneSurface
+// Aliased: this view model's own `togglePane` is the *persisting* gesture, the imported one is
+// the pure rule it applies. Same name in two layers is right; shadowing it silently is not.
+import com.hashtagchow.magehand.ui.panes.togglePane as nextPaneSet
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -88,6 +93,10 @@ data class CharacterHomeUiState(
  * An event stream rather than a field on [CharacterHomeUiState], because both are *things
  * that happened* — two identical spends in a row must produce two snackbars, and a state
  * field equal to its predecessor would produce one.
+ *
+ * One type, two **streams**: [CharacterHomeViewModel.writeEvents] and
+ * [CharacterHomeViewModel.failureEvents] carry the two arms separately, because they need
+ * opposite back-pressure. See those declarations for why one stream could not.
  */
 sealed interface TrackerEvent {
     /** A write the server accepted. Carries the entry so the snackbar can offer UNDO. */
@@ -129,6 +138,7 @@ class CharacterHomeViewModel @Inject constructor(
     private val selectedRollStore: SelectedRollStore,
     private val equippableOverrideStore: EquippableOverrideStore,
     private val inventoryLayoutStore: InventoryLayoutStore,
+    private val paneLayoutStore: PaneLayoutStore,
     private val openCharacterFactory: OpenCharacterFactory,
     private val connectionManager: DdpConnectionManager,
 ) : ViewModel() {
@@ -143,10 +153,52 @@ class CharacterHomeViewModel @Inject constructor(
     @Volatile
     private var cleared = false
 
-    private val _events = MutableSharedFlow<TrackerEvent>(extraBufferCapacity = 16)
+    private val _writeEvents = MutableSharedFlow<TrackerEvent.Wrote>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
 
-    /** 04 §3's snackbars. Collected by the screen; nothing is replayed on re-subscribe. */
-    val events: SharedFlow<TrackerEvent> = _events.asSharedFlow()
+    private val _failureEvents = MutableSharedFlow<TrackerEvent.Failed>(extraBufferCapacity = 32)
+
+    /**
+     * Confirmations — 04 §3's UNDO snackbar. **Conflated**: one pending at most, newest wins.
+     *
+     * ### Why two streams and not one
+     *
+     * These two used to share one 16-deep `MutableSharedFlow` with a suspending overflow
+     * policy, collected by one `when` in the screen — and `SnackbarHostState.showSnackbar`
+     * suspends for the life of each snackbar. So a burst of taps filled the buffer with
+     * confirmations, and the *emitter* of a [failureEvents] then parked waiting for room,
+     * behind up to sixteen four-second snackbars. Over a minute in which the one event the
+     * player needs — "that write did not stick" — could not reach the screen at all, on
+     * precisely the press-and-hold that produces rate-limit refusals in the first place.
+     *
+     * Two streams because the two need *opposite* back-pressure, which one flow cannot have.
+     * And deliberately **not** one flow merged from two: `merge` puts a 64-deep channel in
+     * front of the collector, which drains this lane instantly and defeats the conflation
+     * entirely — the confirmations then queue in the merge instead of the SharedFlow and the
+     * screen still shows twenty snackbars over eighty seconds. Separate streams, separately
+     * collected, is what makes both policies real.
+     *
+     * ### Dropping receipts is honest
+     *
+     * A confirmation is a receipt with an UNDO on it, and an UNDO offered twelve seconds late
+     * is for a write the player stopped thinking about. Nothing else is lost: the writes
+     * themselves are untouched, the queue's undo stack is untouched, and every dropped receipt
+     * is still a row in the history sheet with its own UNDO ([OpenCharacter.writeHistory] is a
+     * `StateFlow` and keeps 100 of them).
+     */
+    val writeEvents: Flow<TrackerEvent.Wrote> = _writeEvents.asSharedFlow()
+
+    /**
+     * Rollbacks and refusals — 04 §3's error snackbar and the row shake. **Never dropped, and
+     * never queued behind a confirmation.**
+     *
+     * Its own buffer and its own collector, which is the whole point: a failure means a tap the
+     * player believes landed did not, and the number on screen has already snapped back without
+     * explanation — the snackbar is the only thing that says why.
+     */
+    val failureEvents: Flow<TrackerEvent.Failed> = _failureEvents.asSharedFlow()
 
     init {
         viewModelScope.launch {
@@ -167,7 +219,10 @@ class CharacterHomeViewModel @Inject constructor(
                     val newest = history.firstOrNull() ?: return@collect
                     if (newest.id > lastSeen) {
                         lastSeen = newest.id
-                        _events.emit(TrackerEvent.Wrote(newest))
+                        // `tryEmit`, not `emit`: the lane is DROP_OLDEST, so this always
+                        // succeeds and this collector can never be parked by a slow screen —
+                        // which is what let a backlog build behind it.
+                        _writeEvents.tryEmit(TrackerEvent.Wrote(newest))
                     }
                 }
         }
@@ -175,7 +230,7 @@ class CharacterHomeViewModel @Inject constructor(
         viewModelScope.launch {
             open.filterNotNull()
                 .flatMapLatest { it.writeFailures }
-                .collect { _events.emit(TrackerEvent.Failed(it)) }
+                .collect { _failureEvents.emit(TrackerEvent.Failed(it)) }
         }
     }
 
@@ -219,6 +274,51 @@ class CharacterHomeViewModel @Inject constructor(
      */
     private fun inventoryLayoutKey(character: OpenCharacter): String =
         InventoryLayoutStore.serverKey(character.accountId, character.creatureId)
+
+    /**
+     * FR-17's key for the *opened* character (14 decision 8).
+     *
+     * A function of the open character rather than of [creatureId] alone, for
+     * [inventoryLayoutKey]'s reason: the same creature reached from two accounts is two rows
+     * everywhere else in this app, and account-scoping the key is what makes sign-out's reap a
+     * prefix match. It therefore cannot be computed until the character is open, which is why
+     * [panes] is a `flatMapLatest` rather than a plain store read.
+     */
+    private fun paneLayoutKey(character: OpenCharacter): String =
+        PaneLayoutStore.serverKey(character.accountId, character.creatureId)
+
+    /**
+     * FR-17's chosen panes for this character (14 decision 8).
+     *
+     * A separate `StateFlow` from [uiState] rather than a field on it, deliberately: this is a
+     * preference about *chrome*, read only by the composable that decides which chrome to draw,
+     * and folding it into the state that every tracker row and every inventory section recomposes
+     * against would make a pane toggle invalidate the whole screen. It is also the state decision
+     * 10 needs to survive a gate crossing untouched, and keeping it out of the character's ui
+     * state keeps it out of every rebuild of that state — including the ones a DDP sync causes.
+     *
+     * The empty set is *"no preference"*, not *"no panes"*; `resolvePanes` turns it into decision
+     * 8's Tracker-only default, which is also what renders for the frame before the character
+     * opens. See `PaneLayoutStore`.
+     */
+    val panes: StateFlow<Set<PaneSurface>> = open.flatMapLatest { character ->
+        if (character == null) flowOf(emptySet()) else paneLayoutStore.panes(paneLayoutKey(character))
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+
+    /**
+     * Decision 6's picker gesture, persisted.
+     *
+     * [current] is what is on screen — the resolved list, not the stored set — because
+     * `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. A gesture the rule
+     * refuses returns the input unchanged and is not written, matching [mutateInventoryLayout]'s
+     * no-op contract.
+     */
+    fun togglePane(current: Set<PaneSurface>, surface: PaneSurface) {
+        val key = paneLayoutKey(open.value ?: return)
+        val next = nextPaneSet(current, surface)
+        if (next == current) return
+        viewModelScope.launch { paneLayoutStore.setPanes(key, next) }
+    }
 
     /**
      * FR-6 applies to **every** character, not only local ones (09 decision 9: "for ALL

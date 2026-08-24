@@ -334,6 +334,32 @@ class WriteQueue(
      * hit it, which is exactly the kind of bug that only ever reproduces in the field.
      * Making removal and claim one atomic step removes the window rather than narrowing
      * it; there is no longer any moment at which a dispatchable entry is unreachable.
+     *
+     * ### The invariant this merge relies on, and where it is guaranteed
+     *
+     * Merging is a **signed sum**, so a `+` and a `−` for one property collapse into their
+     * net — deliberately, because that is what stops a double-tap burning two of the five
+     * calls the server allows per 5 s, and what makes a pair that cancels out cost nothing
+     * ([WriteOp.Noop]). It is safe *only while every op reaching this queue is already within
+     * its property's bounds*, and that is not a property of the arithmetic: this server clamps
+     * an out-of-range `increment` to zero and stores it, so a net-negative sum past a
+     * property's floor loses the excess silently — and a later increment merged into such a
+     * sum is lost with it.
+     *
+     * For `adjustQuantity` that guarantee is made **upstream**, by
+     * `DefaultOpenCharacter.flushItemQuantity`'s per-property latch: a property has at most one
+     * `adjustQuantity` outstanding at a time, so a burst of item-stepper taps never puts two
+     * of them in this queue for the scan below to find. The merge is a no-op on that path by
+     * construction — `DefaultOpenCharacterWriteTest`'s quantity-latch group pins both halves,
+     * ending with the case that holds one flush on the wire and asserts that thirty-two
+     * further repeats reach this queue not at all.
+     *
+     * A queue-level guard — "refuse to merge increments of opposite sign, let them sequence" —
+     * was considered and rejected. It would not fix the bug (a same-sign burst can overdraw a
+     * property just as well, which is the case that was actually reported), and it would
+     * destroy the cancel-out behaviour the tracker's `+`/`−` steppers depend on, turning every
+     * corrective tap into a second call against a 1 s gate. The fix belongs where the bound is
+     * known, which is the layer holding the row.
      */
     private fun takeCoalescedHead(): Entry? = synchronized(lock) {
         val head = queue.removeFirstOrNull() ?: return@synchronized null

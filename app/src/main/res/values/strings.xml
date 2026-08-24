@@ -16,6 +16,11 @@
     <string name="tab_inventory">Inventory</string>
     <string name="tab_sheet">Sheet</string>
 
+    <!-- FR-17 panes (docs/design/14-large-screen-arc.md decisions 5-7). The picker replaces the
+         tab row on an EXPANDED-width window; its segments reuse the tab labels above, so only
+         the group's own TalkBack label is new. -->
+    <string name="panes_picker_label">Panes shown</string>
+
     <!-- FR-8: inventory tab (docs/design/10-inventory.md) -->
     <string name="inventory_section_wallet">Wallet</string>
     <string name="inventory_section_equipped">Equipped</string>
@@ -283,6 +288,19 @@
     <string name="settings_show_toggles">Show toggles on tracker</string>
     <string name="settings_show_toggles_note">Most sheets\' toggles are build machinery — hidden unless you use them.</string>
 
+    <!-- FR-18: UI scale (docs/design/14-large-screen-arc.md decisions 2-4). The note is
+         decision 3's sentence verbatim: the sheet is a WebView, so it can only scale its
+         text, and saying so is cheaper than a user discovering it and calling it a bug.
+         The option labels are percentages because the setting is a multiplier of whatever
+         the system font/display size already is, not an absolute size. -->
+    <string name="settings_display">Display</string>
+    <string name="settings_ui_scale">UI size</string>
+    <string name="settings_ui_scale_note">Applies across the app; the character sheet scales its text.</string>
+    <string name="settings_ui_scale_default">Default</string>
+    <string name="settings_ui_scale_110">110%</string>
+    <string name="settings_ui_scale_125">125%</string>
+    <string name="settings_ui_scale_150">150%</string>
+
     <!-- FR-5: local characters (docs/design/09-local-characters.md) -->
     <string name="local_field_name">Name</string>
     <string name="local_field_level">Level</string>
@@ -319,6 +337,56 @@
     <string name="local_delete_title">Delete this character?</string>
     <string name="local_delete_body">%1$s and everything on their tracker will be removed from this device.</string>
     <string name="local_delete_not_undoable">This cannot be undone — local characters are not backed up anywhere.</string>
+
+
+    <!-- FR-19: DM view (docs/design/14-large-screen-arc.md decisions 11-19) -->
+    <string name="dm_view_title">DM view</string>
+    <string name="dm_view_open">Open DM view</string>
+    <string name="dm_view_picker_title">Who is at the table?</string>
+    <string name="dm_view_picker_body">Pick %1$d\u2013%2$d characters to watch side by side.</string>
+    <string name="dm_view_picker_remaining">You can add %1$d more.</string>
+    <string name="dm_view_picker_full">That is the maximum \u2014 untick one to swap.</string>
+    <string name="dm_view_picker_confirm">Open</string>
+    <string name="dm_view_picker_row">%1$s, %2$s</string>
+    <string name="dm_view_picker_selected">on the table</string>
+    <string name="dm_view_picker_unselected">not on the table</string>
+    <string name="dm_view_empty">Nobody is on this table any more. Go back and pick again.</string>
+    <string name="dm_view_editing_toggle">Enable editing</string>
+    <string name="dm_view_editing_on">On</string>
+    <string name="dm_view_editing_off">Off</string>
+    <string name="dm_view_editing_state">Enable editing, %1$s. %2$d of %3$d characters can be edited.</string>
+    <string name="dm_view_editing_banner">Editing is on \u2014 taps change these characters\u2019 sheets.</string>
+    <string name="dm_view_editing_banner_spoken">Warning. Editing is on. Taps change these characters\u2019 sheets.</string>
+    <string name="dm_view_card_unavailable">Not available</string>
+    <string name="dm_view_card_unavailable_body">This sheet is not loading. The share may have been withdrawn.</string>
+    <string name="dm_view_card_loading">Loading</string>
+    <string name="dm_view_card_read_only">read only</string>
+    <string name="dm_view_card_denied">The server refused that edit \u2014 this card is read-only now.</string>
+    <string name="dm_view_card_hp">%1$d of %2$d hit points</string>
+    <!-- Plurals, for `inventory_section_items`' reason: every one of these is read aloud by
+         TalkBack on a card the DM is scanning, and "1 spell slots spent" / "1 items" is heard
+         in full. A card is a glance; a wrong plural is the thing that stops it being one. -->
+    <plurals name="dm_view_card_slots_spent">
+        <item quantity="one">%1$d spell slot spent</item>
+        <item quantity="other">%1$d spell slots spent</item>
+    </plurals>
+    <string name="dm_view_card_conditions">conditions: %1$s</string>
+    <string name="dm_view_card_concentrating">concentrating on %1$s</string>
+    <plurals name="dm_view_card_inventory">
+        <item quantity="one">%1$d item, %2$s lb</item>
+        <item quantity="other">%1$d items, %2$s lb</item>
+    </plurals>
+    <plurals name="dm_view_card_inventory_over">
+        <item quantity="one">%1$d item, %2$s lb, over capacity</item>
+        <item quantity="other">%1$d items, %2$s lb, over capacity</item>
+    </plurals>
+    <!-- `value/total` on a card's resource and slot rows. A resource and not an interpolated
+         string, for `inventory_attuned`'s reason: `%d` is formatted through the current locale,
+         so a device set to a locale with its own digits gets them, and a locale that separates
+         the pair differently can say so in its own strings.xml. Kotlin interpolation of an Int
+         is ASCII, always, wherever it is read. -->
+    <string name="dm_view_card_ratio">%1$d/%2$d</string>
+    <string name="dm_view_card_open">Open %1$s</string>
 
     <!-- Actions -->
     <string name="action_settings">Settings</string>

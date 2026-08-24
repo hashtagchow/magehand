@@ -1,5 +1,6 @@
 package com.hashtagchow.magehand.ui.screens.settings
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,10 +36,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.core.data.settings.UiScale
 import com.hashtagchow.magehand.ui.components.RadioRow
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 
@@ -131,6 +139,18 @@ fun SettingsScreen(
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
 
             Text(
+                text = stringResource(R.string.settings_display),
+                style = MaterialTheme.typography.titleMedium,
+            )
+
+            UiScaleSetting(
+                selected = uiState.uiScale,
+                onSelect = viewModel::setUiScale,
+            )
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+            Text(
                 text = stringResource(R.string.settings_tracker),
                 style = MaterialTheme.typography.titleMedium,
             )
@@ -188,4 +208,90 @@ fun SettingsScreen(
             },
         )
     }
+}
+
+/**
+ * FR-18's control (docs/design/14-large-screen-arc.md decision 4).
+ *
+ * ### Why segmented buttons and not a slider or a dropdown
+ *
+ * 14 decision 2 makes the scale four steps, and a segmented row is the one control that
+ * *shows* that: every option and the current choice are on screen at once, so choosing is a
+ * single tap and comparing is free. A dropdown hides three of the four behind a tap, and a
+ * slider would imply values that do not exist.
+ *
+ * ### TalkBack
+ *
+ * Decision 4 asks for three things and each has a line here: the group reads "UI size" (the
+ * row carries it as a content description — set on a non-merging node, so the options stay
+ * individually focusable rather than being collapsed into one announcement); each option
+ * reads its percentage (its label is the whole of its content); and selection state is
+ * spoken by `SegmentedButton` itself, which carries the selected/unselected semantics of the
+ * single-choice row it sits in.
+ *
+ * The label is also marked as a heading, which is what lets a screen-reader user jump
+ * between settings sections instead of walking every control in the screen.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun UiScaleSetting(
+    selected: UiScale,
+    onSelect: (UiScale) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val groupLabel = stringResource(R.string.settings_ui_scale)
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+    ) {
+        Text(
+            text = groupLabel,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.semantics { heading() },
+        )
+        Text(
+            text = stringResource(R.string.settings_ui_scale_note),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        SingleChoiceSegmentedButtonRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp)
+                .semantics { contentDescription = groupLabel },
+        ) {
+            UiScale.entries.forEachIndexed { index, scale ->
+                SegmentedButton(
+                    selected = scale == selected,
+                    onClick = { onSelect(scale) },
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = index,
+                        count = UiScale.entries.size,
+                    ),
+                    modifier = Modifier.testTag("settings:ui-scale:${scale.key}"),
+                ) {
+                    Text(stringResource(uiScaleLabel(scale)))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The percentage label for each step.
+ *
+ * Exhaustive `when` rather than a lookup on [UiScale.key]: adding a fifth step then fails to
+ * compile until somebody writes its label, which is the only mechanism that keeps a new step
+ * from shipping as a blank button. `internal` so the mapping can be pinned without the
+ * Compose harness `:app` does not have.
+ */
+@StringRes
+internal fun uiScaleLabel(scale: UiScale): Int = when (scale) {
+    UiScale.DEFAULT -> R.string.settings_ui_scale_default
+    UiScale.LARGE_110 -> R.string.settings_ui_scale_110
+    UiScale.LARGE_125 -> R.string.settings_ui_scale_125
+    UiScale.LARGE_150 -> R.string.settings_ui_scale_150
 }

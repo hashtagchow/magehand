@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import okhttp3.Call
 import okhttp3.OkHttpClient
+import com.hashtagchow.magehand.core.data.BuildConfig
 import com.hashtagchow.magehand.core.data.account.AccountRepository
 import com.hashtagchow.magehand.core.data.account.ActiveAccountStore
 import com.hashtagchow.magehand.core.data.account.DataStoreActiveAccountStore
@@ -43,16 +44,23 @@ import com.hashtagchow.magehand.core.data.db.ThemePrefDao
 import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
 import com.hashtagchow.magehand.core.data.local.LocalCharacterRepository
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
+import com.hashtagchow.magehand.core.ddp.DdpClientConfig
 import com.hashtagchow.magehand.core.ddp.OkHttpDdpSocketFactory
+import com.hashtagchow.magehand.core.data.session.CreatureSessionConfig
 import com.hashtagchow.magehand.core.data.session.DefaultOpenCharacterFactory
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
+import com.hashtagchow.magehand.core.data.write.WriteQueueConfig
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreAppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreEquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreInventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.DataStoreDmViewStore
+import com.hashtagchow.magehand.core.data.settings.DataStorePaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreSelectedRollStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.DmViewStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
 import java.util.concurrent.TimeUnit
@@ -200,6 +208,38 @@ object DataModule {
     ): InventoryLayoutStore = DataStoreInventoryLayoutStore(preferences(context))
 
     /**
+     * FR-17's per-character pane choice (docs/design/14-large-screen-arc.md decision 8).
+     *
+     * The same [preferences] file for a sixth interface, and the argument is the one the two
+     * providers above make: one file to migrate and back up, several contracts over it. This is
+     * the *fourth* store with the per-character key shape and both reaping paths — see
+     * `PaneLayoutStore`'s KDoc for why the four are four files rather than one generic store, and
+     * in particular for the one way this one differs from `InventoryLayoutStore` (a closed
+     * vocabulary, so an unknown token is dropped rather than kept).
+     */
+    @Provides
+    @Singleton
+    fun providePaneLayoutStore(
+        @ApplicationContext context: Context,
+    ): PaneLayoutStore = DataStorePaneLayoutStore(preferences(context))
+
+    /**
+     * FR-19's per-account DM-view membership (docs/design/14-large-screen-arc.md decisions 11
+     * and 16).
+     *
+     * The same [preferences] file for a seventh interface, and the argument is the one every
+     * provider above makes: one file to migrate and back up, several contracts over it. This is
+     * the *first* store here whose key is an **account** rather than a character — see
+     * `DmViewStore`'s KDoc for why that makes it a fifth file rather than a fifth use of
+     * `PaneLayoutStore`, and in particular for why its reap is an exact-key delete.
+     */
+    @Provides
+    @Singleton
+    fun provideDmViewStore(
+        @ApplicationContext context: Context,
+    ): DmViewStore = DataStoreDmViewStore(preferences(context))
+
+    /**
      * The snapshot store, character cache and two pref DAOs are here for
      * [DefaultAccountRepository.signOut] alone — it is the one path that knows an account
      * has ended, and each of these owns rows keyed by `accountId` that nothing else could
@@ -221,6 +261,8 @@ object DataModule {
         selectedRollStore: SelectedRollStore,
         equippableOverrideStore: EquippableOverrideStore,
         inventoryLayoutStore: InventoryLayoutStore,
+        paneLayoutStore: PaneLayoutStore,
+        dmViewStore: DmViewStore,
     ): AccountRepository = DefaultAccountRepository(
         api = api,
         accountDao = accountDao,
@@ -234,6 +276,8 @@ object DataModule {
         selectedRollStore = selectedRollStore,
         equippableOverrideStore = equippableOverrideStore,
         inventoryLayoutStore = inventoryLayoutStore,
+        paneLayoutStore = paneLayoutStore,
+        dmViewStore = dmViewStore,
     )
 
     // ---- WP5: live connection + character list -------------------------------
@@ -257,6 +301,12 @@ object DataModule {
         // that nothing ever shut down.
         clientFactory = DefaultDdpConnectionManager.sharedClientFactory(
             OkHttpDdpSocketFactory.webSocketClient(baseHttpClient),
+            // One of this module's two `BuildConfig.DEBUG` reads, and the reason the flag is
+            // read *here*: this is the only place that both knows the build type and holds a
+            // `DdpClientConfig`. Release gets `DebugLogSinks.NO_OP` — see `DebugLogSinksTest`.
+            config = DdpClientConfig(
+                logger = DebugLogSinks.sink(DebugLogSinks.DDP_TAG, BuildConfig.DEBUG),
+            ),
         ),
     )
 
@@ -286,9 +336,20 @@ object DataModule {
     // ---- WP6: one open character screen --------------------------------------
 
     /**
-     * Not `@Singleton`: a factory is stateless, and each [OpenCharacterFactory.open] hands
-     * back an object whose lifetime is one character screen, not the process.
+     * `@Singleton`, and it has to be.
+     *
+     * This used to be unscoped, on the reasoning that "a factory is stateless, and each
+     * [OpenCharacterFactory.open] hands back an object whose lifetime is one character screen".
+     * The first half stopped being true when FR-19 made two screens able to hold the *same*
+     * creature at once: the factory now keeps a reference-counted session per creature, so that
+     * the DM dashboard and a character screen opened from one of its cards share one
+     * `singleCharacter` subscription, one `WriteQueue` and one view of the mirror rather than
+     * racing each other through it (see `DefaultOpenCharacterFactory`).
+     *
+     * A per-injection-point factory would give each view model its own cache, which is the same
+     * as having none — the duplicate sessions would be back, and nothing would report it.
      */
+    @Singleton
     @Provides
     fun provideOpenCharacterFactory(
         connectionManager: DdpConnectionManager,
@@ -304,6 +365,14 @@ object DataModule {
         trackerPrefDao = trackerPrefDao,
         themePrefDao = themePrefDao,
         characterCache = characterCache,
+        // The second `BuildConfig.DEBUG` read. `WriteQueue` already logs the four things that
+        // decide whether a tap reaches the server — coalesced away, connection lost, rate
+        // limited, retried — and every one of them went nowhere until this line existed.
+        sessionConfig = CreatureSessionConfig(
+            writeQueue = WriteQueueConfig(
+                logger = DebugLogSinks.sink(DebugLogSinks.WRITE_TAG, BuildConfig.DEBUG),
+            ),
+        ),
     )
 
     // ---- FR-5: local characters (docs/design/09-local-characters.md) ----------
@@ -319,9 +388,9 @@ object DataModule {
      * one instance keeps the `now`/`newId` overrides in one place rather than letting a second
      * construction site quietly pick the defaults.
      *
-     * The three per-character stores are for the delete path: a local character's remembered
-     * roll, its equippability overrides and its inventory layout are DataStore keys, not rows,
-     * so nothing cascades them and sign-out is forbidden from reaping them — see
+     * The four per-character stores are for the delete path: a local character's remembered
+     * roll, its equippability overrides, its inventory layout and its pane choice are DataStore
+     * keys, not rows, so nothing cascades them and sign-out is forbidden from reaping them — see
      * [LocalCharacterRepository.delete].
      */
     @Provides
@@ -331,8 +400,14 @@ object DataModule {
         selectedRollStore: SelectedRollStore,
         equippableOverrideStore: EquippableOverrideStore,
         inventoryLayoutStore: InventoryLayoutStore,
-    ): LocalCharacterRepository =
-        LocalCharacterRepository(dao, selectedRollStore, equippableOverrideStore, inventoryLayoutStore)
+        paneLayoutStore: PaneLayoutStore,
+    ): LocalCharacterRepository = LocalCharacterRepository(
+        dao,
+        selectedRollStore,
+        equippableOverrideStore,
+        inventoryLayoutStore,
+        paneLayoutStore,
+    )
 
     /**
      * Not `@Singleton`, for the same reason [provideOpenCharacterFactory] is not: each open

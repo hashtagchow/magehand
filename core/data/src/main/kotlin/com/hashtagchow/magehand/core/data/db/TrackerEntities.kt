@@ -45,6 +45,31 @@ data class CharacterEntity(
  *
  * `lastOpenedAt` stays on the entity: it is the selector's *ordering* key, which
  * [CharacterDao.observeForAccount] applies in SQL, so the domain type does not need it.
+ *
+ * ### `writers` is deliberately not cached, and that fails closed
+ *
+ * FR-19 added [CharacterSummary.writers] and [CharacterSummary.isEditableByMe]
+ * (docs/design/14-large-screen-arc.md decision 18). Neither is persisted here, and no
+ * column was added for them, because a cached row can only ever *widen* an edit capability
+ * — and a stale grant is precisely the one that must not be believed: a sheet's owner can
+ * revoke a writer at any time, and this table is refreshed only when a subscription
+ * succeeds.
+ *
+ * So a row inflated from cache carries **no writers**, and `isEditableByMe` falls back to
+ * [isOwned] — which is cached, and ownership does not lapse. An offline DM view therefore
+ * degrades to *"I can edit the characters I own"*: strictly narrower than the live answer,
+ * never wider. It is the *granted-writer* half of decision 18's rule that cannot survive a
+ * restart, not the owner half.
+ *
+ * (An earlier version of this note said the cache sets `isEditableByMe = false`. It does not,
+ * and should not — dropping an owner's own sheet to read-only offline would take away a
+ * capability the server will never revoke. The code below is the correct one; this paragraph
+ * is here so the next reader does not "fix" it back.)
+ *
+ * None of this is permission to *write*. `isEditableByMe` decides whether a control is drawn;
+ * `OpenCharacter.canWrite` is LIVE-only and gates whether it is enabled, and the server's own
+ * refusal is the third gate behind both (decision 18). A cached `true` therefore reaches an
+ * enabled control only once there is a live connection to carry the write anyway.
  */
 fun CharacterEntity.toDomain(): CharacterSummary = CharacterSummary(
     creatureId = creatureId,
@@ -54,6 +79,14 @@ fun CharacterEntity.toDomain(): CharacterSummary = CharacterSummary(
     picture = picture,
     owner = owner,
     isOwnedByMe = isOwned,
+    // Both left at their defaults on purpose — see the KDoc above. `isOwned` still reaches
+    // `isEditableByMe`'s *meaning* through the owner half of decision 18's rule, applied by
+    // whoever reads the summary; what cannot survive a restart is the granted-writer half.
+    // `writers` empty and `isEditableByMe` from `isOwned` — see the KDoc above. The owner half
+    // of decision 18's rule is cached because ownership does not lapse; the granted-writer half
+    // is not, because a share can be withdrawn while this row sits on disk.
+    writers = emptyList(),
+    isEditableByMe = isOwned,
 )
 
 fun CharacterSummary.toEntity(accountId: String, lastOpenedAt: Long = 0L): CharacterEntity =

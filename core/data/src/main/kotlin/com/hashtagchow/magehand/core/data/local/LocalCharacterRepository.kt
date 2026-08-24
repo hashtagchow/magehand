@@ -8,6 +8,7 @@ import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.LocalCharacter
@@ -36,6 +37,7 @@ class LocalCharacterRepository(
     private val selectedRollStore: SelectedRollStore,
     private val equippableOverrideStore: EquippableOverrideStore,
     private val inventoryLayoutStore: InventoryLayoutStore,
+    private val paneLayoutStore: PaneLayoutStore,
     private val now: () -> Long = System::currentTimeMillis,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) {
@@ -274,6 +276,10 @@ class LocalCharacterRepository(
         // a DataStore key in the local namespace, outside the sign-out sweep on purpose, keyed
         // by a UUID that will never recur. Before the row, like everything else above it.
         inventoryLayoutStore.clearForCharacter(InventoryLayoutStore.localKey(id))
+        // 14 decision 8's pane choice, and the fourth repetition of the same three facts: a
+        // DataStore key in the local namespace, outside the sign-out sweep on purpose, keyed by a
+        // UUID that will never recur. Before the row, like everything else above it.
+        paneLayoutStore.clearForCharacter(PaneLayoutStore.localKey(id))
         dao.delete(id)
     }
 }

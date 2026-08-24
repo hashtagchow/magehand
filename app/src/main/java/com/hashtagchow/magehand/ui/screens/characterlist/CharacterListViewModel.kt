@@ -3,17 +3,30 @@ package com.hashtagchow.magehand.ui.screens.characterlist
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.account.AccountRepository
 import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
 import com.hashtagchow.magehand.core.data.characters.CharacterListSource
 import com.hashtagchow.magehand.core.data.local.LocalCharacterRepository
+import com.hashtagchow.magehand.core.data.settings.DmViewStore
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.LocalCharacter
+import com.hashtagchow.magehand.ui.screens.dmview.DM_VIEW_MIN_MEMBERS
+import com.hashtagchow.magehand.ui.screens.dmview.DmPickerState
+import com.hashtagchow.magehand.ui.screens.dmview.resolveDmMembers
+// Aliased for `CharacterHomeViewModel.togglePane`'s reason: this view model's own
+// `toggleDmMember` is the *stateful* gesture, the imported one is the pure rule it applies.
+// Same name in two layers is right; shadowing it silently is not.
+import com.hashtagchow.magehand.ui.screens.dmview.toggleDmMember as nextDmMembers
 import javax.inject.Inject
 
 /**
@@ -135,12 +148,28 @@ data class CharacterListUiState(
      * somewhere the user did not ask to go.
      */
     val showsCreateAffordance: Boolean get() = hasAccount != null
+
+    /**
+     * Whether this account has enough live-subscribable characters for a DM view
+     * (docs/design/14-large-screen-arc.md decisions 11 and 16).
+     *
+     * **Half** of the entry rule — the width half is `LocalExpandedWidth`, a composition local,
+     * and `canOfferDmView` is where the two are joined. Split that way for FR-17's convention:
+     * the state layer answers what it can measure, and the one width question in the app is asked
+     * once, in the composable, from the local `WindowSizeGate` publishes.
+     *
+     * Server characters only. Local ones have no subscription to be live on, which is the entire
+     * content of a DM card — counting them would offer a dashboard that opened onto "Not
+     * available" (decision 19) for every row.
+     */
+    val hasDmViewCandidates: Boolean get() = characters.size >= DM_VIEW_MIN_MEMBERS
 }
 
 @HiltViewModel
 class CharacterListViewModel @Inject constructor(
     private val characterListRepository: CharacterListRepository,
-    accountRepository: AccountRepository,
+    private val accountRepository: AccountRepository,
+    private val dmViewStore: DmViewStore,
     localCharacterRepository: LocalCharacterRepository,
 ) : ViewModel() {
 
@@ -166,6 +195,78 @@ class CharacterListViewModel @Inject constructor(
         // here would be the screen answering a question it has not asked. See
         // [CharacterListUiState.hasAccount].
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), CharacterListUiState())
+
+    // --- FR-19's entry point (14 decisions 11 and 16) --------------------------------
+
+    /**
+     * The multi-select sheet's state, or `null` when the sheet is closed.
+     *
+     * A separate `StateFlow` from [uiState] rather than a field on it, for
+     * `CharacterHomeViewModel.panes`'s reason: the sheet is transient chrome, and folding it into
+     * the state every character card recomposes against would make ticking a checkbox invalidate
+     * the whole list — including on the emissions a `characterList` sync causes.
+     */
+    private val _dmPicker = MutableStateFlow<DmPickerState?>(null)
+    val dmPicker: StateFlow<DmPickerState?> = _dmPicker.asStateFlow()
+
+    /**
+     * Opens the picker, seeded from the **stored** table (decision 16).
+     *
+     * Seeded rather than blank so a DM running the same party next session confirms instead of
+     * re-picking six people. The seed is resolved against the live list first — an id whose share
+     * was withdrawn must not come back ticked, because the DM would then confirm a table with a
+     * member that opens straight into decision 19's "Not available".
+     */
+    fun openDmPicker() {
+        viewModelScope.launch {
+            val accountId = accountRepository.activeAccount.filterNotNull().first().id
+            val stored = dmViewStore.members(DmViewStore.serverKey(accountId)).first()
+            val live = uiState.value.characters
+            _dmPicker.value = DmPickerState(
+                candidates = live,
+                selected = resolveDmMembers(stored, live).toSet(),
+            )
+        }
+    }
+
+    fun dismissDmPicker() {
+        _dmPicker.value = null
+    }
+
+    /**
+     * A row in the picker was ticked or unticked.
+     *
+     * The rule — including decision 16's maximum of six, and the fact that a refused tick is a
+     * *no-op* rather than a disabled row — is `toggleDmMember`'s, applied here and nowhere else.
+     */
+    fun toggleDmMember(creatureId: String) {
+        val current = _dmPicker.value ?: return
+        _dmPicker.value = current.copy(selected = nextDmMembers(current.selected, creatureId))
+    }
+
+    /**
+     * The picker's confirm: persist the table, then let the caller navigate.
+     *
+     * ### Why the write is awaited before the callback
+     *
+     * Because `DmViewViewModel` reads the store **once, on entry** (decision 17), so a navigation
+     * that raced the DataStore write would open the dashboard against the *previous* table — or,
+     * on a first run, against nothing at all. Awaiting is what makes "the set is settled before
+     * anything subscribes" true rather than usually true.
+     *
+     * A selection below the minimum is refused here as well as at the button, for `writable`'s
+     * reason: the button's `enabled` is a frame of UI state, and this is the rule.
+     */
+    fun confirmDmSelection(onOpen: () -> Unit) {
+        val picker = _dmPicker.value ?: return
+        if (!picker.canConfirm) return
+        viewModelScope.launch {
+            val accountId = accountRepository.activeAccount.filterNotNull().first().id
+            dmViewStore.setMembers(DmViewStore.serverKey(accountId), picker.selected)
+            _dmPicker.value = null
+            onOpen()
+        }
+    }
 
     /** Pull-to-refresh (docs/design/04-screens-ux.md §2). */
     fun refresh() = characterListRepository.refresh()

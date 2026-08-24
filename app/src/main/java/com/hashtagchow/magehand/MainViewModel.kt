@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.stateIn
 import com.hashtagchow.magehand.core.data.account.AccountRepository
 import com.hashtagchow.magehand.core.data.characters.CharacterCache
 import com.hashtagchow.magehand.core.data.local.LocalCharacterRepository
+import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.data.settings.UiScale
 import javax.inject.Inject
 
 /**
@@ -43,7 +45,25 @@ class MainViewModel @Inject constructor(
     accountRepository: AccountRepository,
     characterCache: CharacterCache,
     localCharacterRepository: LocalCharacterRepository,
+    appSettingsStore: AppSettingsStore,
 ) : ViewModel() {
+
+    /**
+     * FR-18's whole-app scale (docs/design/14-large-screen-arc.md decisions 1-2), read at the
+     * one place that wraps every screen.
+     *
+     * **Live**, unlike [startDestination] below: 14 decision 2 says "applied live via state —
+     * no restart, no activity recreation dance", so this stays a mapping of the store and the
+     * root provider re-measures when Settings writes.
+     *
+     * `Eagerly`, and seeded with [UiScale.DEFAULT]: the first DataStore read is a frame or so
+     * away, and the alternative to rendering that frame at the default is rendering it at
+     * nothing. A user at 150% therefore sees one un-scaled frame on a cold start — the honest
+     * cost of not blocking the first frame on a disk read, and the same trade FR-6's switch
+     * makes.
+     */
+    val uiScale: StateFlow<UiScale> = appSettingsStore.uiScale
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiScale.DEFAULT)
 
     /**
      * Resolved **once**, from the first emission, and then frozen.

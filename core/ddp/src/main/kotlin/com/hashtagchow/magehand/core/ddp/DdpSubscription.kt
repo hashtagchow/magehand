@@ -41,6 +41,29 @@ class DdpSubscription internal constructor(
     @Volatile
     internal var readyOnWire: Boolean = false
 
+    /**
+     * True while this subscription is a *replayed* one, still unanswered on the
+     * current session, and still holding the single retry
+     * 14-large-screen-arc.md decision 17 allows it.
+     *
+     * It exists to tell two identical-looking `nosub` frames apart. A refusal of a
+     * replay is usually the shared 50/10 s subscription bucket saying "not now" —
+     * this same publication was serving us seconds ago on the previous session — and
+     * treating it as a verdict leaves a DM card stopped forever on a transient. A
+     * refusal of a fresh [DdpClient.subscribe] is a verdict about the request itself.
+     *
+     * Armed only by `DdpClient`'s reconnect replay, so the fresh-subscribe path is
+     * structurally unreachable from the retry. Disarmed the moment it is spent, the
+     * moment the sub goes ready (a later `nosub` is then the server *stopping* a live
+     * publication, which we must believe), and by [onDisconnected] — a retry that
+     * outlives its socket would double-send on the next session's replay.
+     *
+     * Written and read on the client dispatcher only, so no atomic is needed;
+     * `@Volatile` matches [readyOnWire] and keeps it honest for debuggers.
+     */
+    @Volatile
+    internal var replayRetryArmed: Boolean = false
+
     /** `true` once the server has sent `ready` for this sub on the current session. */
     val isReady: StateFlow<Boolean> = readyState.asStateFlow()
 
@@ -81,6 +104,7 @@ class DdpSubscription internal constructor(
     internal fun onDisconnected() {
         readyOnWire = false
         readyState.value = false
+        replayRetryArmed = false
     }
 
     override fun toString(): String = "DdpSubscription(id=$id, name=$name, ready=${readyState.value})"

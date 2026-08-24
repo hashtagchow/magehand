@@ -3,6 +3,7 @@ package com.hashtagchow.magehand.ui.screens.characterhome
 import androidx.lifecycle.SavedStateHandle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
@@ -12,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -32,7 +34,10 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
+import com.hashtagchow.magehand.core.data.settings.UiScale
 import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.CoinKind
@@ -108,6 +113,7 @@ class CharacterHomeViewModelTest {
             selectedRollStore = selectedRolls,
             equippableOverrideStore = equippableOverrides,
             inventoryLayoutStore = inventoryLayouts,
+            paneLayoutStore = paneLayouts,
             openCharacterFactory = factory,
             connectionManager = connectionManager,
         )
@@ -122,12 +128,19 @@ class CharacterHomeViewModelTest {
     /** FR-14's per-character arrangement, likewise in memory. */
     private val inventoryLayouts = FakeInventoryLayoutStore()
 
+    /** FR-17's per-character pane choice, likewise in memory (14 decision 8). */
+    private val paneLayouts = FakePaneLayoutStore()
+
     /** FR-10's per-item overrides. In memory, for the same reason as the selection above. */
     private val equippableOverrides = FakeEquippableOverrideStore()
 
     /** `stateIn(WhileSubscribed)` never runs without a collector. */
     private fun kotlinx.coroutines.test.TestScope.collecting(vm: CharacterHomeViewModel) {
         backgroundScope.launch { vm.uiState.collect {} }
+        // FR-17's panes are a second `stateIn(WhileSubscribed)` (see the view model for why they
+        // are not a field on `uiState`), so they need their own collector or they never start —
+        // and a test asserting a value that was never produced fails for the wrong reason.
+        backgroundScope.launch { vm.panes.collect {} }
     }
 
     @Test
@@ -526,6 +539,58 @@ class CharacterHomeViewModelTest {
         assertTrue(vm.uiState.value.inventory.sections.single { it.key == "weapons" }.collapsed)
     }
 
+    // ---- FR-17 panes (14 decisions 6 and 8) ---------------------------------
+
+    @Test
+    fun `a character nobody has arranged reports no pane preference`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        // The empty set is "use the default", not "no panes" — see `PaneLayoutStore`. Asserted
+        // here because the *view model* is where a well-meaning `?: setOf(TRACKER)` would go, and
+        // that would freeze today's default into every character the moment it was touched.
+        assertEquals(emptySet<PaneSurface>(), vm.panes.value)
+        assertTrue("nothing is written just by opening a character", paneLayouts.keys.isEmpty())
+    }
+
+    @Test
+    fun `toggling a pane writes the account-scoped key`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        vm.togglePane(setOf(PaneSurface.TRACKER), PaneSurface.SHEET)
+        advanceUntilIdle()
+
+        // Account-scoped, not bare-creature: the same creature reached from two accounts is two
+        // rows everywhere else in this app, and the scoping is what makes sign-out's reap a
+        // prefix match rather than a scan.
+        val key = PaneLayoutStore.serverKey(character.accountId, creatureId)
+        assertEquals(setOf(key), paneLayouts.keys)
+        assertEquals(setOf(PaneSurface.TRACKER, PaneSurface.SHEET), paneLayouts.panesFor(key))
+        assertEquals(setOf(PaneSurface.TRACKER, PaneSurface.SHEET), vm.panes.value)
+    }
+
+    @Test
+    fun `deselecting the last pane writes nothing at all`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        vm.togglePane(setOf(PaneSurface.TRACKER), PaneSurface.TRACKER)
+        advanceUntilIdle()
+
+        // Decision 6's minimum of one, all the way down: a refused gesture is not a write of the
+        // same value, it is no write — the same no-op contract `mutateInventoryLayout` has, and
+        // the reason `togglePane` returns its input by identity.
+        assertEquals(0, paneLayouts.writes)
+        assertTrue(paneLayouts.keys.isEmpty())
+    }
+
     @Test
     fun `the connection status follows the session, not the character list`() = runTest(dispatcher) {
         val character = FakeOpenCharacter(creatureId = creatureId)
@@ -761,8 +826,8 @@ class CharacterHomeViewModelTest {
     fun `a fresh history entry raises exactly one undo snackbar`() = runTest(dispatcher) {
         val character = FakeOpenCharacter(creatureId = creatureId)
         val (vm, _) = viewModel(character)
-        val events = mutableListOf<TrackerEvent>()
-        val collector = launch { vm.events.collect { events += it } }
+        val events = mutableListOf<TrackerEvent.Wrote>()
+        val collector = launch { vm.writeEvents.collect { events += it } }
         collecting(vm)
         advanceUntilIdle()
 
@@ -772,7 +837,7 @@ class CharacterHomeViewModelTest {
         advanceUntilIdle()
 
         assertEquals(2, events.size)
-        assertEquals(listOf(1L, 2L), events.map { (it as TrackerEvent.Wrote).write.id })
+        assertEquals(listOf(1L, 2L), events.map { it.write.id })
         collector.cancel()
     }
 
@@ -781,8 +846,8 @@ class CharacterHomeViewModelTest {
         runTest(dispatcher) {
             val character = FakeOpenCharacter(creatureId = creatureId)
             val (vm, _) = viewModel(character)
-            val events = mutableListOf<TrackerEvent>()
-            val collector = launch { vm.events.collect { events += it } }
+            val events = mutableListOf<TrackerEvent.Wrote>()
+            val collector = launch { vm.writeEvents.collect { events += it } }
             collecting(vm)
             advanceUntilIdle()
 
@@ -801,8 +866,8 @@ class CharacterHomeViewModelTest {
         runTest(dispatcher) {
             val character = FakeOpenCharacter(creatureId = creatureId)
             val (vm, _) = viewModel(character)
-            val events = mutableListOf<TrackerEvent>()
-            val collector = launch { vm.events.collect { events += it } }
+            val events = mutableListOf<TrackerEvent.Failed>()
+            val collector = launch { vm.failureEvents.collect { events += it } }
             collecting(vm)
             advanceUntilIdle()
 
@@ -819,10 +884,110 @@ class CharacterHomeViewModelTest {
             )
             advanceUntilIdle()
 
-            val failed = events.single() as TrackerEvent.Failed
-            assertEquals("slot1", failed.failure.propertyId)
+            assertEquals("slot1", events.single().failure.propertyId)
             collector.cancel()
         }
+
+    /**
+     * A failure can never be starved by a backlog of confirmations.
+     *
+     * The two kinds used to share one 16-deep `MutableSharedFlow` with a suspending overflow
+     * policy, shown by one `when` in the screen — and `showSnackbar` suspends for the life of
+     * each snackbar. So a burst of taps filled the buffer with confirmations, and the *emitter*
+     * of a failure then parked waiting for room, behind up to sixteen four-second snackbars.
+     * Over a minute in which the one event the player needs — "that write did not stick" —
+     * could not reach the screen at all, on precisely the press-and-hold that produces
+     * rate-limit refusals in the first place.
+     *
+     * The two collectors below are the screen's two, with the confirmation one modelling the
+     * snackbar's suspension. **Foreground** launches, deliberately: `advanceUntilIdle` does not
+     * advance virtual time for `backgroundScope` work, so a background collector asleep in
+     * `delay` would never wake and the test would pass by never running.
+     *
+     * The assertion after the failure is made without advancing time at all — "it arrived while
+     * the backlog was still there", not "it arrived eventually".
+     */
+    @Test
+    fun `a failure is not starved by a backlog of confirmations`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        val confirmations = mutableListOf<Long>()
+        var failure: TrackerWriteFailure? = null
+
+        val receipts = launch {
+            vm.writeEvents.collect {
+                confirmations += it.write.id
+                delay(4_000) // one Short snackbar
+            }
+        }
+        val rollbacks = launch { vm.failureEvents.collect { failure = it.failure } }
+        collecting(vm)
+        advanceUntilIdle()
+
+        // Twenty confirmations while the receipt collector is asleep on the first one.
+        repeat(20) { i -> character.writeHistory.value = listOf(historyEntry(i + 1L)); runCurrent() }
+
+        character.writeFailures.emit(
+            TrackerWriteFailure(
+                id = 99,
+                kind = TrackerWriteKind.ITEM_USE,
+                propertyId = "item1",
+                targetName = "Potion of Healing",
+                reason = "too-many-requests",
+                refusedOffline = false,
+                rateLimited = true,
+            ),
+        )
+        runCurrent()
+
+        assertEquals("the failure must not wait behind a queue of receipts", 99L, failure?.id)
+        assertEquals(
+            "and the receipts must not have piled up either — one shown, the rest conflated",
+            listOf(1L),
+            confirmations,
+        )
+        receipts.cancel()
+        rollbacks.cancel()
+    }
+
+    /**
+     * The other half of the conflation: dropping receipts must not drop the *newest* one.
+     *
+     * Discarding stale receipts is honest — an UNDO offered eighty seconds late is for a write
+     * the player stopped thinking about — but only if what finally shows is the write that just
+     * happened, and only because nothing else is lost: every dropped receipt is still a row in
+     * the history sheet with its own UNDO.
+     *
+     * The number to look at is the clock. Twenty confirmations at four seconds each is eighty
+     * seconds of snackbar; conflated it is eight, and the second one is about write 20 rather
+     * than about write 2.
+     */
+    @Test
+    fun `a conflated burst still delivers the newest confirmation`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        val confirmations = mutableListOf<Long>()
+
+        val receipts = launch {
+            vm.writeEvents.collect {
+                confirmations += it.write.id
+                delay(4_000)
+            }
+        }
+        collecting(vm)
+        advanceUntilIdle()
+
+        repeat(20) { i -> character.writeHistory.value = listOf(historyEntry(i + 1L)); runCurrent() }
+        advanceUntilIdle()
+
+        assertEquals("the one being shown, then the newest — not all twenty", listOf(1L, 20L), confirmations)
+        assertEquals(
+            "and nothing is lost that the history sheet does not still hold",
+            20L,
+            character.writeHistory.value.first().id,
+        )
+        receipts.cancel()
+    }
 
     @Test
     fun `undo is delegated to the session's inverse-op stack`() = runTest(dispatcher) {
@@ -1148,6 +1313,39 @@ private class FakeInventoryLayoutStore : InventoryLayoutStore {
 }
 
 /**
+ * FR-17's store (14 decision 8). Recording for the same reason as the two around it: the claims
+ * worth asserting are that the view model writes the *account-scoped* key and that a gesture the
+ * minimum-of-one rule refuses is not written at all — neither of which a constant could show.
+ */
+private class FakePaneLayoutStore : PaneLayoutStore {
+    private val entries = MutableStateFlow<Map<String, Set<PaneSurface>>>(emptyMap())
+
+    val keys: Set<String> get() = entries.value.keys
+
+    fun panesFor(characterKey: String): Set<PaneSurface> = entries.value[characterKey].orEmpty()
+
+    /** How many times anything was written, so a refused gesture can be shown to write nothing. */
+    var writes: Int = 0
+        private set
+
+    override fun panes(characterKey: String): Flow<Set<PaneSurface>> =
+        entries.map { it[characterKey].orEmpty() }
+
+    override suspend fun setPanes(characterKey: String, panes: Set<PaneSurface>) {
+        writes++
+        entries.value = entries.value.toMutableMap().apply {
+            if (panes.isEmpty()) remove(characterKey) else put(characterKey, panes)
+        }
+    }
+
+    override suspend fun clearForCharacter(characterKey: String) {
+        entries.value = entries.value - characterKey
+    }
+
+    override suspend fun deleteForAccount(accountId: String) = Unit
+}
+
+/**
  * FR-10's store. Recording for the same reason as the one above: the claim worth asserting is
  * that the view model writes the *account-scoped* key, which a constant could not show.
  */
@@ -1181,10 +1379,16 @@ private class FakeEquippableOverrideStore : EquippableOverrideStore {
     override suspend fun deleteForAccount(accountId: String) = Unit
 }
 
-/** FR-6's store, as a constant. Nothing in this class flips it mid-test. */
+/**
+ * FR-6's store, as a constant. Nothing in this class flips it mid-test, and FR-18's scale is
+ * pinned at the default because no view model reads it — it reaches the UI through the root
+ * density provider.
+ */
 private class FakeAppSettingsStore(showToggles: Boolean) : AppSettingsStore {
     override val showToggles: Flow<Boolean> = flowOf(showToggles)
     override suspend fun setShowToggles(value: Boolean) = Unit
+    override val uiScale: Flow<UiScale> = flowOf(UiScale.DEFAULT)
+    override suspend fun setUiScale(value: UiScale) = Unit
 }
 
 private object StubTokenStore : TokenStore {

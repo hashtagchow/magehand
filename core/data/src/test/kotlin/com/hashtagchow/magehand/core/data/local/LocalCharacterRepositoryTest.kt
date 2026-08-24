@@ -31,8 +31,11 @@ import com.hashtagchow.magehand.core.data.settings.DataStoreEquippableOverrideSt
 import com.hashtagchow.magehand.core.data.settings.DataStoreSelectedRollStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.DataStoreInventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.DataStorePaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import java.io.File
 import com.hashtagchow.magehand.core.model.AbilityScores
@@ -75,6 +78,7 @@ class LocalCharacterRepositoryTest {
     private lateinit var selectedRolls: SelectedRollStore
     private lateinit var equippableOverrides: EquippableOverrideStore
     private lateinit var inventoryLayouts: InventoryLayoutStore
+    private lateinit var paneLayouts: PaneLayoutStore
 
     private var clock = 1_000L
     private var nextId = 0
@@ -102,11 +106,17 @@ class LocalCharacterRepositoryTest {
                 File(temp.root, "inventory-layouts.preferences_pb")
             },
         )
+        paneLayouts = DataStorePaneLayoutStore(
+            PreferenceDataStoreFactory.create(scope = storeScope) {
+                File(temp.root, "pane-layouts.preferences_pb")
+            },
+        )
         repository = LocalCharacterRepository(
             dao = dao,
             selectedRollStore = selectedRolls,
             equippableOverrideStore = equippableOverrides,
             inventoryLayoutStore = inventoryLayouts,
+            paneLayoutStore = paneLayouts,
             now = { clock },
             newId = { "id-${++nextId}" },
         )
@@ -676,6 +686,35 @@ class LocalCharacterRepositoryTest {
             "and a DiceCloud character's least of all",
             setOf("prop-4"),
             equippableOverrides.overrides(serverCharacter).first(),
+        )
+    }
+
+    @Test
+    fun `deleting takes the character's pane choice with it, and only that`() = runTest {
+        val doomed = saveOrFail(form(name = "Bracken"))
+        val survivor = saveOrFail(form(name = "Sorrel"))
+        val serverCharacter = PaneLayoutStore.serverKey("acct-1", "creature-1")
+        val chosen = setOf(PaneSurface.TRACKER, PaneSurface.INVENTORY)
+
+        paneLayouts.setPanes(PaneLayoutStore.localKey(doomed), chosen)
+        paneLayouts.setPanes(PaneLayoutStore.localKey(survivor), chosen)
+        paneLayouts.setPanes(serverCharacter, chosen)
+
+        repository.delete(doomed)
+
+        // 14 decision 8's second reaping path — the fourth store to need one, and the same
+        // argument each time: a DataStore key rather than a row, in the local namespace that
+        // sign-out is forbidden to reach, keyed by a UUID that will never recur.
+        assertTrue(paneLayouts.panes(PaneLayoutStore.localKey(doomed)).first().isEmpty())
+        assertEquals(
+            "another on-device character's panes are not this character's business",
+            chosen,
+            paneLayouts.panes(PaneLayoutStore.localKey(survivor)).first(),
+        )
+        assertEquals(
+            "and a DiceCloud character's least of all",
+            chosen,
+            paneLayouts.panes(serverCharacter).first(),
         )
     }
 

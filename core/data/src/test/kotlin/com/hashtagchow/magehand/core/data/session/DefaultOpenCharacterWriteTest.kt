@@ -37,6 +37,8 @@ import com.hashtagchow.magehand.core.ddp.DdpError
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.core.model.TrackedResource
+import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.WalletRow
 
 /**
@@ -75,6 +77,9 @@ class DefaultOpenCharacterWriteTest {
 
     private val accountId = "acc-1"
     private val creatureId = "c1"
+
+    /** Named once: it is the string most of the quantity-latch assertions filter on. */
+    private val ADJUST = "creatureProperties.adjustQuantity"
 
     private lateinit var database: MageHandDatabase
     private lateinit var snapshots: SnapshotStore
@@ -477,8 +482,250 @@ class DefaultOpenCharacterWriteTest {
     }
 
     // -----------------------------------------------------------------------
+    // adjustItem: the quantity latch — the 1.7.x stepper burst
+    // -----------------------------------------------------------------------
+    //
+    // The reported bug, in one paragraph. `StepperButton`'s press-and-hold repeats every 60 ms.
+    // Every repeat re-read the quantity from the **inventory** board, which carries no
+    // optimistic overlay (`CreatureSession.inventory` is built from the sheet alone), so it did
+    // not move until the server echoed — and each tap therefore passed a clamp against the
+    // pre-burst quantity. A two-second hold from 3 dispatched a burst that the queue coalesced
+    // into one or several large decrements; the server *clamps* an out-of-range `increment` to
+    // zero and stores it rather than refusing it, so the excess was lost silently. Worse, a `+`
+    // tap arriving while that burst was still queued, in flight, or waiting out a rate-limit
+    // retry merged into an op that was already net-negative past the floor, so the merged sum
+    // was clamped to zero again and the `+` was swallowed whole.
+    //
+    // Every test below drives the stepper the way `CharacterHomeViewModel.adjustItemQuantity`
+    // does — re-resolving the row from the inventory board on each tap — because reusing one
+    // captured row would quietly assume away the exact staleness that caused the bug.
+
+    @Test
+    fun `a two second hold on minus sends calls summing to exactly the quantity, never more`() = runTest {
+        val h = harness(item("i1", "Potion of Healing", quantity = 3))
+
+        // ~33 repeats, which is what two seconds of hold produces at 60 ms.
+        repeat(33) { h.tapQuantity("i1", -1) }
+        advanceUntilIdle()
+
+        assertEquals("a hold may spend the stack and not one more", -3, h.quantityDelta("i1"))
+        assertEquals(
+            "and the last call is the one that empties it — exactly, not past it",
+            0,
+            h.lowestQuantityAsked("i1", from = 3),
+        )
+    }
+
+    /**
+     * **The stick.** The half that made this bug survive a first look: the burst clamps
+     * correctly *and* the `+` still vanishes, because the two meet inside one coalesced op.
+     */
+    @Test
+    fun `a plus tap during the burst is not swallowed by the queued decrement`() = runTest {
+        val h = harness(item("i1", "Potion of Healing", quantity = 3))
+        val onTheWire = CompletableDeferred<Unit>()
+        h.caller.gate = onTheWire
+
+        repeat(33) { h.tapQuantity("i1", -1) }
+        advanceUntilIdle()
+        assertEquals("exactly one flush is on the wire", 1, h.callsTo(ADJUST).size)
+
+        // The player sees they over-held and taps `+` — with the burst still outstanding.
+        h.tapQuantity("i1", +1)
+        advanceUntilIdle()
+
+        onTheWire.complete(Unit)
+        h.caller.gate = null
+        advanceUntilIdle()
+
+        assertEquals("3 spent down and 1 put back is a net 2", -2, h.quantityDelta("i1"))
+        h.assertNeverOverdrawn("i1", from = 3)
+    }
+
+    @Test
+    fun `a plus tap after the burst has settled is a real increment`() = runTest {
+        val h = harness(item("i1", "Potion of Healing", quantity = 3))
+
+        repeat(33) { h.tapQuantity("i1", -1) }
+        advanceUntilIdle()
+        // The server has answered and the subscription has delivered the emptied item.
+        h.serverEchoes("i1", "Potion of Healing", quantity = 0)
+        advanceUntilIdle()
+        h.caller.reset()
+
+        h.tapQuantity("i1", +1)
+        advanceUntilIdle()
+
+        val call = h.caller.calls.single()
+        assertEquals(ADJUST, call.method)
+        // `increment` is a consumption amount, so a `+1` in the UI is a `-1` on the wire.
+        assertEquals("a post-burst plus must reach the server as an increment", -1, call.int("value"))
+    }
+
+    @Test
+    fun `rapid alternating taps net out correctly`() = runTest {
+        val h = harness(item("i1", "Potion of Healing", quantity = 2))
+
+        h.tapQuantity("i1", -1)
+        h.tapQuantity("i1", +1)
+        h.tapQuantity("i1", -1)
+        h.tapQuantity("i1", +1)
+        advanceUntilIdle()
+
+        assertEquals("four taps that cancel leave the sheet where it started", 0, h.quantityDelta("i1"))
+        h.assertNeverOverdrawn("i1", from = 2)
+    }
+
+    @Test
+    fun `a decrement past the floor is dropped rather than sent as a clamp for the server to eat`() =
+        runTest {
+            val h = harness(item("i1", "Potion of Healing", quantity = 1))
+
+            repeat(10) { h.tapQuantity("i1", -1) }
+            advanceUntilIdle()
+
+            assertEquals("one call, for the one potion", 1, h.callsTo(ADJUST).size)
+            assertEquals(-1, h.quantityDelta("i1"))
+        }
+
+    @Test
+    fun `the latch is per property, so holding one stepper does not block another`() = runTest {
+        // Two items are two documents and there is no sense in which they sum; a single global
+        // flush-outstanding flag would have swallowed the second stepper entirely.
+        val h = harness(
+            item("i1", "Potion of Healing", quantity = 3),
+            item("i2", "Torch", quantity = 3),
+        )
+
+        h.tapQuantity("i1", -1)
+        h.tapQuantity("i2", -1)
+        advanceUntilIdle()
+
+        assertEquals(listOf("i1", "i2"), h.callsTo(ADJUST).map { it.text("_id") })
+    }
+
+    @Test
+    fun `a failed flush drops the accumulation rather than replaying it, and releases the latch`() =
+        runTest {
+            // Re-sending an `increment` whose outcome was never seen is the corruption the
+            // queue refuses by construction, and the accumulated taps were clamped against a
+            // predicted sheet that never came to exist. The latch must still be released: a
+            // stuck one would disable this item's stepper for the rest of the session.
+            val h = harness(item("i1", "Potion of Healing", quantity = 3))
+            h.caller.failWith = { DdpError("400", "Nope") }
+
+            repeat(10) { h.tapQuantity("i1", -1) }
+            advanceUntilIdle()
+
+            assertEquals("the accumulation is dropped, not retried", 1, h.callsTo(ADJUST).size)
+
+            h.caller.failWith = { null }
+            h.tapQuantity("i1", -1)
+            advanceUntilIdle()
+
+            assertEquals("the latch must not survive its own failure", 2, h.callsTo(ADJUST).size)
+        }
+
+    /**
+     * Ruling B, from the queue's side: **the coalescer has nothing to merge on this path.**
+     *
+     * `WriteQueue.takeCoalescedHead` merges by signed sum, which is safe only while every op
+     * reaching it is already inside its property's bounds — this server stores a clamped `0`
+     * rather than refusing an overdraft, so a merge that oversubtracts loses the difference and
+     * takes any increment folded into it along. The guarantee is made *upstream* by the latch,
+     * and this is what "upstream" means concretely: with one flush held on the wire, thirty-two
+     * further repeats put **nothing** in the queue behind it. Pre-fix those repeats were thirty
+     * two submissions clamped against a board that had not moved, and the merged head was the
+     * `−33` the server ate.
+     *
+     * A queue-level "do not merge increments of opposite sign" guard is refused for the reason
+     * stated on `takeCoalescedHead`: it would not fix a same-sign overdraft (which is the case
+     * actually reported) and it would destroy the cancel-out behaviour the tracker's steppers
+     * depend on.
+     */
+    @Test
+    fun `a burst never puts a second adjustQuantity in the queue for the coalescer to merge`() =
+        runTest {
+            val h = harness(item("i1", "Potion of Healing", quantity = 3))
+            val onTheWire = CompletableDeferred<Unit>()
+            h.caller.gate = onTheWire
+
+            repeat(33) { h.tapQuantity("i1", -1) }
+            advanceUntilIdle()
+            assertEquals("32 repeats may not reach the queue at all", 1, h.callsTo(ADJUST).size)
+
+            onTheWire.complete(Unit)
+            h.caller.gate = null
+            advanceUntilIdle()
+
+            assertEquals(
+                "the flush and the accumulated remainder, sequenced — never merged",
+                listOf(1, 2),
+                h.callsTo(ADJUST).map { it.int("value") },
+            )
+        }
+
+    // -----------------------------------------------------------------------
     // Readers
     // -----------------------------------------------------------------------
+
+    /** Exactly the row `CharacterHomeViewModel.adjustItemQuantity` builds, from the same board. */
+    private fun Harness.itemRow(propertyId: String): TrackedResource {
+        val item = session.inventory.value.allItems.first { it.propertyId == propertyId }
+        return TrackedResource(
+            propertyId = item.propertyId,
+            kind = TrackerKind.ITEM,
+            name = item.name,
+            value = item.quantity,
+            total = item.quantity,
+        )
+    }
+
+    /** One stepper repeat, resolved live — see this section's opening note on why. */
+    private fun Harness.tapQuantity(propertyId: String, delta: Int) =
+        character.adjustItem(itemRow(propertyId), delta)
+
+    /** The mirror frame the server sends once an `adjustQuantity` has been applied. */
+    private fun Harness.serverEchoes(id: String, name: String, quantity: Int) =
+        feed.changeProperty(id, Json.parseToJsonElement(item(id, name, quantity)) as JsonObject)
+
+    /**
+     * What the run actually did to [propertyId]'s quantity, in the player's sign: every
+     * `adjustQuantity` aimed at it, with `increment`'s consumption sign undone.
+     */
+    private fun Harness.quantityDelta(propertyId: String): Int =
+        callsTo(ADJUST).filter { it.text("_id") == propertyId }.sumOf { -it.int("value") }
+
+    /**
+     * The lowest quantity any single call asked the sheet to hold, starting [from].
+     *
+     * Below zero is the bug: the server would accept it, clamp to `0` and lose the difference.
+     * A floor of exactly `0` is the correct end of a hold that spent the whole stack.
+     */
+    private fun Harness.lowestQuantityAsked(propertyId: String, from: Int): Int {
+        var running = from
+        var lowest = from
+        callsTo(ADJUST).filter { it.text("_id") == propertyId }.forEach {
+            running -= it.int("value")
+            lowest = minOf(lowest, running)
+        }
+        return lowest
+    }
+
+    /**
+     * The invariant, where the exact floor is not the point: **no call ever asks for a
+     * negative quantity.** A run that ends on `0` and a run that ends on `1` are both correct;
+     * a run that dips below zero has already lost the difference, because this server clamps
+     * and stores rather than refusing.
+     */
+    private fun Harness.assertNeverOverdrawn(propertyId: String, from: Int) {
+        val lowest = lowestQuantityAsked(propertyId, from)
+        assertTrue(
+            "a call asked the sheet to hold $lowest of $propertyId; the server would clamp " +
+                "that to 0 and silently lose the rest: ${callsTo(ADJUST).map { it.int("value") }}",
+            lowest >= 0,
+        )
+    }
 
     /**
      * How many coins of [kind] the run actually put on the sheet: the insert's own quantity

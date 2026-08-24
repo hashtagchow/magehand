@@ -10,6 +10,7 @@ import android.webkit.WebView
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.hashtagchow.magehand.BuildConfig
+import com.hashtagchow.magehand.ui.scale.LocalUiScale
 
 /**
  * A configured, token-injected WebView plus the small amount of state the UI needs
@@ -85,6 +87,19 @@ fun rememberSheetWebViewState(session: SheetSession?): SheetWebViewState? {
             created.webView.loadUrl(session.bootstrapUrl)
         }
     }
+
+    // FR-18 decision 3: the Sheet tab follows the app's UI scale. Text only — the PWA lays
+    // itself out in CSS pixels this app does not own, so `textZoom` is the whole of what
+    // Android exposes here, and the Settings description says exactly that rather than
+    // implying the sheet scales like the rest of the app.
+    //
+    // A `SideEffect` and not part of `createHardenedWebView`: the WebView instance outlives
+    // every tab switch by design (that is the point of the `remember` above), so "set once at
+    // construction" would leave a sheet the user opened before visiting Settings rendering at
+    // the old zoom until the character changed. This re-asserts it after any composition that
+    // changed the scale, and is a no-op setter otherwise.
+    val scale = LocalUiScale.current
+    SideEffect { state.webView.settings.textZoom = scale.textZoom }
 
     DisposableEffect(state) {
         onDispose {

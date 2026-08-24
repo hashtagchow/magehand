@@ -30,6 +30,11 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneSurface
+// Aliased: this view model's own `togglePane` is the *persisting* gesture, the imported one is
+// the pure rule it applies. Same name in two layers is right; shadowing it silently is not.
+import com.hashtagchow.magehand.ui.panes.togglePane as nextPaneSet
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -105,6 +110,7 @@ class LocalCharacterHomeViewModel @Inject constructor(
     private val selectedRollStore: SelectedRollStore,
     private val equippableOverrideStore: EquippableOverrideStore,
     private val inventoryLayoutStore: InventoryLayoutStore,
+    private val paneLayoutStore: PaneLayoutStore,
     private val factory: LocalOpenCharacterFactory,
 ) : ViewModel() {
 
@@ -202,6 +208,46 @@ class LocalCharacterHomeViewModel @Inject constructor(
      * the plan and the store are the DiceCloud ones, reached with a local key.
      */
     private val inventoryLayoutKey: String = InventoryLayoutStore.localKey(characterId)
+
+    /**
+     * FR-17's key for this character (14 decision 8), in the same local namespace and for the
+     * same reason as [rollKey].
+     *
+     * Available before [open] resolves, unlike the DiceCloud screen's — a local character's key
+     * is its own id, so the panes can be read the moment the screen exists rather than one
+     * `flatMapLatest` after the character loads.
+     */
+    private val paneLayoutKey: String = PaneLayoutStore.localKey(characterId)
+
+    /**
+     * FR-17's chosen panes for this character (14 decision 8).
+     *
+     * A separate `StateFlow` from [uiState] rather than a field on it, and deliberately: this is
+     * a preference about *chrome*, read only by the composable that decides which chrome to draw,
+     * and folding it into the state every tracker row recomposes against would make a pane toggle
+     * invalidate the whole screen. It is also the state decision 10 needs to survive a gate
+     * crossing untouched — keeping it out of the character's ui state keeps it out of every
+     * rebuild of that state.
+     *
+     * The empty set is *"no preference"*, not *"no panes"*; `resolvePanes` turns it into decision
+     * 8's Tracker-only default. See `PaneLayoutStore`.
+     */
+    val panes: StateFlow<Set<PaneSurface>> = paneLayoutStore.panes(paneLayoutKey)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+
+    /**
+     * Decision 6's picker gesture, persisted.
+     *
+     * [current] is what is on screen — the resolved list, not the stored set — because
+     * `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. A gesture the rule
+     * refuses returns the input unchanged and is not written, matching `mutateInventoryLayout`'s
+     * no-op contract.
+     */
+    fun togglePane(current: Set<PaneSurface>, surface: PaneSurface) {
+        val next = nextPaneSet(current, surface)
+        if (next == current) return
+        viewModelScope.launch { paneLayoutStore.setPanes(paneLayoutKey, next) }
+    }
 
     /**
      * The two *preference* signals, paired.

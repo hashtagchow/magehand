@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.account.AccountRepository
 import com.hashtagchow.magehand.core.ddp.DdpClient
+import com.hashtagchow.magehand.core.ddp.DdpClientConfig
 import com.hashtagchow.magehand.core.ddp.OkHttpDdpSocketFactory
 import com.hashtagchow.magehand.core.model.Account
 import okhttp3.OkHttpClient
@@ -122,14 +123,25 @@ class DefaultDdpConnectionManager(
          * @param httpClient the process's client. `DataModule` passes the same base the
          *   REST API uses, so there is exactly one dispatcher and one connection pool in
          *   the app; the default is for tests and for callers with no DI graph.
+         * @param config the client configuration every account's socket is built with. Present
+         *   so that `DataModule` can attach a debug-only log sink (`DebugLogSinks`) without
+         *   the manager having to know what a `DdpClientConfig` is for; the default is the
+         *   production one, sink included at `{}`. Captured by [build]'s default value, so a
+         *   test that supplies its own [build] is deliberately unaffected by it.
          * @param build the `url → client` seam, injectable purely so a test can observe
          *   *which* `OkHttpClient` each account was given.
          */
         internal fun sharedClientFactory(
             httpClient: OkHttpClient = OkHttpDdpSocketFactory.defaultClient(),
+            config: DdpClientConfig = DdpClientConfig(),
             build: (String, OkHttpClient, suspend () -> String?) -> DdpClient =
                 { url, client, tokenProvider ->
-                    DdpClient.okHttp(url = url, httpClient = client, resumeTokenProvider = tokenProvider)
+                    DdpClient.okHttp(
+                        url = url,
+                        config = config,
+                        httpClient = client,
+                        resumeTokenProvider = tokenProvider,
+                    )
                 },
         ): (Account, suspend () -> String?) -> DdpClient = { account, tokenProvider ->
             build(websocketUrlFor(account.serverUrl), httpClient, tokenProvider)

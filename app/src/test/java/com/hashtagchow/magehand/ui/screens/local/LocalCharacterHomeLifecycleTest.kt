@@ -27,7 +27,10 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
+import com.hashtagchow.magehand.core.data.settings.UiScale
 
 /**
  * Who closes the `LocalOpenCharacter`, when the screen is popped mid-open.
@@ -78,11 +81,13 @@ class LocalCharacterHomeLifecycleTest {
                 FakeSelectedRollStore,
                 FakeEquippableOverrideStore,
                 FakeInventoryLayoutStore,
+                FakePaneLayoutStore,
             ),
             appSettingsStore = FakeAppSettingsStore,
             selectedRollStore = FakeSelectedRollStore,
             equippableOverrideStore = FakeEquippableOverrideStore,
             inventoryLayoutStore = FakeInventoryLayoutStore,
+            paneLayoutStore = FakePaneLayoutStore,
             factory = LocalOpenCharacterFactory(dao, FakeEquippableOverrideStore),
         )
     }
@@ -205,8 +210,24 @@ private object FakeInventoryLayoutStore : InventoryLayoutStore {
     override suspend fun deleteForAccount(accountId: String) = Unit
 }
 
-/** FR-6's store, as a constant; nothing here reads the tracker's shape. */
+/** FR-17's store, likewise: this class is about the open/close hand-off, not the pane choice. */
+private object FakePaneLayoutStore : PaneLayoutStore {
+    override fun panes(characterKey: String): Flow<Set<PaneSurface>> = flowOf(emptySet())
+    override suspend fun setPanes(characterKey: String, panes: Set<PaneSurface>) = Unit
+    override suspend fun clearForCharacter(characterKey: String) = Unit
+    override suspend fun deleteForAccount(accountId: String) = Unit
+}
+
+/**
+ * FR-6's store, as a constant; nothing here reads the tracker's shape.
+ *
+ * FR-18's scale is likewise fixed at the default: this class is about the open/close
+ * hand-off, and the scale reaches the UI through the root provider, never through this
+ * screen's view model.
+ */
 private object FakeAppSettingsStore : AppSettingsStore {
     override val showToggles: Flow<Boolean> = flowOf(false)
     override suspend fun setShowToggles(value: Boolean) = Unit
+    override val uiScale: Flow<UiScale> = flowOf(UiScale.DEFAULT)
+    override suspend fun setUiScale(value: UiScale) = Unit
 }

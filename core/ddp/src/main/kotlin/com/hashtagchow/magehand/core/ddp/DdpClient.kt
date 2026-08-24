@@ -36,6 +36,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 /** Tunables for [DdpClient]. Defaults are the production values. */
@@ -50,6 +51,45 @@ data class DdpClientConfig(
     val heartbeatTimeout: Duration = 15.seconds,
     /** Reconnect schedule; 1 s → 60 s with jitter by default. */
     val backoff: BackoffPolicy = ExponentialBackoff(),
+    /**
+     * Spacing between the subscriptions replayed after a reconnect.
+     *
+     * The DM view (FR-19) parks up to seven subscriptions on this one connection, and
+     * DiceCloud's subscription rate limit — 50 per 10 s — is **global across all
+     * users**: the whole table draws on one bucket (14-large-screen-arc.md decision
+     * 17, "no storms"). Our own burst is not the danger; the danger is the shape a
+     * router blip makes, where every client at the table reconnects in the same second
+     * and each fires N subs in one tick. The client that loses that race gets `nosub`
+     * on a card and, before this knob existed, lost that card's live data for good.
+     * 100 ms de-phases the replay: the largest set we ship spreads over 600 ms, which
+     * is small beside the ~1.2 s the six-character initial sync costs anyway and
+     * invisible beside [DdpSubscription.DEFAULT_READY_TIMEOUT].
+     *
+     * Deliberately **not** applied to a fresh [DdpClient.subscribe]. Decision 17
+     * permits the entry burst outright (six subs ≈ 12 % of the bucket) and paying
+     * stagger there would slow down the one moment a user is watching the screen fill.
+     * Only the replay is a storm by construction — it is N-at-once whether anyone
+     * asked for N or not.
+     *
+     * The first replayed subscription is never delayed, so the ordinary one- or
+     * two-subscription client reconnects at exactly the speed it always did.
+     */
+    val resubscribeStagger: Duration = 100.milliseconds,
+    /**
+     * How long to wait before re-sending a replayed subscription the server refused.
+     *
+     * A knob rather than a constant because it is the twin of [resubscribeStagger] —
+     * both exist only to keep the shared bucket happy, and a server whose limit moves
+     * wants them re-tuned together, in one place, by the same argument. At 50 per 10 s
+     * the bucket refills at five per second, so one second is the shortest wait that
+     * has demonstrably made room for five more subscriptions: most of a DM set, and
+     * all of an ordinary client's.
+     *
+     * Exactly **one** retry, and only on the replay path. Congestion that survives a
+     * second of drain is not congestion, it is a refusal — and a client that keeps
+     * re-sending a refusal is precisely the storm decision 17 forbids.
+     */
+    val resubscribeRetryDelay: Duration = 1.seconds,
     /** Every frame in and out, plus lifecycle notes. Off by default. */
     val logger: (String) -> Unit = {},
 )
@@ -77,6 +117,13 @@ data class DdpClientConfig(
  * client re-handshakes, re-logs-in with a freshly-read resume token, re-sends every
  * active subscription with its original id, and reconciles [mirror] by Meteor's
  * quiescence rule (see [MongoMirror]). Backoff is 1 s → 60 s with jitter.
+ *
+ * The replay is spaced by [DdpClientConfig.resubscribeStagger] and a replayed
+ * subscription the server refuses is re-sent once after
+ * [DdpClientConfig.resubscribeRetryDelay] — 14-large-screen-arc.md decision 17, whose
+ * DM view puts up to seven subscriptions here at once against a subscription rate
+ * limit the whole table shares. Both knobs argue themselves in full at their
+ * declarations; neither touches the fresh-[subscribe] path.
  *
  * ### In-flight methods are NOT replayed
  * If the socket dies with a method outstanding, that call fails with
@@ -235,18 +282,42 @@ class DdpClient(
     /** Active (not stopped) subscriptions, by id. */
     fun activeSubscriptions(): Map<String, DdpSubscription> = subscriptions.toMap()
 
+    /**
+     * Stops [sub] and tells the server so, whenever there is a session to tell.
+     *
+     * ### Why the gate is `session != null` and not `state == LIVE`
+     *
+     * There is a window — the staggered [replaySubscriptions] — in which the socket is open and
+     * the server is accepting frames but [_connectionState] has not been flipped to LIVE yet. It
+     * is not a theoretical window: decision 17's stagger makes it as long as
+     * `resubscribeStagger × (N - 1)`, and `DmViewViewModel.onCleared` closes up to seven
+     * characters at once, so a Back press during a reconnect lands squarely in it.
+     *
+     * Gated on LIVE, the `unsub` for every one of those was **dropped on the floor**: this client
+     * forgot the subscription, the server never heard, and the publication stayed open against
+     * the 50-per-10 s bucket the whole table shares — for the life of the session, with nothing
+     * anywhere to attribute it to. Gated on the session, the frame goes out on the socket that is
+     * actually there, which is the only thing that was ever being asked.
+     *
+     * `session` is null between sockets, and that case is already correct without a frame: a sub
+     * removed from [subscriptions] is not replayed, and the server drops the whole session's
+     * state when the socket dies anyway.
+     *
+     * The one narrowing kept from the old gate is the handshake. [session] is assigned before
+     * `connect` goes out, and Meteor answers any frame sent ahead of `connected` with *"Must
+     * connect first"* — so a socket that has not handshaken yet is one the server has no
+     * subscriptions on, and the honest thing to send it is nothing.
+     */
     internal suspend fun unsubscribe(sub: DdpSubscription) {
         withContext(dispatcher) {
             subscriptions.remove(sub.id)
             sub.readyOnWire = false
             sub.readyState.value = false
             sub.stoppedState.value = true
-            if (_connectionState.value == ConnectionState.LIVE) {
-                session?.send(buildJsonObject {
-                    put("msg", "unsub")
-                    put("id", sub.id)
-                })
-            }
+            session?.takeIf { it.isHandshaken }?.send(buildJsonObject {
+                put("msg", "unsub")
+                put("id", sub.id)
+            })
             maybeEndResync()
             mirror.flush() // quiescence may have dropped documents; publish now
         }
@@ -343,10 +414,7 @@ class DdpClient(
 
                     // Server state is per-session: replay every subscription and let
                     // the mirror reconcile what comes back.
-                    for (sub in subscriptions.values) {
-                        sub.onDisconnected()
-                        current.send(subMessage(sub))
-                    }
+                    replaySubscriptions(current)
                     maybeEndResync()
                     mirror.flush()
 
@@ -387,6 +455,99 @@ class DdpClient(
         log("logged in as ${_userId.value}")
     }
 
+    /**
+     * Re-sends every remembered subscription on a freshly-opened session, spaced by
+     * [DdpClientConfig.resubscribeStagger] — the "small stagger" half of
+     * 14-large-screen-arc.md decision 17. The spacing goes *between* sends and never
+     * before the first, so a client with one subscription — every non-DM screen — pays
+     * nothing at all: one sub in, one `sub` frame out, at the instant it always went.
+     *
+     * That "unchanged" claim is about the **frames**, and only on the path where the
+     * server accepts them. It is deliberately not a claim that a reconnect is
+     * indistinguishable from a pre-decision-17 one in every case: if the server refuses
+     * a replayed sub, this client now swallows the first `nosub` and re-sends about
+     * [DdpClientConfig.resubscribeRetryDelay] later instead of surfacing the refusal
+     * immediately, so a refused reconnect takes ~1 s longer to report and emits one
+     * extra `sub`. That is the point of the retry, and it is the one behavioural
+     * difference a single-subscription client can observe.
+     *
+     * Each replayed sub is armed with its one retry
+     * ([DdpSubscription.replayRetryArmed]) immediately before it goes out, because a
+     * refusal that lands on a *replay* is far more likely to be the shared rate
+     * bucket than a bad publication — the same sub was accepted on the previous
+     * session, seconds ago.
+     *
+     * ### Why the drain loop rather than one pass over the map
+     * The stagger makes this function suspend, which it never did before, and the
+     * client dispatcher is free to run [subscribe] in the gaps. A subscription that
+     * arrives mid-replay is added to [subscriptions] but *not* sent by [subscribe]
+     * itself (the connection is not LIVE yet), so a single `for` over a snapshot
+     * would drop it silently until the next reconnect — a DM card that never fills,
+     * with nothing in the log. Re-reading the map until it stops producing unsent
+     * subscriptions closes that window; the caller then flips to LIVE with no
+     * suspension point in between, so there is no gap on the far side either.
+     *
+     * ### Why membership is re-checked *after* the delay, not only before
+     *
+     * The same open window runs the other way. `pending` is a snapshot, and every
+     * [delay] in the loop hands the client dispatcher back — long enough for
+     * [unsubscribe] to remove a subscription this pass has already decided to send.
+     * Sending it anyway subscribes the server to a publication nobody is holding: the
+     * documents land in [mirror] and stay (nothing will ever remove them, because the
+     * `unsub` this client sent was for a sub the server had not been told about yet),
+     * and one slot of the 50-per-10 s bucket the whole table shares is spent on a
+     * screen that is gone. `DmViewViewModel.onCleared` closes up to seven at once, so
+     * the way to hit this is a Back press during a reconnect — not an exotic
+     * interleaving.
+     *
+     * So the membership test is the *last* thing before the send, on the far side of
+     * the suspension point. A dropped subscription costs nothing: it is not in
+     * [subscriptions], so quiescence does not wait for it and the next pass will not
+     * re-offer it.
+     */
+    private suspend fun replaySubscriptions(current: Session) {
+        val sent = HashSet<String>()
+        var isFirst = true
+        while (true) {
+            val pending = subscriptions.values.filter { it.id !in sent }
+            if (pending.isEmpty()) return
+            for (sub in pending) {
+                if (!isFirst) delay(config.resubscribeStagger)
+                isFirst = false
+                sent += sub.id
+                // Re-read across the delay above: `pending` may name a subscription
+                // that has since been unsubscribed. See the KDoc.
+                if (!subscriptions.containsKey(sub.id)) {
+                    log("skipping replay of ${sub.name} id=${sub.id} — unsubscribed mid-replay")
+                    continue
+                }
+                sub.onDisconnected()
+                sub.replayRetryArmed = true
+                current.send(subMessage(sub))
+            }
+        }
+    }
+
+    /**
+     * The "single retry" half of 14-large-screen-arc.md decision 17: re-sends one
+     * replayed subscription the server refused, once, after
+     * [DdpClientConfig.resubscribeRetryDelay].
+     *
+     * Guarded on the *identity* of the session that was refused. If the socket died
+     * during the backoff, [replaySubscriptions] on the next session already owns this
+     * subscription and re-armed it; sending here too would duplicate the sub and burn
+     * a second slot out of the very bucket this mechanism exists to protect. The
+     * membership check covers the other race — [unsubscribe] while we waited.
+     */
+    private fun retryRefusedReplay(refusedOn: Session, sub: DdpSubscription) {
+        scope.launch {
+            delay(config.resubscribeRetryDelay)
+            if (closed || session !== refusedOn || !subscriptions.containsKey(sub.id)) return@launch
+            log("retrying refused replay of ${sub.name} id=${sub.id}")
+            refusedOn.send(subMessage(sub))
+        }
+    }
+
     private fun subMessage(sub: DdpSubscription): JsonObject = buildJsonObject {
         put("msg", "sub")
         put("id", sub.id)
@@ -394,7 +555,18 @@ class DdpClient(
         put("params", JsonArray(sub.params))
     }
 
-    /** Quiescence: once every active sub is ready again, drop un-replayed documents. */
+    /**
+     * Quiescence: once every active sub is ready again, drop un-replayed documents.
+     *
+     * A subscription awaiting its one retry after a refused replay has NOT gone ready
+     * and stays in [subscriptions] with `readyOnWire == false`, so it holds this
+     * window open by itself — which is the behaviour we want, and the reason the
+     * retry path deliberately does not call this at all. Closing quiescence while a
+     * retry is in flight would sweep away the previous session's copy of that
+     * creature's properties and blank the card for as long as the retry takes; only a
+     * `ready`, a real refusal (which removes the sub), or an [unsubscribe] may end the
+     * window.
+     */
     private fun maybeEndResync() {
         if (!mirror.isResyncing) return
         if (subscriptions.values.all { it.readyOnWire }) {
@@ -437,6 +609,14 @@ class DdpClient(
         val opened = CompletableDeferred<Unit>()
         val connected = CompletableDeferred<String>()
         val closedSignal = CompletableDeferred<Unit>()
+
+        /**
+         * Whether the server has answered `connect` — i.e. whether it will read anything else
+         * we send. Meteor rejects every frame ahead of `connected` with *"Must connect first"*,
+         * so this is the difference between "there is a socket" and "there is a session".
+         * See [unsubscribe], which is the one sender outside the handshake path itself.
+         */
+        val isHandshaken: Boolean get() = connected.isCompleted
 
         private val pendingCalls = ConcurrentHashMap<String, PendingCall>()
         private val pendingPongs = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
@@ -645,14 +825,45 @@ class DdpClient(
                         ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
                         ?.mapNotNull { subscriptions[it] }
                         ?: emptyList()
-                    ready.forEach { it.readyOnWire = true }
+                    ready.forEach {
+                        it.readyOnWire = true
+                        // Readiness spends the replay retry: a `nosub` arriving after
+                        // the server has already served this publication on this
+                        // session is the server *stopping* it (permission revoked,
+                        // creature deleted), never congestion — re-sending would
+                        // argue with an answer we were given.
+                        it.replayRetryArmed = false
+                    }
                     maybeEndResync()
                     signals += { ready.forEach { it.readyState.value = true } }
                 }
 
+                // Two `nosub`s live here and they are not the same event.
+                //
+                // The ordinary one answers a fresh subscribe() — a bad publication
+                // name, bad args, a creature we may not see. That is a verdict: the
+                // sub is removed, the reason is published, and awaitReady() throws it.
+                // Unchanged, and pinned by a test, because it is the only `nosub` any
+                // caller outside the DM view can produce.
+                //
+                // The other answers a REPLAY, which the shared 50/10 s subscription
+                // bucket can refuse for no reason of ours (decision 17). Removing the
+                // sub there parks a live DM card stopped forever on a transient
+                // server mood — the defect this branch closes. One retry, then the
+                // ordinary path takes over and a second refusal is believed.
                 "nosub" -> {
                     val subId = message.str("id") ?: return
                     val error = (message["error"] as? JsonObject)?.let(DdpError::fromJson)
+                    val refusedReplay = subscriptions[subId]?.takeIf { it.replayRetryArmed }
+                    if (refusedReplay != null) {
+                        refusedReplay.replayRetryArmed = false // the retry is spent here
+                        refusedReplay.readyOnWire = false
+                        log("nosub for replayed ${refusedReplay.name} (${error?.reason}) — one retry")
+                        // No maybeEndResync(): this sub has not gone ready, and it must
+                        // keep the resync window open until the retry is answered.
+                        retryRefusedReplay(this@Session, refusedReplay)
+                        return
+                    }
                     val sub = subscriptions.remove(subId)
                     sub?.readyOnWire = false
                     maybeEndResync()
