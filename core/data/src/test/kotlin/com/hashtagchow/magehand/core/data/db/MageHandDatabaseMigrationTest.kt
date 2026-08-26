@@ -5,6 +5,7 @@ import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.hashtagchow.magehand.core.data.local.LocalInventoryBoard
+import com.hashtagchow.magehand.core.data.local.LocalTrackerBoard
 import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.EquipGroup
 import kotlinx.coroutines.test.runTest
@@ -616,6 +617,144 @@ class MageHandDatabaseMigrationTest {
         assertEquals(CatalogCategory.GEAR, row.toDomain()!!.category)
     }
 
+    // --- v5 → v6 (FR-23) ----------------------------------------------------
+
+    /**
+     * The upgrade every 1.7.x install will take — and the first one in this file to **alter
+     * `local_characters` while it holds player data** since v3→v4.
+     *
+     * Both local tables are populated first for [MIGRATION_3_4]'s reason, unchanged: "additive"
+     * is a claim about what did **not** happen, and the only way to test it is to have a
+     * character and their rows sitting there that could have been lost. The v4 coin columns and
+     * the v5 category are populated too, because they are exactly what a careless `ALTER` on
+     * these two tables would take with it — and because a migration that added its columns
+     * correctly while dropping a purse would pass a narrower test.
+     */
+    @Test
+    fun `migrating v5 to v6 preserves every local character, row and earlier column`() = runTest {
+        createDatabaseAtVersion(5).use { v5 ->
+            v5.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', 3, 8, 14, 12, 16, 10, 13, 22, 17, 15, 1, 109, 57, 351, 100, 200)",
+            )
+            v5.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category) " +
+                    "VALUES ('row-1', 'local-1', 'slot', '1st Level', 4, 2, 'longRest', 0, " +
+                    "null, null, null, 0, 'gear')",
+            )
+            v5.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category) " +
+                    "VALUES ('row-2', 'local-1', 'item', 'Quarterstaff', 1, 1, 'none', 1, " +
+                    "4.0, 0.2, 'A simple melee weapon.', 1, 'weapon')",
+            )
+        }
+
+        val db = openCurrent()
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
+
+        val dao = db.localCharacterDao()
+        with(dao.find("local-1")!!) {
+            assertEquals("Brambles", name)
+            assertEquals(3, level)
+            // Play state, and money: an upgrade that healed the character or emptied their purse
+            // would be a data loss nobody would report as one.
+            assertEquals(17, currentHp)
+            assertEquals(109, gp)
+            assertEquals(351, cp)
+            assertEquals(100L, createdAt)
+        }
+
+        val rows = dao.getRows("local-1")
+        assertEquals(listOf("row-1", "row-2"), rows.map { it.id })
+        assertEquals(2, rows.first().current) // two slots already spent — still spent
+        with(rows.last()) {
+            assertEquals(4.0, weight)
+            assertEquals(true, equipped)
+            // The v5 column, untouched by a migration that only names `local_characters`.
+            assertEquals("weapon", category)
+        }
+    }
+
+    /**
+     * The two new columns take their default on every character that already existed — what
+     * `ALTER TABLE … ADD COLUMN … NOT NULL DEFAULT 0` buys, SQLite refusing the statement
+     * without one.
+     *
+     * Unlike v5's `'gear'`, `0` here is not a *reading* standing in for a fact the old schema
+     * never recorded: no build before 1.8.0 could record a death save at all, so zero marks is
+     * what is true rather than what was chosen. The assertion is on the domain object as well as
+     * the row, because `toDomain` is where a mis-mapped column would surface.
+     */
+    @Test
+    fun `the new v6 death save columns default to zero on characters that predate them`() = runTest {
+        createDatabaseAtVersion(5).use { v5 ->
+            v5.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 0, 10, 0, 0, 0, 0, 1, 1)",
+            )
+        }
+
+        val stored = openCurrent().localCharacterDao().find("local-1")!!
+
+        assertEquals("no build before 1.8.0 could record a death save", 0, stored.deathSuccesses)
+        assertEquals(0, stored.deathFailures)
+        with(stored.toDomain()) {
+            assertEquals(0, deathSuccesses)
+            assertEquals(0, deathFailures)
+        }
+    }
+
+    /**
+     * Round-trips the v6 columns through the real DAO on a migrated database, and through the
+     * board the player actually sees.
+     *
+     * The board half is the part worth having: `LocalTrackerBoard` mints synthetic property ids
+     * for the pair, so a column that migrated correctly and mapped wrongly would still show an
+     * empty block at 0 HP — the one state FR-23 exists to render.
+     */
+    @Test
+    fun `the migrated database stores death saves and they reach the local board`() = runTest {
+        createDatabaseAtVersion(5).close()
+        val dao = openCurrent().localCharacterDao()
+
+        dao.save(
+            LocalCharacterEntity(
+                id = "local-1",
+                name = "Brambles",
+                level = 3,
+                strength = 8,
+                dexterity = 14,
+                constitution = 12,
+                intelligence = 16,
+                wisdom = 10,
+                charisma = 13,
+                maxHp = 22,
+                currentHp = 0,
+                armorClass = 15,
+                createdAt = 100,
+                updatedAt = 100,
+            ),
+            emptyList(),
+        )
+        dao.setDeathSaves("local-1", successes = 1, failures = 2, at = 300)
+
+        val character = dao.find("local-1")!!.toDomain()
+        assertEquals(1, character.deathSuccesses)
+        assertEquals(2, character.deathFailures)
+
+        val saves = LocalTrackerBoard.build(character, emptyList()).deathSaves!!
+        assertEquals(1, saves.successes)
+        assertEquals(2, saves.failures)
+        assertEquals(LocalTrackerBoard.DEATH_SUCCESS_ROW_ID, saves.successesPropertyId)
+        assertEquals(LocalTrackerBoard.DEATH_FAILURE_ROW_ID, saves.failuresPropertyId)
+    }
+
     /**
      * **13 decision 11, end to end**: the migration, then the board the player actually sees.
      *
@@ -862,6 +1001,6 @@ class MageHandDatabaseMigrationTest {
 
     private companion object {
         /** Keep in step with `@Database(version = …)`. */
-        const val CURRENT_VERSION = 5
+        const val CURRENT_VERSION = 6
     }
 }

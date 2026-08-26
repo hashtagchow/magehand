@@ -7,6 +7,8 @@ import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.model.AbilityScores
 import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.ui.components.DirectEntryKeys
+import com.hashtagchow.magehand.ui.components.DirectEntryKind
 import com.hashtagchow.magehand.core.model.CoinPurse
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.EquipGroup
@@ -22,6 +24,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Locale
@@ -1282,4 +1285,182 @@ class InventoryUiStateTest {
 
         assertTrue(state.moveTargetsFor(state.row("c1")!!).isEmpty())
     }
+
+    // --- FR-22 direct-entry targets (15 decisions 5-7) -----------------------
+
+    @Test
+    fun `an item key resolves wherever the row lives, with no ceiling`() {
+        // Through `row`, so a row inside a container is as reachable as one loose in Gear.
+        val target = map().directEntryTarget(DirectEntryKeys.item("in1"))!!
+        assertEquals(DirectEntryKind.ITEM, target.kind)
+        assertEquals("Rations (1 day)", target.label)
+        assertEquals(5, target.current)
+        assertNull("decision 7: a quantity has no ceiling", target.max)
+    }
+
+    @Test
+    fun `a coin key resolves by denomination and labels itself with the abbreviation`() {
+        val target = map().directEntryTarget(DirectEntryKeys.coin(CoinKind.GOLD))!!
+        assertEquals(DirectEntryKind.COIN, target.kind)
+        assertEquals("the denomination, not a property id", CoinKind.GOLD.name, target.propertyId)
+        assertEquals(CoinKind.GOLD.abbreviation, target.label)
+        assertEquals(109, target.current)
+        assertNull("decision 7: coins have no ceiling", target.max)
+    }
+
+    /**
+     * A denomination the sheet carries **no property for** still resolves — that is the row a
+     * typed number creates, and the whole reason the key is a `CoinKind`.
+     */
+    @Test
+    fun `an absent coin row still resolves, because a typed number creates it`() {
+        val empty = board.copy(wallet = Wallet(CoinKind.inWalletOrder.map { WalletRow(it, 0, null) }))
+        val target = map(board = empty).directEntryTarget(DirectEntryKeys.coin(CoinKind.SILVER))!!
+        assertEquals(0, target.current)
+    }
+
+    @Test
+    fun `a vanished item and an unknown key both resolve to null`() {
+        assertNull(map().directEntryTarget(DirectEntryKeys.item("gone")))
+        assertNull(map().directEntryTarget("nonsense"))
+    }
+
+    // --- FR-24 the search field (15 decisions 14-16) -------------------------
+
+    /** Fifteen distinct gear items, so the threshold and the filter have something to bite on. */
+    private fun bigBoard(names: List<String>) = InventoryBoard(
+        wallet = wallet(gp = 109),
+        carried = names.mapIndexed { index, name -> item("g$index", name) },
+        carriedWeightLb = names.size.toDouble(),
+    )
+
+    private val fifteen = (1..15).map { "Gear $it" }
+
+    /**
+     * Decision 14's threshold, on the boundary in both directions.
+     *
+     * Fourteen items is a list a phone can scroll; fifteen is where the field earns its row.
+     * `FILTER_THRESHOLD` is asserted by name rather than by repeating `15`, so the design's
+     * number and the code's stay one token.
+     */
+    @Test
+    fun `the filter field appears at fifteen items and not at fourteen`() {
+        assertFalse(map(board = bigBoard(fifteen.take(FILTER_THRESHOLD - 1))).showsFilterField)
+        assertTrue(map(board = bigBoard(fifteen)).showsFilterField)
+    }
+
+    /** Coins are not items — the count decision 14 asks for is non-coin by construction. */
+    @Test
+    fun `a purse full of coins does not push a small inventory over the threshold`() {
+        val state = map(board = bigBoard(fifteen.take(3)).copy(wallet = wallet(pp = 9, gp = 900)))
+        assertEquals(3, state.itemRowCount)
+        assertFalse(state.showsFilterField)
+    }
+
+    @Test
+    fun `a blank query returns the state untouched`() {
+        // Identically: a tab with the field on screen and nothing typed is not a different
+        // object from one without the field at all.
+        val state = map(board = bigBoard(fifteen))
+        assertSame(state, state.filteredBy(""))
+        assertSame(state, state.filteredBy("   "))
+    }
+
+    /** Decision 15: name substring, case-insensitive. */
+    @Test
+    fun `the filter matches a case-insensitive name substring`() {
+        val state = map(board = bigBoard(listOf("Rope, hempen", "Longsword", "Grappling hook")))
+        assertEquals(listOf("Rope, hempen"), state.filteredBy("ROPE").allRowNames())
+        assertEquals(listOf("Grappling hook"), state.filteredBy("ling ho").allRowNames())
+    }
+
+    /**
+     * **Decision 15's headline**: a match inside a *collapsed* section renders, and the section
+     * comes back expanded for as long as the filter is active.
+     */
+    @Test
+    fun `a match inside a collapsed section surfaces and the section renders expanded`() {
+        val collapsed = map(layout = listOf(InventoryLayoutEntry("equipped", collapsed = true)))
+        val equippedSection = collapsed.sections.single { it.key == "equipped" }
+        assertTrue("precondition: the player shut this section", equippedSection.collapsed)
+
+        val section = collapsed.filteredBy("longsword").sections.single()
+        assertEquals("equipped", section.key)
+        assertEquals(listOf("Longsword"), section.rows.map { it.name })
+        assertFalse("a matching section opens while the filter is active", section.collapsed)
+    }
+
+    /**
+     * **Decision 15's other half**: a match in a *hidden* section surfaces under its fold target
+     * with its real row.
+     *
+     * Nothing here undoes the hide, and that is the implementation: `toInventoryUiState` has
+     * already folded a hidden section's rows into Gear, so the filter finds them there. The
+     * assertion is that the row is reachable and named correctly, not that the heading came back.
+     */
+    @Test
+    fun `a match in a hidden section surfaces under its fold target`() {
+        val board = InventoryBoard(
+            wallet = wallet(),
+            carried = listOf(
+                item("w1", "Longsword", equipGroup = EquipGroup.WEAPON),
+                item("g1", "Torch"),
+            ),
+            carriedWeightLb = 2.0,
+        )
+        val folded = map(board = board, layout = listOf(InventoryLayoutEntry("weapons", hidden = true)))
+        assertTrue("precondition: no weapons heading", folded.sections.none { it.key == "weapons" })
+
+        val section = folded.filteredBy("sword").sections.single()
+        assertEquals("gear", section.key)
+        assertEquals(listOf("Longsword"), section.rows.map { it.name })
+    }
+
+    /** A section with no match is dropped whole — the tab's standing rule for an empty section. */
+    @Test
+    fun `sections with no matches are dropped, header and all`() {
+        val state = map().filteredBy("torch")
+        assertEquals(listOf("Torch"), state.allRowNames())
+        assertTrue("no header over nothing", state.sections.none { it.rows.isEmpty() })
+    }
+
+    /** Decision 15: the wallet is exempt. Money does not go missing while you search for rope. */
+    @Test
+    fun `the wallet block survives a filter that matches nothing`() {
+        val state = map().filteredBy("nothing matches this")
+        assertEquals(0, state.itemRowCount)
+        assertTrue(state.blocks.any { it is InventoryBlock.Wallet })
+        assertEquals("and it still says what it holds", 109, state.wallet.rows.first { it.coin == CoinKind.GOLD }.quantity)
+    }
+
+    /** Decision 16: an empty result is a state the composable can name, not an empty list of blocks. */
+    @Test
+    fun `a filter matching nothing leaves no item rows`() {
+        assertEquals(0, map().filteredBy("zzz").itemRowCount)
+    }
+
+    /**
+     * **Decision 15's restore rule.** Clearing the filter returns the stored layout *exactly*,
+     * and it is exact for a structural reason rather than a careful one: the filter is a pure
+     * transform over an already-built state, so the unfiltered value was never rewritten and
+     * there is nothing to put back.
+     */
+    @Test
+    fun `clearing the filter restores the stored layout exactly`() {
+        val stored = map(
+            layout = listOf(
+                InventoryLayoutEntry("equipped", collapsed = true),
+                InventoryLayoutEntry("weapons", hidden = true),
+            ),
+        )
+
+        stored.filteredBy("longsword")
+
+        assertEquals(stored, stored.filteredBy(""))
+        assertTrue(stored.sections.single { it.key == "equipped" }.collapsed)
+    }
+
+    /** Every row the tab would draw, in order — the filter's observable output. */
+    private fun InventoryUiState.allRowNames(): List<String> =
+        sections.flatMap { section -> section.rows.map { it.name } }
 }

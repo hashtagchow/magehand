@@ -52,8 +52,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil3.compose.AsyncImage
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.components.PORTRAIT_SIZE_LIST
+import com.hashtagchow.magehand.ui.components.PortraitAvatar
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
@@ -438,34 +439,20 @@ private fun CharacterCard(
 }
 
 /**
- * The portrait, with the monogram drawn *underneath* rather than as an error
- * painter: the table's sheets store HeroForge **configurator** links in `picture`,
- * which are HTML pages, not images. Coil simply fails to decode them and the
- * monogram is what remains — no error state, no layout jump.
+ * The portrait.
+ *
+ * The rule — and the argument for drawing the monogram *underneath* rather than as an error
+ * painter — moved to [PortraitAvatar] when FR-21 put the same portrait on the DM cards
+ * (docs/design/15-polish-batch.md decision 1). Nothing about what this row renders changed;
+ * `CharacterSummary.picture` was already `avatarPicture ?: picture` at the mapping.
  */
 @Composable
 private fun Portrait(character: CharacterSummary) {
-    Box(
-        modifier = Modifier
-            .size(56.dp)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.secondaryContainer),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = character.monogram,
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-        )
-        if (character.picture != null) {
-            AsyncImage(
-                model = character.picture,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.matchParentSize(),
-            )
-        }
-    }
+    PortraitAvatar(
+        url = character.picture,
+        monogram = character.monogram,
+        size = PORTRAIT_SIZE_LIST,
+    )
 }
 
 @Composable

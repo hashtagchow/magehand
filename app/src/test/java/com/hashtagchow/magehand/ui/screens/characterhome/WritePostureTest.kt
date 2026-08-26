@@ -26,7 +26,7 @@ import java.lang.reflect.Method
  * docs/verification/WP4.md). A composable that could reach `DdpClient.call` would bypass
  * all six at once, and nothing else in the build would notice.
  *
- * ### Three assertions, in order of strength
+ * ### Four assertions, in order of strength
  *
  * 1. **`:app`'s bytecode contains no DiceCloud mutation method name.** Decisive and
  *    comment-proof: a Kotlin string literal survives into the class file's constant pool,
@@ -37,7 +37,13 @@ import java.lang.reflect.Method
  *    this is a discipline the classpath cannot enforce — hence the test.
  * 3. **[OpenCharacter]'s mutating surface is exactly the allow-list below.** A positive
  *    assertion, so widening the seam is a conscious edit here rather than a silent one
- *    there.
+ *    there. Blind to overloads by construction — a name set cannot see arity or parameter
+ *    types — which is what assertion 4 is for.
+ * 4. **Every overload of that surface is exactly `allowedMutatorSignatures`.** A method
+ *    already on the allow-list can still grow a second, differently-typed entry point — the
+ *    `ExactQuantity` episode — and widen what `:app` can express with no edit assertion 3
+ *    would catch. This is the same positive-assertion discipline, one erased signature
+ *    finer.
  */
 class WritePostureTest {
 
@@ -98,6 +104,28 @@ class WritePostureTest {
         // `parentRef`. Neither lets `:app` name a method; the two assertions above prove it.
         "removeItem",
         "moveItem",
+        // FR-23's one, added deliberately per this list's own rule — and, unusually, **with
+        // written authorization**: docs/design/15-polish-batch.md decision 21 overrides that
+        // batch's own decision 9 ("no new intents") *for FR-23 only*, in as many words:
+        // "`WritePostureTest`'s catalog is DELIBERATELY extended per its own 'adding one is an
+        // edit to this list' rule."
+        //
+        // It could not have been composed from the entries above it, which is the bar this list
+        // exists to enforce. `spend`/`restore` are increments against a row that counts *down*;
+        // `setHitPoints` names one property. A death save is two properties written to two
+        // absolutes together — decision 20's clear-on-heal is exactly that pair-shaped write —
+        // and expressing it through the existing entries would have meant either two half-writes
+        // the undo stack could separate, or teaching `spend` about a row whose semantics invert
+        // every assumption it makes.
+        //
+        // It is still an *intent*, not a method: `:app` says "these are the marks now" and says
+        // nothing about `creatureProperties.damage`, its `operation:'set'`, or the fact that one
+        // implementation writes two DDP calls and the other writes two SQLite columns. The first
+        // two assertions above are what prove that, and they are unchanged.
+        //
+        // FR-22 remains zero-new-intents, per decision 9 — its direct entry is an overload of
+        // `adjustItem`/`adjustCoins`, which adds no name to this set.
+        "setDeathSaves",
         "toggle",
         "rest",
         "undoLastWrite",
@@ -109,6 +137,45 @@ class WritePostureTest {
         "setAccentColor",
         "captureSnapshot",
         "close",
+    )
+
+    /**
+     * The same allow-list as [allowedMutators], but as erased JVM signatures —
+     * `name(paramSimpleNames)` — rather than bare names.
+     *
+     * **The `ExactQuantity` episode.** FR-22's direct entry gave `adjustItem` and
+     * `adjustCoins` a second, `ExactQuantity`-typed overload without adding a name to
+     * [allowedMutators] at all — the name-set assertion is blind to an overload, by
+     * construction, because a name set cannot see arity or parameter types. That is a real
+     * way to widen what `:app` can express through an intent already on the allow-list, with
+     * no edit anywhere the reviewer would see it as a widening. This list makes an overload
+     * cost the same deliberate edit a new intent already costs; [allowedMutators] stays
+     * beside it because a bare name is still the faster read for "what can this app do at
+     * all", and losing that would be a readability regression for no gain in coverage.
+     */
+    private val allowedMutatorSignatures = setOf(
+        "spend(TrackedResource,int)",
+        "restore(TrackedResource,int)",
+        "changeHitPoints(int)",
+        "setHitPoints(int)",
+        "adjustItem(TrackedResource,int)",
+        "adjustItem(TrackedResource,ExactQuantity)",
+        "setEquipped(String,boolean,boolean,String)",
+        "addItem(NewItemSpec)",
+        "adjustCoins(WalletRow,int)",
+        "adjustCoins(WalletRow,ExactQuantity)",
+        "removeItem(String,String)",
+        "moveItem(String,InventoryMoveTarget,String)",
+        "setDeathSaves(int,int)",
+        "toggle(ConditionToggle)",
+        "rest(RestKind)",
+        "undoLastWrite(Continuation)",
+        "setOverride(TrackerOverride,Continuation)",
+        "setOverrides(List,Continuation)",
+        "clearOverride(String,Continuation)",
+        "setAccentColor(String,Continuation)",
+        "captureSnapshot(Continuation)",
+        "close(Continuation)",
     )
 
     private val writePackagePath = "com/hashtagchow/magehand/core/data/write"
@@ -160,6 +227,24 @@ class WritePostureTest {
                 "intent to allowedMutators and say why in the work package's verification doc.",
             allowedMutators,
             mutators,
+        )
+    }
+
+    @Test
+    fun `the UI's handle on a character exposes exactly the overloads we decided on`() {
+        val signatures = OpenCharacter::class.java.methods
+            .filterNot { it.isSynthetic }
+            .filterNot { it.name.matches(PROPERTY_GETTER) }
+            .map { it.erasedSignature() }
+            .toSet()
+
+        assertEquals(
+            "OpenCharacter's overload shape changed. A new or widened overload can extend " +
+                "what :app can express through an existing intent without changing the " +
+                "name-set above at all — see allowedMutatorSignatures' KDoc. If this is " +
+                "deliberate, add the new signature there and say why.",
+            allowedMutatorSignatures,
+            signatures,
         )
     }
 
@@ -221,6 +306,10 @@ class WritePostureTest {
 
     private val Method.signatureTypes: List<Class<*>>
         get() = listOf(returnType) + parameterTypes
+
+    /** `name(paramSimpleNames)`, erased — the formula [allowedMutatorSignatures] catalogs. */
+    private fun Method.erasedSignature(): String =
+        "$name(${parameterTypes.joinToString(",") { it.simpleName }})"
 
     private companion object {
         val PROPERTY_GETTER = Regex("^(get|is)[A-Z].*")

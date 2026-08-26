@@ -1,6 +1,8 @@
 package com.hashtagchow.magehand.ui.screens.characterhome.inventory
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,12 +22,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,6 +46,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
@@ -48,6 +56,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.ui.components.DirectEntryDialog
+import com.hashtagchow.magehand.ui.components.DirectEntryKeys
+import com.hashtagchow.magehand.ui.components.DirectEntryKind
+import com.hashtagchow.magehand.ui.components.directEntry
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.MINUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.PLUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.StepperButton
@@ -73,8 +85,29 @@ data class InventoryActions(
     /** A wallet stepper. `+1` on a denomination the sheet lacks creates it — see `adjustCoins`. */
     val onCoinDelta: (coin: CoinKind, delta: Int) -> Unit = { _, _ -> },
 
+    /**
+     * FR-22 direct entry on a wallet row (15 decisions 5–7): set the denomination to an
+     * absolute count.
+     *
+     * A [CoinKind] rather than a property id for [onCoinDelta]'s reason, whole: the row may
+     * have no backing property yet, and on that row a typed number is what *creates* the coin
+     * item carrying the whole count.
+     */
+    val onCoinSet: (coin: CoinKind, value: Int) -> Unit = { _, _ -> },
+
     /** The detail sheet's quantity stepper. Not on the list — see [InventoryRow]. */
     val onQuantityDelta: (propertyId: String, delta: Int) -> Unit = { _, _ -> },
+
+    /**
+     * FR-22 direct entry on an item's quantity — **both** the list row and the detail sheet
+     * (decision 5 names both).
+     *
+     * The stepper deliberately stays off the list ([InventoryRow]'s "why the quantity stepper is
+     * not here"); this does not put it back. A long press adds no pixels to a row whose job is
+     * to be scanned, which is the whole of decision 7's argument for keeping the list calm — so
+     * the two decisions are compatible rather than in tension.
+     */
+    val onQuantitySet: (propertyId: String, value: Int) -> Unit = { _, _ -> },
 
     /** A row was tapped: open its detail sheet (10 decision 7). */
     val onRowTap: (propertyId: String) -> Unit = {},
@@ -152,6 +185,54 @@ fun InventoryTab(
     // mid-count does not slam it shut.
     var walletExpanded by rememberSaveable { mutableStateOf(false) }
 
+    // FR-22 (15 decision 5), hosted here for `TrackerTab`'s reasons: one dialog at a time, keyed
+    // by id so it stays live against a sync, and `rememberSaveable` so a rotation mid-type keeps
+    // the gesture. See `InventoryUiState.directEntryTarget`.
+    var entryKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val entryTarget = entryKey?.let { state.directEntryTarget(it) }
+    if (entryKey != null && entryTarget == null) entryKey = null
+
+    // FR-24 (15 decision 15): "glance, never preference". The query lives here, in a
+    // `rememberSaveable`, exactly as the wallet's expander and the tracker's inactive-conditions
+    // drawer do — and for the same reason stated one step harder by the design: a search is a
+    // thing a player is doing *right now*, and persisting it would mean opening a character next
+    // week to a filtered inventory. `rememberSaveable` so a rotation mid-search does not clear it.
+    //
+    // Everything below reads `filtered`; nothing writes anything. That is what makes decision
+    // 15's "NOTHING writes to the FR-16 layout store" structural rather than a promise — see
+    // `InventoryUiState.filteredBy`.
+    var query by rememberSaveable { mutableStateOf("") }
+    // The threshold reads the **unfiltered** state, so narrowing the list cannot remove the
+    // field that narrowed it.
+    val showsFilter = state.showsFilterField
+    val active = showsFilter && query.isNotBlank()
+    val filtered = if (showsFilter) state.filteredBy(query) else state
+
+    entryTarget?.let { target ->
+        DirectEntryDialog(
+            // Every label on this tab is already a *name* rather than copy — an item's is off
+            // the sheet and a coin's is `CoinKind.abbreviation`, which the wallet rows and the
+            // collapsed summary both already print — so nothing has to be resolved here. The
+            // tracker's HP row is the one case that needed a `strings.xml` lookup.
+            label = target.label,
+            current = target.current,
+            max = target.max,
+            onSet = { value ->
+                when (target.kind) {
+                    DirectEntryKind.COIN -> CoinKind.entries
+                        .firstOrNull { it.name == target.propertyId }
+                        ?.let { actions.onCoinSet(it, value) }
+
+                    DirectEntryKind.ITEM -> actions.onQuantitySet(target.propertyId, value)
+                    // This tab mints neither key. Named rather than swept into an `else` for
+                    // `TrackerTab`'s reason.
+                    DirectEntryKind.HIT_POINTS, DirectEntryKind.RESOURCE -> Unit
+                }
+            },
+            onDismiss = { entryKey = null },
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -171,10 +252,24 @@ fun InventoryTab(
         ) {
             item(key = "summary") { InventorySummary(state) }
 
+            // FR-24 decision 14: "above the sections, below the capacity line" — literally the
+            // slot between the summary item and the first block, wallet included. Its own
+            // `item` so typing does not recompose the summary above it.
+            if (showsFilter) {
+                item(key = "filter") {
+                    InventoryFilterField(
+                        query = query,
+                        matchCount = filtered.itemRowCount,
+                        active = active,
+                        onQueryChange = { query = it },
+                    )
+                }
+            }
+
             // 12 decisions 1 and 3: the order is the player's, and so is whether the wallet is
             // on the tab at all — so this walks one list rather than drawing the wallet and then
             // the sections. See `InventoryBlock`.
-            state.blocks.forEach { block ->
+            filtered.blocks.forEach { block ->
                 when (block) {
                     // Always four rows, even on a sheet carrying no coins at all (10 decision 5):
                     // "you have no silver" and "this app could not find your silver" look
@@ -195,6 +290,9 @@ fun InventoryTab(
                                     wallet = state.wallet,
                                     canWrite = state.canWrite,
                                     onDelta = actions.onCoinDelta,
+                                    onDirectEntry = { coin ->
+                                        entryKey = DirectEntryKeys.coin(coin)
+                                    },
                                 )
                             }
                         }
@@ -220,11 +318,21 @@ fun InventoryTab(
                                     canWrite = state.canWrite,
                                     onEquip = actions.onEquip,
                                     onTap = actions.onRowTap,
+                                    onDirectEntry = {
+                                        entryKey = DirectEntryKeys.item(row.propertyId)
+                                    },
                                 )
                             }
                         }
                     }
                 }
+            }
+
+            // Decision 16: an honest empty state that prints the query back. Distinct from
+            // `EmptyInventory`, which says "this character carries nothing" — a sentence that
+            // would be a lie about a sheet holding forty items and no rope.
+            if (active && filtered.itemRowCount == 0) {
+                item(key = "filter-empty") { NoMatches(query) }
             }
 
             if (state.isEmpty) item(key = "empty") { EmptyInventory() }
@@ -455,6 +563,7 @@ private fun WalletRows(
     wallet: WalletUiState,
     canWrite: Boolean,
     onDelta: (CoinKind, Int) -> Unit,
+    onDirectEntry: (CoinKind) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
@@ -488,6 +597,18 @@ private fun WalletRows(
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .width(64.dp)
+                        // FR-22 decisions 5 and 7: coins floor at zero and have no ceiling. The
+                        // gesture is additive — both steppers are untouched — and it leaves the
+                        // probe's anchor alone for the reason `PipRow` states.
+                        .directEntry(
+                            enabled = canWrite,
+                            spoken = stringResource(
+                                R.string.direct_entry_spoken,
+                                label,
+                                row.quantity,
+                            ),
+                            onOpen = { onDirectEntry(row.coin) },
+                        )
                         .testTag("inventory:wallet:${row.coin.name.lowercase()}:value"),
                 )
                 StepperButton(
@@ -544,6 +665,7 @@ private fun InventoryRow(
     canWrite: Boolean,
     onEquip: (String, Boolean) -> Unit,
     onTap: (String) -> Unit,
+    onDirectEntry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // 12 decision 2. The rule — which verb, and that the state fragment appears only when the
@@ -558,7 +680,19 @@ private fun InventoryRow(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 64.dp)
-            .clickable { onTap(row.propertyId) }
+            // FR-22 decision 5 names "inventory rows" among the direct-entry surfaces, and the
+            // gesture lands on the **row** rather than on the quantity text inside it. It has
+            // to: this row is a clickable, so it merges its descendants into one accessibility
+            // node and an inner clickable on the meta line would be swallowed by it — and the
+            // meta line is absent entirely at ×1 (`showsQuantity`), which would make the
+            // affordance appear and disappear with the number it edits.
+            //
+            // The tap is unchanged and still opens the detail sheet, so nothing a player has
+            // learned about this list moves.
+            .combinedClickable(
+                onClick = { onTap(row.propertyId) },
+                onLongClick = if (canWrite) onDirectEntry else null,
+            )
             .semantics { contentDescription = openDescription }
             .testTag("inventory:row:${row.propertyId}"),
         verticalAlignment = Alignment.CenterVertically,
@@ -698,6 +832,122 @@ private fun SectionHeader(
                 .weight(1f)
                 .padding(start = 12.dp)
                 .testTag("inventory:section:${section.key}:summary"),
+        )
+    }
+}
+
+/**
+ * FR-24's filter field (docs/design/15-polish-batch.md decisions 14–17).
+ *
+ * ### Why a plain `OutlinedTextField` and not a `SearchBar`
+ *
+ * Material3's `SearchBar` is a *navigation* control: it expands to full screen, owns a back
+ * gesture and carries a suggestion list. This filter has none of those — decision 15 fences out
+ * search history and decision 16's empty state is a line in the list, not a screen — and a
+ * control that looks like it will take over the tab and then does not is a worse lie than a
+ * field that looks like a field. It is also decision 17's requirement in as many words: *"the
+ * field is a standard text field (FR-4 inset class)"*, which is what makes the IME behaviour the
+ * same as every other field in the app rather than a second implementation of it.
+ *
+ * ### The live region (decision 17)
+ *
+ * The list under a sighted player's finger visibly shrinks as they type; a screen-reader user
+ * gets nothing at all unless something says so. `liveRegion = Polite` on a node carrying the
+ * match count is that — polite rather than assertive because it must not interrupt the letter
+ * the player is currently hearing echoed back.
+ *
+ * It is a **plural resource**, not a format string, for `SectionHeader`'s reason: this sentence
+ * is read aloud and "1 items match" is exactly the kind of thing a screen-reader user hears in
+ * full. The node is otherwise invisible — a zero-size `Spacer` would have worked, and a
+ * `contentDescription` on the field itself would not: changing a field's description while it
+ * has focus is what makes TalkBack re-announce the whole field on every keystroke.
+ *
+ * ### The clear button
+ *
+ * Present whenever there is anything to clear (decision 17). Clearing restores the stored layout
+ * *exactly*, which costs nothing to guarantee here: the filter never wrote one — see
+ * [InventoryUiState.filteredBy].
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun InventoryFilterField(
+    query: String,
+    matchCount: Int,
+    active: Boolean,
+    onQueryChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val matches = pluralStringResource(R.plurals.inventory_filter_matches, matchCount, matchCount)
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            singleLine = true,
+            label = { Text(stringResource(R.string.inventory_filter_label)) },
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Filled.Search,
+                    // Silent: the field's own label already says what it is, and an icon that
+                    // announced "search" beside a field labelled "Search items" says it twice.
+                    contentDescription = null,
+                )
+            },
+            trailingIcon = {
+                if (query.isNotEmpty()) {
+                    IconButton(
+                        onClick = { onQueryChange("") },
+                        modifier = Modifier.testTag("inventory:filter:clear"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = stringResource(R.string.inventory_filter_clear),
+                        )
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("inventory:filter"),
+        )
+
+        if (active) {
+            // Announced, not drawn. The count is redundant for anyone who can see the list
+            // change, and it is the only signal for anyone who cannot.
+            Spacer(
+                Modifier
+                    .height(0.dp)
+                    .semantics {
+                        liveRegion = LiveRegionMode.Polite
+                        contentDescription = matches
+                    },
+            )
+        }
+    }
+}
+
+/**
+ * FR-24 decision 16: *"an honest 'No items match' state with the query shown"*.
+ *
+ * The query is printed back because "No items match" on its own leaves a player who typed
+ * `rpoe` with nothing to correct — the sentence has to name what was searched for, or the only
+ * fact it carries is that something went wrong somewhere.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun NoMatches(query: String, modifier: Modifier = Modifier) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Text(
+            text = stringResource(R.string.inventory_filter_none, query),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .padding(16.dp)
+                .testTag("inventory:filter:empty"),
         )
     }
 }

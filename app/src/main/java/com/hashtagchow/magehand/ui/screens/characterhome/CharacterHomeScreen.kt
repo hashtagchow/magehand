@@ -328,7 +328,13 @@ fun CharacterHomeScreen(
                             onRestore = viewModel::restore,
                             onHpDelta = viewModel::changeHitPoints,
                             onHpTap = { hpPadOpen = true },
+                            // FR-22 (15 decisions 5 and 6). `onHpSet` is the number pad's own
+                            // Set intent, reached by the long press instead of the pad.
+                            onHpSet = viewModel::setHitPoints,
+                            onResourceSet = viewModel::setResourceValue,
                             onItemDelta = viewModel::adjustItem,
+                            onItemSet = viewModel::setItemQuantity,
+                            onDeathSaves = viewModel::setDeathSaves,
                             onToggle = viewModel::toggleCondition,
                             onSelectRoll = viewModel::selectRoll,
                             onConnectionDetails = { connectionOpen = true },
@@ -342,7 +348,9 @@ fun CharacterHomeScreen(
                         actions = InventoryActions(
                             onEquip = viewModel::setEquipped,
                             onCoinDelta = viewModel::adjustCoins,
+                            onCoinSet = viewModel::setCoins,
                             onQuantityDelta = viewModel::adjustItemQuantity,
+                            onQuantitySet = viewModel::setInventoryItemQuantity,
                             onRowTap = { detailItemId = it },
                             // FR-9. Both arrive from the detail sheet, which is where the
                             // confirm and the picker live — nothing on the list can reach them.
@@ -454,6 +462,7 @@ fun CharacterHomeScreen(
                     row = row,
                     canWrite = uiState.inventory.canWrite,
                     onQuantityDelta = viewModel::adjustItemQuantity,
+                    onQuantitySet = viewModel::setInventoryItemQuantity,
                     onEquip = viewModel::setEquipped,
                     onEquippableOverride = viewModel::setEquippableOverride,
                     onDismiss = { detailItemId = null },

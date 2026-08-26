@@ -7,7 +7,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
+import com.hashtagchow.magehand.ui.components.DirectEntryKeys
+import com.hashtagchow.magehand.ui.components.DirectEntryKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
+import com.hashtagchow.magehand.core.model.DeathSaves
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DamageDefense
 import com.hashtagchow.magehand.core.model.DefenseKind
@@ -738,5 +741,150 @@ class TrackerUiStateTest {
         // badge is absent. Same rule as `RollDisplayState.spoken` dropping a null advantage.
         assertEquals("Rage", spokenLabelOf(serverRow(null)))
         assertEquals("Rage", spokenLabelOf(localRow("dawn")))
+    }
+
+    // --- FR-22 direct entry targets (15 decisions 5-7) -----------------------
+
+    /**
+     * The HP key resolves with the ceiling decision 7 gives it, and with a **blank label** —
+     * the one target whose name is copy rather than something off the sheet, so the composable
+     * fills it in.
+     */
+    @Test
+    fun `the hit points key resolves with a ceiling and no label`() {
+        val target = map().directEntryTarget(DirectEntryKeys.HIT_POINTS)!!
+        assertEquals(DirectEntryKind.HIT_POINTS, target.kind)
+        assertEquals("hp1", target.propertyId)
+        assertEquals(17, target.current)
+        assertEquals(17, target.max)
+        assertEquals("HP names itself from strings.xml", "", target.label)
+    }
+
+    /** Decision 7: a pip row's ceiling is its total, and its label is the row's own name. */
+    @Test
+    fun `a slot key resolves with the row's total as the ceiling`() {
+        val target = map().directEntryTarget(DirectEntryKeys.resource("slot1"))!!
+        assertEquals(DirectEntryKind.RESOURCE, target.kind)
+        assertEquals("1st Level", target.label)
+        assertEquals(3, target.current)
+        assertEquals(4, target.max)
+    }
+
+    @Test
+    fun `a resource key resolves through the same prefix as a slot`() {
+        // Both are pip rows and both go to `spend`/`restore`; the composable does not have to
+        // know which section a row came from.
+        val target = map().directEntryTarget(DirectEntryKeys.resource("res1"))!!
+        assertEquals(DirectEntryKind.RESOURCE, target.kind)
+        assertEquals(1, target.max)
+    }
+
+    /**
+     * Decision 7: an item has no ceiling. A `null` here is what removes the field's range line.
+     *
+     * Resolved against `consumables` — the **pinned** items, which are the rows the tracker
+     * actually draws — and not against the whole item list. An unpinned item has no number on
+     * this tab to long-press, and offering to edit one would be a control with no surface.
+     */
+    @Test
+    fun `a consumable key resolves with no ceiling`() {
+        val target = map().directEntryTarget(DirectEntryKeys.item("item1"))!!
+        assertEquals(DirectEntryKind.ITEM, target.kind)
+        assertEquals("Gold piece", target.label)
+        assertEquals(109, target.current)
+        assertNull("an item has no maximum", target.max)
+    }
+
+    @Test
+    fun `an item the tracker does not draw has no direct-entry target`() {
+        // `item2` is in `allItems` and not pinned, so it has no row on this tab.
+        assertNull(map().directEntryTarget(DirectEntryKeys.item("item2")))
+    }
+
+    /**
+     * A key naming a row the board no longer has resolves to nothing, which is what closes an
+     * open dialog rather than leaving it editing a ghost.
+     */
+    @Test
+    fun `a key naming a vanished row resolves to null`() {
+        assertNull(map().directEntryTarget(DirectEntryKeys.resource("gone")))
+        assertNull(map().directEntryTarget(DirectEntryKeys.item("gone")))
+    }
+
+    @Test
+    fun `an unrecognised key resolves to null rather than throwing`() {
+        // A key read back out of a `Bundle` written by a newer install has to be inert.
+        assertNull(map().directEntryTarget("something:else"))
+    }
+
+    @Test
+    fun `the hit points key resolves to null on a character with no hp row`() {
+        assertNull(map(board = TrackerBoard()).directEntryTarget(DirectEntryKeys.HIT_POINTS))
+    }
+
+    // --- FR-23 the death-save trigger (15 decision 18) -----------------------
+
+    private val downed = sabriel.copy(
+        hp = TrackedResource("hp1", TrackerKind.HIT_POINTS, "Hit Points", 0, 17),
+        deathSaves = DeathSaves("ds1", "ds2", successes = 1, failures = 2),
+    )
+
+    /** Both halves of decision 18's trigger, together. */
+    @Test
+    fun `the death save block renders at zero hit points with a discovered pair`() {
+        val saves = map(board = downed).deathSaves!!
+        assertEquals(1, saves.successes)
+        assertEquals(2, saves.failures)
+    }
+
+    /**
+     * The gate is the **HP row the screen draws**, so the block goes away the instant a heal is
+     * tapped rather than a round trip later — see `TrackerUiState.deathSaves` for why that gate
+     * is here and not at discovery.
+     */
+    @Test
+    fun `a character above zero shows no block even with marks on the sheet`() {
+        val up = downed.copy(hp = TrackedResource("hp1", TrackerKind.HIT_POINTS, "Hit Points", 1, 17))
+        assertNull(map(board = up).deathSaves)
+    }
+
+    /** Decision 18: no pair, no block. The Dummy's case. */
+    @Test
+    fun `a downed character with no discovered pair shows no block`() {
+        assertNull(map(board = downed.copy(deathSaves = null)).deathSaves)
+    }
+
+    /**
+     * A hidden HP row means no block, and that is deliberate: with no HP row on the board there
+     * is no `value === 0` to read, and reaching around the override layer would be this app
+     * overruling the one screen it lets the player arrange.
+     */
+    @Test
+    fun `a hidden hp row leaves the block off`() {
+        assertNull(map(board = downed.copy(hp = null)).deathSaves)
+    }
+
+    /**
+     * The **counts survive the gate closing**, which is what decision 20's "shows its marks
+     * honestly" depends on: a heal takes the block off screen and the marks are still on the
+     * sheet until someone clears them.
+     */
+    @Test
+    fun `the discovered pair stays on the state after the block stops rendering`() {
+        val up = downed.copy(hp = TrackedResource("hp1", TrackerKind.HIT_POINTS, "Hit Points", 4, 17))
+        val state = map(board = up)
+        assertNull(state.deathSaves)
+        assertEquals("the marks are still on the sheet", 2, state.deathSavePair?.failures)
+    }
+
+    /** Stable and dead are derivations, never a flag off the sheet (decision 19). */
+    @Test
+    fun `stable and dead are counted rather than read`() {
+        val stable = downed.copy(deathSaves = DeathSaves("ds1", "ds2", successes = 3, failures = 1))
+        assertTrue(map(board = stable).deathSaves!!.isStable)
+        assertFalse(map(board = stable).deathSaves!!.isDead)
+
+        val dead = downed.copy(deathSaves = DeathSaves("ds1", "ds2", successes = 0, failures = 3))
+        assertTrue(map(board = dead).deathSaves!!.isDead)
     }
 }

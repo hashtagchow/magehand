@@ -10,6 +10,9 @@ import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryContainer
 import com.hashtagchow.magehand.core.model.InventoryItem
 import com.hashtagchow.magehand.core.model.Wallet
+import com.hashtagchow.magehand.ui.components.DirectEntryKeys
+import com.hashtagchow.magehand.ui.components.DirectEntryKind
+import com.hashtagchow.magehand.ui.components.DirectEntryTarget
 import java.util.Locale
 
 /**
@@ -826,7 +829,150 @@ data class InventoryUiState(
      */
     fun moveTargetsFor(row: InventoryRowState): List<InventoryMoveTargetState> =
         moveTargets.filterNot { it.containerId == row.containerId }
+
+    /**
+     * What an open FR-22 direct-entry dialog is editing, resolved from a [DirectEntryKeys] key
+     * (15 decisions 5–7).
+     *
+     * The inventory half of `TrackerUiState.directEntryTarget`, and the same argument for why it
+     * takes a key rather than a row — see there. Two kinds reach this tab:
+     *
+     * - **an item**, looked up through [row], so a dialog open over an item that a sync removes
+     *   resolves to `null` and closes rather than editing a ghost;
+     * - **a coin**, which is looked up in the wallet by denomination because a wallet row may
+     *   have no property at all yet. Its `propertyId` therefore carries the [CoinKind] name —
+     *   the only stable identity an absent row has — matching `InventoryActions.onCoinSet`.
+     *
+     * Neither carries a ceiling (decision 7: *"coins floor 0, no ceiling; quantities floor 0, no
+     * ceiling"*), which is the whole difference from the tracker's pip rows.
+     */
+    fun directEntryTarget(key: String): DirectEntryTarget? = when {
+        key.startsWith(DirectEntryKeys.ITEM_PREFIX) ->
+            row(key.removePrefix(DirectEntryKeys.ITEM_PREFIX))?.let {
+                DirectEntryTarget(
+                    kind = DirectEntryKind.ITEM,
+                    propertyId = it.propertyId,
+                    label = it.name,
+                    current = it.quantity,
+                    max = null,
+                )
+            }
+
+        key.startsWith(DirectEntryKeys.COIN_PREFIX) -> {
+            val name = key.removePrefix(DirectEntryKeys.COIN_PREFIX)
+            wallet.rows.firstOrNull { it.coin.name == name }?.let {
+                DirectEntryTarget(
+                    kind = DirectEntryKind.COIN,
+                    propertyId = it.coin.name,
+                    // Already the app's own vocabulary — the expanded rows label themselves with
+                    // the same four abbreviations, and so does the collapsed summary.
+                    label = it.coin.abbreviation,
+                    current = it.quantity,
+                    max = null,
+                )
+            }
+        }
+
+        else -> null
+    }
+
+    /**
+     * Every item row on the tab, counted once (FR-24 decision 14's threshold input).
+     *
+     * Reading [sections] rather than the board is what makes "counted once" true without a
+     * `distinct`: hiding a section moves its rows into Gear and drops the section, so the
+     * rendered sections are a partition of the character's items — the invariant
+     * [toInventoryUiState] calls *"fold, never vanish"*. Coins are excluded by construction and
+     * not by a filter, because `InventoryBoard`'s precedence puts every coin-tagged item in the
+     * wallet before any section is built; decision 14 asks for the *non-coin* count and that is
+     * what this already is.
+     */
+    val itemRowCount: Int get() = sections.sumOf { it.itemCount }
+
+    /**
+     * Whether the search field renders at all (FR-24 decision 14: total non-coin item count
+     * ≥ 15).
+     *
+     * ### Why a threshold rather than always
+     *
+     * A field over a nine-item list is chrome above content the player can already see whole,
+     * on the tab where 10 decision 7 and 11 decision 4 have both already spent an argument on
+     * keeping the top of the screen for gear. Fifteen is where a phone's first screenful stops
+     * being the whole inventory. Below it, scrolling *is* the search.
+     *
+     * Computed from the **unfiltered** state, always: a filter that narrows the list to two
+     * matches must not take its own field away.
+     */
+    val showsFilterField: Boolean get() = itemRowCount >= FILTER_THRESHOLD
+
+    /**
+     * This state narrowed to the rows whose name contains [query] (FR-24 decisions 15 and 16).
+     *
+     * ### A glance, never a preference — which is why this is a pure function
+     *
+     * Decision 15's binding half is *"NOTHING writes to the FR-16 layout store. Clearing the
+     * filter restores the stored layout exactly."* That is a property of **where the filter
+     * lives**, not of care taken at each call site: the query is a `rememberSaveable` in the
+     * composable and filtering is this transform over an already-built state, so there is no
+     * path from typing to `InventoryLayoutStore` at all. Clearing restores exactly because the
+     * unfiltered state is the one the view model has been holding the whole time — nothing was
+     * ever rewritten to restore.
+     *
+     * ### What "across ALL sections including collapsed and hidden-folded ones" costs
+     *
+     * Less than it sounds, because [toInventoryUiState] has already done both halves:
+     *
+     * - **hidden-folded** rows are *already* in Gear's list (the `foldedIntoGear` block), so
+     *   "fold-hidden matches surface under their fold target with their real rows" is satisfied
+     *   by not undoing it. There is no second lookup here and no un-hiding.
+     * - **collapsed** sections still carry their rows — collapse only decides whether the
+     *   composable draws them — so a match inside one is found by the same `filter` as any
+     *   other, and `collapsed = false` on the result is what decision 15's *"matching sections
+     *   render expanded"* asks for.
+     *
+     * A section with no matches is dropped entirely, header included, which is
+     * [toInventoryUiState]'s own standing rule for an empty section rather than a new one.
+     *
+     * ### The wallet is exempt (decision 15)
+     *
+     * Its block passes through untouched. Coins are not items, they carry no names to match, and
+     * a purse that vanished while a player searched for "rope" would read as money having gone
+     * missing — the one thing on this tab with no remedy (see `InventoryRowState.isCoin`).
+     *
+     * A blank query returns `this` **identically**, so a tab with the field on screen and
+     * nothing typed is not a different object from one without the field at all.
+     */
+    fun filteredBy(query: String): InventoryUiState {
+        val needle = query.trim()
+        if (needle.isEmpty()) return this
+        val matched = blocks.mapNotNull { block ->
+            when (block) {
+                is InventoryBlock.Wallet -> block
+                is InventoryBlock.Items -> block.section
+                    .let { section -> section.copy(rows = section.rows.filter { it.matches(needle) }) }
+                    .takeIf { it.rows.isNotEmpty() }
+                    // Decision 15: a section holding a match is opened for as long as the filter
+                    // is active. Not written anywhere — see this function's KDoc.
+                    ?.copy(collapsed = false)
+                    ?.let(InventoryBlock::Items)
+            }
+        }
+        return copy(blocks = matched)
+    }
 }
+
+/** Case-insensitive name substring — the whole of decision 15's matching rule. */
+private fun InventoryRowState.matches(needle: String): Boolean =
+    name.contains(needle, ignoreCase = true)
+
+/**
+ * FR-24 decision 14's *"total non-coin item count ≥ 15"*.
+ *
+ * Named rather than inlined so the figure the design states and the figure the code applies are
+ * the same token, and so `InventoryUiStateTest` can assert the boundary by name rather than by
+ * repeating a number that would then have two homes.
+ */
+const val FILTER_THRESHOLD: Int = 15
 
 /**
  * Board → UI, in one pure step.

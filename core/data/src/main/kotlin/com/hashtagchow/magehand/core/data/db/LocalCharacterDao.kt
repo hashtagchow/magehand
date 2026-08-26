@@ -117,6 +117,21 @@ interface LocalCharacterDao {
     @Query("UPDATE local_characters SET pp = :pp, gp = :gp, sp = :sp, cp = :cp, updatedAt = :at WHERE id = :id")
     suspend fun setCoins(id: String, pp: Int, gp: Int, sp: Int, cp: Int, at: Long)
 
+    /**
+     * FR-23 decision 13: both death-save columns in one statement.
+     *
+     * One `UPDATE` and not two, unlike the server path's two `damage` calls — there the pair is
+     * two documents and one method can only name one; here it is two columns of one row, so
+     * writing them together is both cheaper and atomic. A caller that only means to change one
+     * half passes the other's current value, which is what `LocalOpenCharacter.setDeathSaves`
+     * does from inside its own critical section.
+     */
+    @Query(
+        "UPDATE local_characters SET deathSuccesses = :successes, deathFailures = :failures, " +
+            "updatedAt = :at WHERE id = :id",
+    )
+    suspend fun setDeathSaves(id: String, successes: Int, failures: Int, at: Long)
+
     /** 10 decision 10: local equip is a plain flag — there are no folders to move between. */
     @Query("UPDATE local_tracker_rows SET equipped = :equipped WHERE id = :rowId")
     suspend fun setRowEquipped(rowId: String, equipped: Boolean)

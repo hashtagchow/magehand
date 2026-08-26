@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.hashtagchow.magehand.core.data.db.LocalCharacterDao
+import com.hashtagchow.magehand.core.data.db.LocalCharacterEntity
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
@@ -29,6 +30,8 @@ import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.DeathSaves
+import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.LocalRowKind
@@ -271,6 +274,7 @@ class LocalOpenCharacter(
             val next = (character.currentHp + delta).coerceIn(0, character.maxHp)
             if (next == character.currentHp) return@dispatch
             dao.setCurrentHp(creatureId, next, now())
+            clearDeathSavesForHeal(character, next)
             val kind = if (delta < 0) TrackerWriteKind.TAKE_DAMAGE else TrackerWriteKind.HEAL
             journal(
                 kind = kind,
@@ -290,6 +294,7 @@ class LocalOpenCharacter(
             val next = value.coerceIn(0, character.maxHp)
             if (next == character.currentHp) return@dispatch
             dao.setCurrentHp(creatureId, next, now())
+            clearDeathSavesForHeal(character, next)
             journal(
                 kind = TrackerWriteKind.SET_VALUE,
                 targetName = LocalTrackerBoard.HP_ROW_NAME,
@@ -318,6 +323,105 @@ class LocalOpenCharacter(
             val kind = if (delta < 0) TrackerWriteKind.ITEM_USE else TrackerWriteKind.ITEM_ADD
             journal(kind, stored.label, kotlin.math.abs(next - stored.current), Undoable.Item(stored.id, stored.current))
         }
+    }
+
+    /**
+     * Direct entry on an item quantity (FR-22 decisions 5 and 6).
+     *
+     * ### No latch here, and that is not a simplification
+     *
+     * `DefaultOpenCharacter` needs a barrier because its writes are DDP calls that can be in
+     * flight, queued and coalesced at once — a set racing an `increment` on the same property
+     * has no defined outcome. This class dispatches every write through one [writeLock]-held
+     * critical section against a **fresh Room read**, which is a stronger guarantee than the
+     * barrier buys: there is no such thing as an outstanding local write for a set to overtake,
+     * and `stored.current` inside the section is committed truth rather than a prediction. The
+     * same reason [spend] re-reads instead of trusting the row it was handed.
+     *
+     * Floored at zero and uncapped, matching [adjustItem]: an item has no maximum.
+     *
+     * A target equal to the stored quantity writes nothing and journals nothing — unlike the
+     * server path, which sends it deliberately. There the board may have drifted from the sheet
+     * and the write is how a player corrects it; here the row *is* the storage, so "set it to
+     * what it already is" is genuinely a no-op and a history entry for it would be noise.
+     */
+    override fun adjustItem(item: TrackedResource, target: ExactQuantity) {
+        dispatch {
+            val stored = dao.findRow(item.propertyId) ?: return@dispatch
+            val next = target.value.coerceAtLeast(0)
+            if (next == stored.current) return@dispatch
+            dao.setRowQuantity(stored.id, next)
+            dao.touch(creatureId, now())
+            journal(
+                kind = TrackerWriteKind.ITEM_SET,
+                targetName = stored.label,
+                amount = next,
+                // The local path knows the previous value outright, so — as with [setHitPoints]
+                // — it can honestly offer the undo the server's absolute write cannot.
+                undo = Undoable.Item(stored.id, stored.current),
+            )
+        }
+    }
+
+    /**
+     * FR-23 decision 13's local half: two columns, written together.
+     *
+     * The server path's argument for absolutes and for skipping unchanged halves does not carry
+     * over, and neither does its rate-limit economy — there is no wire here. What does carry
+     * over is the *clamp*, so the two kinds of character cannot disagree about what three pips
+     * mean, and the no-op guard, so a tap that changes nothing files no history entry.
+     *
+     * Undoable, and completely: [Undoable.DeathSaves] holds both previous counts, so UNDO puts
+     * the pair back rather than half of it. That is the shape [setHitPoints] already has and for
+     * the same reason — the local path genuinely knows the previous value, so it honestly offers
+     * the undo the server's absolute write cannot.
+     */
+    override fun setDeathSaves(successes: Int, failures: Int) {
+        dispatch {
+            val character = dao.find(creatureId)?.toDomain() ?: return@dispatch
+            val nextSuccesses = successes.coerceIn(0, DeathSaves.MAX)
+            val nextFailures = failures.coerceIn(0, DeathSaves.MAX)
+            if (nextSuccesses == character.deathSuccesses && nextFailures == character.deathFailures) {
+                return@dispatch
+            }
+            dao.setDeathSaves(creatureId, nextSuccesses, nextFailures, now())
+            journal(
+                kind = TrackerWriteKind.SET_VALUE,
+                targetName = DEATH_SAVES_NAME,
+                amount = nextSuccesses + nextFailures,
+                undo = Undoable.DeathSaves(character.deathSuccesses, character.deathFailures),
+            )
+        }
+    }
+
+    /**
+     * FR-23 decision 20, locally: **the clear rides on this client's own heal.**
+     *
+     * The observer-storm argument that makes this a write-path concern rather than an observer
+     * is `DefaultOpenCharacter.clearDeathSavesForHeal`'s, and it is *weaker* here — a local
+     * character has exactly one client by construction, so no storm is possible. It is
+     * implemented the same way anyway, and deliberately: decision 13 asks for the *same UI* over
+     * the two columns, and a player who moves a character between the two kinds should not find
+     * that death saves clear at a different moment on one of them. The rule is the rule.
+     *
+     * Decision 13's own words are *"Local rest clears them on any heal above 0 (5e semantics)"*.
+     * A local `rest` does not touch `currentHp` at all (09 decision 7), so the sentence resolves
+     * to what is written here: whatever takes HP from 0 to positive is the heal that clears them,
+     * whether that is the stepper, the number pad or FR-22's direct entry. Stabilising and
+     * recovering are the 5e semantics, and neither of them happens without hit points.
+     *
+     * No journal entry and no undo of its own: the clear is part of the heal, so undoing the
+     * heal is what should put the marks back. That is why it runs **inside** the heal's critical
+     * section, before its [journal] call — see [Undoable.HitPoints] for what the entry restores,
+     * and the KDoc there for the one thing this deliberately does not undo.
+     *
+     * @param before the character as it was read at the top of the write's critical section.
+     * @param after the hit points just written.
+     */
+    private suspend fun clearDeathSavesForHeal(before: LocalCharacterEntity, after: Int) {
+        if (before.currentHp != 0 || after <= 0) return
+        if (before.deathSuccesses == 0 && before.deathFailures == 0) return
+        dao.setDeathSaves(creatureId, 0, 0, now())
     }
 
     override val inventory: StateFlow<InventoryBoard> =
@@ -524,6 +628,35 @@ class LocalOpenCharacter(
     }
 
     /**
+     * Direct entry on a wallet row (FR-22 decisions 5 and 6).
+     *
+     * The simplest of the four direct-entry paths, and worth saying why: a local purse is four
+     * integer columns on one row, so there is no property to create, no head stack to reason
+     * about and no in-flight call to sequence behind — the whole of `DefaultOpenCharacter`'s
+     * insert latch, its barrier and its `target − (quantity − headQuantity)` arithmetic exist to
+     * describe a sheet made of items, and this one is not. Set the column, journal the previous
+     * value, done.
+     *
+     * Floored at zero and uncapped, matching [adjustCoins].
+     */
+    override fun adjustCoins(row: WalletRow, target: ExactQuantity) {
+        dispatch {
+            val character = dao.find(creatureId)?.toDomain() ?: return@dispatch
+            val previous = character.coins.count(row.coin)
+            val next = target.value.coerceAtLeast(0)
+            if (next == previous) return@dispatch
+            val purse = character.coins.with(row.coin, next)
+            dao.setCoins(creatureId, purse.platinum, purse.gold, purse.silver, purse.copper, now())
+            journal(
+                kind = TrackerWriteKind.ITEM_SET,
+                targetName = row.coin.itemName,
+                amount = next,
+                undo = Undoable.Coins(row.coin, previous),
+            )
+        }
+    }
+
+    /**
      * No-op. 09 decision 4: local characters have no toggles — the form offers no field for
      * one, so [board] carries none and nothing can be tapped to reach this. It is here
      * because [OpenCharacter] names it, and doing nothing is the honest implementation of
@@ -599,6 +732,16 @@ class LocalOpenCharacter(
                 val purse = character.coins.with(entry.coin, entry.previous)
                 dao.setCoins(creatureId, purse.platinum, purse.gold, purse.silver, purse.copper, now())
             }
+            // Clamped like [Undoable.Row]'s: the ceiling is a rule of the game rather than of
+            // this character, so it cannot have drifted — but the write path clamps against the
+            // same constant and an undo that did not would be the one place a fourth pip could
+            // enter the database.
+            is Undoable.DeathSaves -> dao.setDeathSaves(
+                creatureId,
+                entry.previousSuccesses.coerceIn(0, DeathSaves.MAX),
+                entry.previousFailures.coerceIn(0, DeathSaves.MAX),
+                now(),
+            )
         }
         dao.touch(creatureId, now())
         updateUndoStack { it.drop(1) }
@@ -771,6 +914,23 @@ class LocalOpenCharacter(
             override fun withWriteId(id: Long) = copy(writeId = id)
         }
 
+        /**
+         * The one thing UNDO on a heal deliberately does not restore: cleared death-save
+         * marks.
+         *
+         * [previous] is only ever the hit-point total — [clearDeathSavesForHeal] runs inside
+         * the same critical section but writes no [Undoable] of its own, so undoing a heal off
+         * zero puts `currentHp` back to 0 and leaves the marks cleared rather than re-marking
+         * them.
+         *
+         * That is accepted, not overlooked. The marks were a fact of being at 0 HP; restoring
+         * `currentHp = 0` via undo re-shows an empty death-save block, and the player can
+         * re-mark it in the same taps that put it there the first time. Auto-restoring the
+         * marks — reading the pre-heal counts back out of an undo and writing them — would be
+         * this rule's cousin to the observer-storm one `clearDeathSavesForHeal` argues against:
+         * a second, independent write reacting to a state transition (this time UNDO) rather
+         * than being part of the gesture that caused it.
+         */
         data class HitPoints(val previous: Int, override val writeId: Long = 0) :
             Undoable, Pending {
             override fun withWriteId(id: Long) = copy(writeId = id)
@@ -787,6 +947,20 @@ class LocalOpenCharacter(
             Undoable, Pending {
             override fun withWriteId(id: Long) = copy(writeId = id)
         }
+
+        /**
+         * Both death-save counts before the write (FR-23 decision 13).
+         *
+         * A pair and not two entries, because the write is one `UPDATE` of two columns and an
+         * undo that put back only one of them would leave a state no tap could have produced.
+         */
+        data class DeathSaves(
+            val previousSuccesses: Int,
+            val previousFailures: Int,
+            override val writeId: Long = 0,
+        ) : Undoable, Pending {
+            override fun withWriteId(id: Long) = copy(writeId = id)
+        }
     }
 
     /**
@@ -801,6 +975,16 @@ class LocalOpenCharacter(
     private fun newRowId(): String = java.util.UUID.randomUUID().toString()
 
     companion object {
+        /**
+         * What a death-save write calls itself in the history sheet.
+         *
+         * One name for the pair, because the write is one `UPDATE` of both columns — a history
+         * entry naming only the half that moved would offer an UNDO that puts both back. The
+         * server path names its two properties separately for the opposite reason: there they
+         * are two documents and two calls.
+         */
+        const val DEATH_SAVES_NAME: String = "Death saves"
+
         /** See [accountId]: an id no account can hold, so a query keyed on it fails closed. */
         const val NO_ACCOUNT: String = ""
 

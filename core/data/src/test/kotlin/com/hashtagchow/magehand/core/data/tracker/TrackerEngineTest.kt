@@ -50,8 +50,12 @@ class TrackerEngineTest {
 
     @Test
     fun `no death save rows anywhere on the board`() {
-        // Death saves are attributeType 'spellSlot' with reset null — the single most
-        // important exclusion in 03's discovery rules.
+        // FR-23 decision 19 corrects what this comment used to claim. The exclusion that keeps
+        // these off the slot list is `reset == null`, and the old reading — "reset null *means*
+        // death save" — was a **coincidence**, retired by the 2026-08-24 probe. They are
+        // discovered by `variableName` instead, into `TrackerBoard.deathSaves`, and this
+        // assertion is unchanged and still worth having: whatever discovers them, they must not
+        // also appear as a spendable slot the player can tap.
         val everything = board.slots + board.resources + board.allItems +
             listOfNotNull(board.hp, board.tempHp)
         val deathSaves = everything.filter {
@@ -270,6 +274,103 @@ class TrackerEngineTest {
                "creatureProperties":[${properties.joinToString(",")}],
                "creatureVariables":[{"_id":"v1"}]}""",
         )
+
+    // -----------------------------------------------------------------------
+    // FR-23 death saves (docs/design/15-polish-batch.md decisions 18-19)
+    // -----------------------------------------------------------------------
+
+    /** The `variableName` rule, and the mark counts read out of the inverted storage. */
+    @Test
+    fun `the death save pair is discovered by variableName`() {
+        val saves = TrackerEngine.build(
+            sheet(
+                """{"_id":"ds1","type":"attribute","attributeType":"spellSlot",
+                    "variableName":"deathSaveSuccesses","name":"Succeeded Saves","total":3,"value":1}""",
+                """{"_id":"ds2","type":"attribute","attributeType":"spellSlot",
+                    "variableName":"deathSaveFails","name":"Failed Saves","total":3,"value":2}""",
+            ),
+        ).deathSaves
+
+        assertEquals("ds1", saves?.successesPropertyId)
+        assertEquals("ds2", saves?.failuresPropertyId)
+        assertEquals("`value` is the mark count, not what is left", 1, saves?.successes)
+        assertEquals(2, saves?.failures)
+    }
+
+    /**
+     * The discriminator is the **name**, not the sub-type.
+     *
+     * Decision 19 allows either `attribute` or `spellSlot` styling, so a sheet that types the
+     * pair as a plain attribute has to be found too — keying on `attributeType` would re-create
+     * exactly the fragility the variable-name rule replaced.
+     */
+    @Test
+    fun `a death save pair typed as a plain attribute is still discovered`() {
+        val saves = TrackerEngine.build(
+            sheet(
+                """{"_id":"ds1","type":"attribute","variableName":"deathSaveSuccesses","total":3,"value":0}""",
+                """{"_id":"ds2","type":"attribute","variableName":"deathSaveFails","total":3,"value":3}""",
+            ),
+        ).deathSaves
+
+        assertEquals(0, saves?.successes)
+        assertEquals(3, saves?.failures)
+        assertTrue("three failures is a derivation, not a flag", saves?.isDead == true)
+    }
+
+    /**
+     * Decision 18: *"no pair, no block, no error"*. Half a pair is not a pair — three failure
+     * pips would have nowhere to write.
+     */
+    @Test
+    fun `a sheet carrying only one half discovers no pair`() {
+        val saves = TrackerEngine.build(
+            sheet(
+                """{"_id":"ds1","type":"attribute","variableName":"deathSaveSuccesses","total":3,"value":1}""",
+            ),
+        ).deathSaves
+
+        assertNull(saves)
+    }
+
+    /** The Dummy's case, and the one that made decision 18 spell this out. */
+    @Test
+    fun `a sheet without the subtree discovers no pair and does not fail`() {
+        assertNull(TrackerEngine.build(sheet("""{"_id":"i1","type":"item","name":"Torch"}""")).deathSaves)
+    }
+
+    /**
+     * A count another client drifted past three is clamped on the way in.
+     *
+     * Nothing on the wire enforces the cap, and a fourth pip painted into a row of three is a
+     * rendering artefact rather than a fact about the character.
+     */
+    @Test
+    fun `death save marks are clamped into the three the row can show`() {
+        val saves = TrackerEngine.build(
+            sheet(
+                """{"_id":"ds1","type":"attribute","variableName":"deathSaveSuccesses","total":3,"value":7}""",
+                """{"_id":"ds2","type":"attribute","variableName":"deathSaveFails","total":3,"value":-2}""",
+            ),
+        ).deathSaves
+
+        assertEquals(3, saves?.successes)
+        assertEquals(0, saves?.failures)
+    }
+
+    /** A removed or deactivated half is not a half — the same `isSkipped` gate every row uses. */
+    @Test
+    fun `a removed death save property is not discovered`() {
+        val saves = TrackerEngine.build(
+            sheet(
+                """{"_id":"ds1","type":"attribute","variableName":"deathSaveSuccesses",
+                    "total":3,"value":1,"removed":true}""",
+                """{"_id":"ds2","type":"attribute","variableName":"deathSaveFails","total":3,"value":2}""",
+            ),
+        ).deathSaves
+
+        assertNull(saves)
+    }
 
     @Test
     fun `a toggle carrying enabled or disabled is the manual kind`() {

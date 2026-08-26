@@ -241,6 +241,10 @@ class DmViewViewModel @Inject constructor(
                 DmCardUiState(
                     creatureId = creatureId,
                     name = name,
+                    // FR-21: the portrait comes from the list, so it is on the card before the
+                    // subscription readies — a LOADING card shows the face, not a placeholder.
+                    portraitUrl = summary?.picture,
+                    monogram = summary?.monogram ?: "?",
                     grantedEditing = summary?.isEditableByMe == true,
                 ),
             )
@@ -256,6 +260,10 @@ class DmViewViewModel @Inject constructor(
                 // From the character list, not the subscription — see `toDmCardUiState`. It is
                 // what lets a decision-19 "Not available" card still name whose card it is.
                 name = name,
+                // FR-21 decision 1: the same two fields, from the same place and for the same
+                // reason. `picture` is already `avatarPicture ?: picture` (`toCharacterSummary`).
+                portraitUrl = summary?.picture,
+                monogram = summary?.monogram ?: "?",
                 tracker = tracker,
                 inventory = inventory,
                 // Decision 18's client-computed capability, straight off `characterList`. A

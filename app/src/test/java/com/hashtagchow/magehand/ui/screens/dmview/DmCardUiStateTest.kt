@@ -71,9 +71,15 @@ class DmCardUiStateTest {
         isEditableByMe: Boolean = true,
         editingEnabled: Boolean = false,
         permissionDenied: Boolean = false,
+        portraitUrl: String? = null,
     ) = toDmCardUiState(
         creatureId = "c1",
         name = "Sabriel",
+        // FR-21: defaulted to absent here because every test below is about a *state* rule and
+        // the portrait is inert to all of them — which is itself the claim the two portrait
+        // tests at the bottom of this file pin.
+        portraitUrl = portraitUrl,
+        monogram = "S",
         tracker = tracker,
         inventory = inventory,
         isEditableByMe = isEditableByMe,
@@ -450,4 +456,46 @@ class DmCardUiStateTest {
         "app/src/main/java/com/hashtagchow/magehand/ui/screens/dmview/DmCard.kt",
         "src/main/java/com/hashtagchow/magehand/ui/screens/dmview/DmCard.kt",
     ).readText()
+
+    // --- FR-21 portraits (15 decisions 1 and 4) ------------------------------
+
+    /**
+     * The portrait rides on the card, from `characterList` rather than from the subscription —
+     * the same source and the same argument as the name.
+     */
+    @Test
+    fun `a card carries the portrait url and the monogram it falls back to`() {
+        val card = card(portraitUrl = "https://example.invalid/face.png")
+        assertEquals("https://example.invalid/face.png", card.portraitUrl)
+        assertEquals("S", card.monogram)
+    }
+
+    /**
+     * **Not gated on availability**, unlike every tracker row on the card.
+     *
+     * A decision-19 "Not available" card is one whose subscription readied empty; the DM still
+     * knows whose card it is, and a face is the fastest way to say so on a six-card grid.
+     * Nothing about a portrait can be a stale tracker reading, which is the only reason those
+     * rows are dropped.
+     */
+    @Test
+    fun `an unavailable card still shows whose card it is`() {
+        val card = card(
+            tracker(hp = null, tone = ConnectionTone.LIVE),
+            portraitUrl = "https://example.invalid/face.png",
+        )
+        assertEquals(DmCardAvailability.NOT_AVAILABLE, card.availability)
+        assertEquals("https://example.invalid/face.png", card.portraitUrl)
+        assertEquals("S", card.monogram)
+    }
+
+    /**
+     * A sheet with no portrait is the ordinary case (every local character, and every DiceCloud
+     * sheet whose `avatarPicture` and `picture` are both blank), and it is not a state anything
+     * has to handle — the monogram was always underneath.
+     */
+    @Test
+    fun `a card with no portrait falls back to the monogram alone`() {
+        assertNull(card().portraitUrl)
+    }
 }

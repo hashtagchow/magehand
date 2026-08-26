@@ -41,6 +41,8 @@ import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.DeathSaves
+import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryItem
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
@@ -48,6 +50,7 @@ import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.WalletRow
 import com.hashtagchow.magehand.core.model.TrackedResource
+import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWrite
@@ -173,6 +176,43 @@ interface OpenCharacter {
      * no-op for this path — see `WriteQueue.takeCoalescedHead`.
      */
     fun adjustItem(item: TrackedResource, delta: Int)
+
+    /**
+     * Set an item's quantity to an absolute number — FR-22's direct entry
+     * (docs/design/15-polish-batch.md decisions 5 and 6).
+     *
+     * ### Why this is an overload and not a new intent
+     *
+     * Decision 9 is binding: *"no new DDP methods, no new intents — direct entry composes
+     * existing intents. If the wave believes otherwise it stops."* `WritePostureTest`'s third
+     * assertion is the catalog, and what it asserts is the **set of method names** on this
+     * interface. An overload adds no name, so the catalog is untouched by construction rather
+     * than by an edit that says it is — which is the property decision 9 is protecting. The
+     * player's intent is the one this method already named ("adjust this item"); only the way
+     * they expressed it is new, and [ExactQuantity] is what carries that difference.
+     *
+     * ### Why absolute and not `adjustItem(item, target - item.value)`
+     *
+     * That would have needed nothing new at all, and it is wrong in exactly the case direct
+     * entry is most useful. [adjustItem]'s latch means a burst of taps is *not* on the board
+     * yet — the KDoc above states it: *"taps that are accumulating are not visible until their
+     * flush goes out"* — so [TrackedResource.value] read a frame after a press-and-hold is a
+     * number the sheet has already left behind. A delta computed against it lands the row
+     * somewhere nobody asked for. An absolute target owes the board nothing.
+     *
+     * ### The latch treats a set as a barrier for its property
+     *
+     * A set submitted while an `adjustQuantity increment` is outstanding would be two writes to
+     * one property with no defined order — the server may apply them either way round, and the
+     * one the player watched themselves type is the one that must land last. So the latch holds
+     * the set until the property's own queue has drained: **pending deltas flush first, then the
+     * set goes out**, and taps arriving while a set is pending fold into it (the set is
+     * re-based) rather than being dispatched behind it. See `DefaultOpenCharacter.adjustItem`.
+     *
+     * @param target clamped at zero by the implementation. There is no ceiling: an item has no
+     *   maximum (see [TrackedResource.total]).
+     */
+    fun adjustItem(item: TrackedResource, target: ExactQuantity)
 
     /** What the inventory tab renders (docs/design/10-inventory.md). */
     val inventory: StateFlow<InventoryBoard>
@@ -311,6 +351,81 @@ interface OpenCharacter {
      * Multi-stack spending is FR-9 territory, with container reorganization.
      */
     fun adjustCoins(row: WalletRow, delta: Int)
+
+    /**
+     * Set a denomination to an absolute count — FR-22's direct entry on a wallet row
+     * (docs/design/15-polish-batch.md decisions 5 and 6).
+     *
+     * An overload for [adjustItem]'s reason, whole: decision 9 forbids a new intent, and the
+     * name set `WritePostureTest` pins is unchanged by a second shape of an existing one.
+     *
+     * ### The three branches, and how they differ from the stepper's
+     *
+     * - **An insert is outstanding.** The target folds into the latch exactly as a delta does,
+     *   and for a stronger reason: the row this method is handed is still absent, so nothing
+     *   here could name a property to set.
+     * - **The sheet has no such coin.** A positive target *creates* the item carrying the whole
+     *   count — one `insert`, not an insert followed by an adjust. A target of zero is dropped:
+     *   creating an empty coin item to express "you have no silver" would put a property on the
+     *   sheet that this release has no way to remove (10 decision 12).
+     * - **The sheet has the coin.** One `adjustQuantity {operation:'set'}` at
+     *   [WalletRow.propertyId].
+     *
+     * ### The head-stack limit, restated for a set
+     *
+     * [adjustCoins]' *"a decrement can only spend the head stack"* applies here in the shape a
+     * set takes. [WalletRow.quantity] sums every stack of the denomination; [WalletRow.propertyId]
+     * names the first, and one call cannot reach past it. So the head is set to
+     * `target − (quantity − headQuantity)` — the target minus what the unreachable stacks
+     * already hold — clamped at zero. On the ordinary single-stack sheet that is exactly
+     * `target`; on a split one the row lands on the target when it can and stops at the
+     * unreachable sum when it cannot, which is the same honest floor a decrement has.
+     *
+     * @param target clamped at zero. No ceiling — coins have none.
+     */
+    fun adjustCoins(row: WalletRow, target: ExactQuantity)
+
+    /**
+     * Set the death-save marks (FR-23, docs/design/15-polish-batch.md decisions 19–21).
+     *
+     * ### A new intent, authorized in writing
+     *
+     * Decision 21 overrides decision 9 **for FR-23 only**: *"FR-23 adds OpenCharacter intents
+     * `setDeathSaves(successes, failures)` … `WritePostureTest`'s catalog is DELIBERATELY
+     * extended per its own 'adding one is an edit to this list' rule."* FR-22 remains
+     * zero-new-intents. The allow-list edit is where the reasoning is repeated, because that is
+     * the file a future reader will be looking at when they wonder why the catalog grew.
+     *
+     * It could not have been composed from what was already there. `spend`/`restore` are
+     * increments against a row that goes *down*, `setHitPoints` names one property, and neither
+     * can express "these two properties, together, to these two absolutes" — which is what
+     * decision 20's clear is, and what one tap on a pip is.
+     *
+     * ### Absolute, idempotent, and clamped by the server
+     *
+     * Two `creatureProperties.damage {_id, operation:'set', value:n}` calls, one per property,
+     * in the **20-per-5-seconds** class (`WriteOp.Damage`'s own rate class — decision 19's fast
+     * lane, and the reason a burst of pip taps does not queue behind the 1 s gate everything
+     * else uses). The probe established the server clamps natively, so a value past three is
+     * refused there rather than corrupting the sheet; this clamps too, at the range
+     * `0..DeathSaves.MAX`, because a UI asking for seven is a bug worth stopping locally rather
+     * than discovering from a server that quietly fixed it.
+     *
+     * A half that is unchanged is **not sent**. Setting successes when only failures moved
+     * would burn a rate-limit slot and file a history entry for a change that did not happen —
+     * [setEquipped]'s no-op guard, applied to a pair.
+     *
+     * ### What this does NOT do
+     *
+     * It does not clear on its own. Decision 20 is emphatic that the client's `set 0` is
+     * attached to **a heal write this client performs**, never fired from observed state — see
+     * `DefaultOpenCharacter.changeHitPoints` for the observer-storm argument. A caller wanting
+     * "clear them" calls this with `0, 0`, which is a player's tap, not a reaction.
+     *
+     * A character whose sheet carries no death-save pair drops the call. There is nothing to
+     * write to and decision 18 has already established that such sheets are ordinary.
+     */
+    fun setDeathSaves(successes: Int, failures: Int)
 
     /** Flip a condition toggle (a chip tapped). */
     fun toggle(condition: ConditionToggle)
@@ -645,13 +760,129 @@ internal class DefaultOpenCharacter(
         val hp = session.board.value.hp ?: return
         when {
             delta < 0 -> session.writeQueue.submit(WriteOp.takeDamage(hp, -delta))
-            delta > 0 -> session.writeQueue.submit(WriteOp.heal(hp, delta))
+            delta > 0 -> {
+                session.writeQueue.submit(WriteOp.heal(hp, delta))
+                clearDeathSavesForHeal(from = hp.value, to = (hp.value + delta).coerceAtMost(hp.total))
+            }
         }
     }
 
     override fun setHitPoints(value: Int) {
         val hp = session.board.value.hp ?: return
-        session.writeQueue.submit(WriteOp.setValue(hp, value.coerceIn(0, hp.total)))
+        val desired = value.coerceIn(0, hp.total)
+        session.writeQueue.submit(WriteOp.setValue(hp, desired))
+        clearDeathSavesForHeal(from = hp.value, to = desired)
+    }
+
+    /**
+     * FR-23 decision 20: **the reset is ours, and only on our own heal.**
+     *
+     * The server never clears death saves — the probe found the reset triggers are children of
+     * the "0 HP?" toggle and event-gated, so nothing fires on a plain `damage` call. So MageHand
+     * does it, and the whole decision is *where the code that does it lives*.
+     *
+     * ### Why this hangs off the write path and not off the board
+     *
+     * The obvious implementation is a collector: watch `board.hp`, and when it crosses 0 →
+     * positive, send `set 0` to both properties. It is also the one decision 20 forbids in
+     * capitals, and the reason is the DM dashboard. **N clients observing one sheet would each
+     * see the same transition and each send the same two writes** — a party of six with the
+     * dashboard open is twelve redundant calls against a 20-per-5-second bucket the whole table
+     * shares, every time anybody is healed off zero. Worse, they are *unattributable*: nothing
+     * in the burst says which client decided, so a rate-limit refusal lands on a write no user
+     * made.
+     *
+     * Attaching it to the write means exactly one client can ever fire it — the one whose user
+     * tapped heal — and it fires once, in the same gesture. Its undo entry semantics are
+     * deliberately *not* the same as everything else that tap did: the clears are submitted
+     * without a receipt of their own (`WriteQueue.submitWithoutReceipt`), so they file no
+     * history row and push nothing onto the undo stack. UNDO on the snackbar therefore reverses
+     * the heal — the entry the tap actually produced — and not the marks; see
+     * [clearDeathSavesForHeal] for the rest of that argument.
+     *
+     * ### The honest cost, stated
+     *
+     * A sheet healed off zero **by another client** keeps its marks. Decision 20 accepts that
+     * and says why: *"a stale-marks sheet healed by another client shows its marks honestly
+     * until someone clears them (pips are tappable; one tap fixes)"*. Showing three failures on
+     * a character who is up is wrong-looking but *true* — it is what the sheet says — and the
+     * alternative is the storm above. The block stays reachable because it renders on HP 0 and
+     * the pips take taps whenever it is on screen.
+     *
+     * ### The condition
+     *
+     * `from == 0 && to > 0`. Not `to > 0` alone: healing 4 → 9 has no death saves to clear and
+     * would file two no-op writes per heal for the whole game. `from` is the board's value,
+     * which is overlay-adjusted — the same number the player is looking at — so a second heal
+     * arriving while the first is in flight sees a non-zero `from` and does not re-send.
+     *
+     * ### Why this does not call [setDeathSaves]
+     *
+     * `setDeathSaves` submits with a receipt — a history row and, since `setValue` carries an
+     * inverse, an undo-stack push. Two of those land *after* the heal's own submission and the
+     * undo stack is LIFO: UNDO would reverse the more recent clear instead of the heal, and the
+     * snackbar's `history.first()` would read as a death-save line instead of the heal it was.
+     * The clears still have to reach the wire, so they go through
+     * `WriteQueue.submitWithoutReceipt` directly — same two `damage {set}` calls, no receipt of
+     * their own, exactly as `LocalOpenCharacter.clearDeathSavesForHeal` writes its columns
+     * inside the heal's own critical section with no journal entry of their own.
+     */
+    private fun clearDeathSavesForHeal(from: Int, to: Int) {
+        if (from != 0 || to <= 0) return
+        val saves = session.board.value.deathSaves ?: return
+        if (saves.successes == 0 && saves.failures == 0) return
+        submitDeathSaves(saves, successes = 0, failures = 0, recordUndo = false)
+    }
+
+    /**
+     * Two `damage {set}` calls, one per property, and only for the halves that moved.
+     *
+     * The op is `WriteOp.setValue` against a synthetic [TrackedResource] carrying the property's
+     * **current** mark count, which is what makes the undo entry a real inverse: `setValue`
+     * builds its own `undo` from `resource.value`, so UNDO on the snackbar puts the pip back
+     * where it was rather than clearing the row.
+     *
+     * `TrackerKind.RESOURCE` and not `ITEM`: the branch inside `setValue` chooses `damage` for
+     * everything that is not an item, and `damage` is the method decision 19 specifies. The kind
+     * is otherwise inert here — nothing renders this row — but naming it wrongly would silently
+     * route the write to `adjustQuantity`, which is a different method against a property that
+     * has no quantity.
+     */
+    override fun setDeathSaves(successes: Int, failures: Int) {
+        val saves = session.board.value.deathSaves ?: return
+        submitDeathSaves(saves, successes, failures, recordUndo = true)
+    }
+
+    /**
+     * @param recordUndo `true` for a player's own tap on a pip ([setDeathSaves]), which gets a
+     *   real receipt — a history row and an undo entry. `false` for
+     *   [clearDeathSavesForHeal]'s pair, which must reach the wire without minting either: see
+     *   that function's KDoc for why.
+     */
+    private fun submitDeathSaves(saves: DeathSaves, successes: Int, failures: Int, recordUndo: Boolean) {
+        val nextSuccesses = successes.coerceIn(0, DeathSaves.MAX)
+        val nextFailures = failures.coerceIn(0, DeathSaves.MAX)
+
+        if (nextSuccesses != saves.successes) {
+            submitDeathSave(saves.successesPropertyId, DEATH_SAVE_SUCCESS_NAME, saves.successes, nextSuccesses, recordUndo)
+        }
+        if (nextFailures != saves.failures) {
+            submitDeathSave(saves.failuresPropertyId, DEATH_SAVE_FAILURE_NAME, saves.failures, nextFailures, recordUndo)
+        }
+    }
+
+    private fun submitDeathSave(propertyId: String, name: String, current: Int, desired: Int, recordUndo: Boolean) {
+        val op = WriteOp.setValue(
+            TrackedResource(
+                propertyId = propertyId,
+                kind = TrackerKind.RESOURCE,
+                name = name,
+                value = current,
+                total = DeathSaves.MAX,
+            ),
+            desired,
+        )
+        if (recordUndo) session.writeQueue.submit(op) else session.writeQueue.submitWithoutReceipt(op)
     }
 
     /**
@@ -667,8 +898,25 @@ internal class DefaultOpenCharacter(
      *
      * [pending] is a signed net, for [CoinInsert.pending]'s reason: a hold on `−` followed by a
      * tap on `+` inside one window is an ordinary thing to do.
+     *
+     * [pendingSet] is FR-22's barrier (decision 6). Non-null means *"a direct entry is waiting
+     * for this property's queue to drain"*: the accumulated [pending] deltas go out first, then
+     * this absolute value goes out last and wins. It is an absolute rather than another signed
+     * net because that is the whole point of the shape — see [adjustItem]'s `ExactQuantity`
+     * overload.
+     *
+     * [valueBeforeSet] is what the row will read *just before* [pendingSet] lands — i.e. the
+     * predicted quantity at the moment the direct entry was armed. It exists because a `set`'s
+     * inverse is "the value it replaced", and by the time the set is dispatched the board is
+     * several flushes out of date; without this the UNDO on the snackbar would restore a number
+     * the player never saw. Meaningless while [pendingSet] is null.
      */
-    private class QuantityFlush(var predicted: Int, var pending: Int = 0)
+    private class QuantityFlush(
+        var predicted: Int,
+        var pending: Int = 0,
+        var pendingSet: Int? = null,
+        var valueBeforeSet: Int = 0,
+    )
 
     private val quantityLock = Any()
 
@@ -682,7 +930,7 @@ internal class DefaultOpenCharacter(
     private val quantityFlushes = HashMap<String, QuantityFlush>()
 
     /** What [adjustItem] decided to do, resolved under [quantityLock] and acted on outside it. */
-    private enum class QuantityAction { FLUSH, ACCUMULATED, DROP }
+    private enum class QuantityAction { FLUSH, FLUSH_SET, ACCUMULATED, DROP }
 
     /**
      * The item steppers, both boards (04 §3 and 10 decision 3).
@@ -724,8 +972,20 @@ internal class DefaultOpenCharacter(
             when {
                 bounded == 0 -> QuantityAction.DROP
                 latch != null -> {
-                    latch.pending += bounded
-                    latch.predicted += bounded
+                    // FR-22: a tap arriving while a direct entry is queued re-bases the *set*
+                    // rather than being dispatched behind it. Sending it separately would put
+                    // two writes for one property back on the wire, which is the whole thing
+                    // the barrier exists to prevent — and the player who typed 12 and then
+                    // tapped `+` means 13, not "12, and separately one more".
+                    val queuedSet = latch.pendingSet
+                    if (queuedSet != null) {
+                        val rebased = (queuedSet + bounded).coerceAtLeast(0)
+                        latch.pendingSet = rebased
+                        latch.predicted = rebased
+                    } else {
+                        latch.pending += bounded
+                        latch.predicted += bounded
+                    }
                     QuantityAction.ACCUMULATED
                 }
 
@@ -740,6 +1000,64 @@ internal class DefaultOpenCharacter(
         when (action) {
             QuantityAction.ACCUMULATED, QuantityAction.DROP -> Unit
             QuantityAction.FLUSH -> flushItemQuantity(item, toFlush)
+            // Unreachable from this overload — the delta branch never asks for a set — and
+            // handled rather than left to `else` so the `when` stays exhaustive by name.
+            QuantityAction.FLUSH_SET -> flushItemQuantitySet(item, toFlush)
+        }
+    }
+
+    /**
+     * Direct entry on an item quantity (FR-22 decisions 5 and 6), through the same latch.
+     *
+     * ### The barrier, stated as a rule
+     *
+     * The interface KDoc says *"pending deltas flush first, then the set goes out"*. Two cases
+     * implement it:
+     *
+     * - **The slot is free.** Nothing is on the wire for this property, so there is nothing to
+     *   wait behind: the set is dispatched immediately and claims the slot, which is what stops
+     *   a tap arriving one millisecond later from racing it.
+     * - **The slot is held.** The target is parked in [QuantityFlush.pendingSet] and
+     *   [settleItemQuantity] releases it *after* the accumulated deltas have gone — the deltas
+     *   are the player's earlier taps and dropping them would be a silent loss, while the set is
+     *   their latest word and has to land last.
+     *
+     * [QuantityFlush.predicted] moves to the target either way, because that is what the sheet
+     * will hold once everything dispatched and parked has landed — the invariant every clamp in
+     * this class reads. It is the reason a `−` tap arriving behind a set of 3 clamps at 3 and
+     * not at whatever the board still says.
+     *
+     * A target equal to the predicted quantity is **not** a no-op and is deliberately still
+     * sent when the slot is free. [setEquipped]'s no-op guard is safe because a flag the server
+     * already holds cannot have drifted; a *quantity* is exactly the field that drifts — the
+     * player is typing a number precisely because the sheet and the table disagree — so
+     * refusing the write on the strength of a possibly-stale board would make the one gesture
+     * that exists to correct drift the one gesture that cannot.
+     */
+    override fun adjustItem(item: TrackedResource, target: ExactQuantity) {
+        val desired = target.value.coerceAtLeast(0)
+
+        var toFlush = 0
+        val action = synchronized(quantityLock) {
+            val latch = quantityFlushes[item.propertyId]
+            if (latch != null) {
+                // Recorded before `predicted` moves: this is the number the set replaces, and
+                // therefore the number its UNDO restores. A second direct entry arriving before
+                // the first has flushed keeps the *original* — the row only ever moved once.
+                if (latch.pendingSet == null) latch.valueBeforeSet = latch.predicted
+                latch.pendingSet = desired
+                latch.predicted = desired
+                QuantityAction.ACCUMULATED
+            } else {
+                quantityFlushes[item.propertyId] = QuantityFlush(predicted = desired)
+                toFlush = desired
+                QuantityAction.FLUSH_SET
+            }
+        }
+
+        when (action) {
+            QuantityAction.ACCUMULATED, QuantityAction.DROP, QuantityAction.FLUSH -> Unit
+            QuantityAction.FLUSH_SET -> flushItemQuantitySet(item, toFlush)
         }
     }
 
@@ -781,6 +1099,26 @@ internal class DefaultOpenCharacter(
     }
 
     /**
+     * Sends one `adjustQuantity {operation:'set'}`, with the latch for this property already
+     * held by the caller — [flushItemQuantity]'s twin for FR-22's absolute shape.
+     *
+     * The op is `WriteOp.setValue`, which is the *same* factory the HP number pad's Set button
+     * has used since WP7 and which carries a real inverse (the value the row held), so a direct
+     * entry gets the same UNDO snackbar every other write does. `WriteOp.AdjustQuantity` gives a
+     * `set` no `coalesceKey`, so it cannot merge with anything — which is the queue-side half of
+     * the barrier: the latch guarantees at most one op per property is in flight, and the null
+     * key guarantees the queue will not fold a later `increment` into this one on its way out.
+     *
+     * [item] is passed with its **predicted** value rather than the board's, so the inverse the
+     * op records is the quantity the sheet will actually hold when the set lands. Handing it the
+     * stale board value would file an undo that restores a number the player never saw.
+     */
+    private fun flushItemQuantitySet(item: TrackedResource, desired: Int) {
+        val flush = session.writeQueue.submit(WriteOp.setValue(item, desired))
+        scope.launch { settleItemQuantity(item, flush) }
+    }
+
+    /**
      * Waits out the flush, then either re-arms the latch with whatever piled up behind it or
      * releases it.
      *
@@ -805,6 +1143,14 @@ internal class DefaultOpenCharacter(
      * The slot is released on **every** exit, cancellation included, for the reason spelled out
      * on [settleCoinInsert]: a stranded latch would disable this item's stepper for the rest of
      * the session with nothing on screen to explain it.
+     *
+     * ### The order the re-arm takes, which is FR-22's barrier
+     *
+     * Deltas before sets, always (decision 6). A direct entry parked in
+     * [QuantityFlush.pendingSet] is the player's most recent word about this row, so it has to
+     * be the *last* thing on the wire; the deltas ahead of it are earlier taps that were
+     * accepted and must not be silently dropped. Each release re-arms the slot, so a set parked
+     * behind a burst waits out however many flushes the burst takes and then goes out alone.
      */
     private suspend fun settleItemQuantity(item: TrackedResource, flush: Deferred<Unit>) {
         var slotReleased = false
@@ -820,24 +1166,46 @@ internal class DefaultOpenCharacter(
             }
 
             var next = 0
+            var setUndoBase = 0
             val rearmed = synchronized(quantityLock) {
                 val latch = quantityFlushes[item.propertyId]
                 when {
-                    latch == null -> false
-                    !landed || latch.pending == 0 -> {
+                    latch == null -> QuantityAction.DROP
+                    // A failed flush drops everything behind it, the parked set included — see
+                    // the KDoc. `predicted` was describing a sheet that does not exist, so an
+                    // absolute built on top of it is no more trustworthy than a delta.
+                    !landed -> {
                         quantityFlushes.remove(item.propertyId)
-                        false
+                        QuantityAction.DROP
+                    }
+
+                    // FR-22's barrier, released in order: deltas first…
+                    latch.pending != 0 -> {
+                        next = latch.pending
+                        latch.pending = 0
+                        QuantityAction.FLUSH
+                    }
+
+                    // …then the set, last, so it is the write that decides the number.
+                    latch.pendingSet != null -> {
+                        next = latch.pendingSet ?: 0
+                        setUndoBase = latch.valueBeforeSet
+                        latch.pendingSet = null
+                        QuantityAction.FLUSH_SET
                     }
 
                     else -> {
-                        next = latch.pending
-                        latch.pending = 0
-                        true
+                        quantityFlushes.remove(item.propertyId)
+                        QuantityAction.DROP
                     }
                 }
             }
             slotReleased = true
-            if (rearmed) flushItemQuantity(item, next)
+            when (rearmed) {
+                QuantityAction.FLUSH -> flushItemQuantity(item, next)
+                QuantityAction.FLUSH_SET -> flushItemQuantitySet(item.copy(value = setUndoBase), next)
+                QuantityAction.ACCUMULATED, QuantityAction.DROP -> Unit
+            }
         } finally {
             if (!slotReleased) synchronized(quantityLock) { quantityFlushes.remove(item.propertyId) }
         }
@@ -956,7 +1324,18 @@ internal class DefaultOpenCharacter(
      * arrived since. [pending] is a signed net, because a hold on `+` followed by a tap on `−`
      * inside the same window is a perfectly ordinary thing to do.
      */
-    private class CoinInsert(var pending: Int = 0)
+    private class CoinInsert(var pending: Int = 0) {
+        /**
+         * FR-22's barrier for the wallet (decision 6): a direct entry that arrived while the
+         * `insert` was still on the wire.
+         *
+         * Non-null wins over [pending] when the latch releases — the two are the same player's
+         * taps and a typed number is their conclusion, not another increment. It cannot simply
+         * be applied at arrival time for the reason [adjustCoins]' three-way branch already
+         * gives: until the insert lands there is no property id to set.
+         */
+        var pendingSet: Int? = null
+    }
 
     private val coinLock = Any()
 
@@ -1001,7 +1380,15 @@ internal class DefaultOpenCharacter(
             val outstanding = coinInserts[row.coin]
             when {
                 outstanding != null -> {
-                    outstanding.pending += delta
+                    // A stepper tap behind a parked direct entry re-bases it rather than being
+                    // summed separately, exactly as `adjustItem` does: the player typed 12 and
+                    // then pressed `+`, which is 13 — not "set 12, and also add one".
+                    val queuedSet = outstanding.pendingSet
+                    if (queuedSet != null) {
+                        outstanding.pendingSet = (queuedSet + delta).coerceAtLeast(0)
+                    } else {
+                        outstanding.pending += delta
+                    }
                     CoinAction.ACCUMULATED
                 }
 
@@ -1019,6 +1406,100 @@ internal class DefaultOpenCharacter(
             CoinAction.INSERT -> insertCoin(row.coin, delta)
             CoinAction.ADJUST -> adjustExistingCoin(row, delta)
         }
+    }
+
+    /**
+     * Direct entry on a wallet row (FR-22 decisions 5 and 6) — [adjustCoins]' branch, re-read
+     * as an absolute.
+     *
+     * The latch is consulted first for the identical reason the delta version gives: while an
+     * insert is outstanding the row is still absent, so there is no id to set, and a tap that
+     * slipped past would double-count against the flush.
+     *
+     * ### Why an existing row needs no barrier of its own
+     *
+     * Unlike [adjustItem], the wallet's ordinary path has never held a latch — `adjustQuantity`
+     * increments go straight to the [WriteQueue] and rely on its coalescing. That is enough
+     * here, and it is worth saying why rather than adding a second latch out of symmetry: the
+     * queue is FIFO per property and `WriteOp.AdjustQuantity` gives a `set` **no coalesce key**,
+     * so a set cannot merge with a neighbouring increment and cannot be reordered around one.
+     * Increments queued *before* the set apply first and are then overwritten by it — which is
+     * exactly what the player asked for — and increments arriving *after* it are taps they made
+     * after typing, which belong on top. The barrier `adjustItem` needs is a barrier against its
+     * own latch, and this path has none.
+     */
+    override fun adjustCoins(row: WalletRow, target: ExactQuantity) {
+        val desired = target.value.coerceAtLeast(0)
+
+        val action = synchronized(coinLock) {
+            val outstanding = coinInserts[row.coin]
+            when {
+                outstanding != null -> {
+                    outstanding.pendingSet = desired
+                    CoinAction.ACCUMULATED
+                }
+
+                row.propertyId != null -> CoinAction.ADJUST
+                // No property, and nothing to create: an item holding zero coins is a property
+                // this release cannot delete (10 decision 12), filed to express a fact the four
+                // always-present wallet rows already state.
+                desired == 0 -> CoinAction.DROP
+                else -> {
+                    coinInserts[row.coin] = CoinInsert()
+                    CoinAction.INSERT
+                }
+            }
+        }
+
+        when (action) {
+            CoinAction.ACCUMULATED, CoinAction.DROP -> Unit
+            // The insert carries the whole typed count in one call — the same "one item, not one
+            // per repeat" guarantee [insertCoin] makes for a hold.
+            CoinAction.INSERT -> insertCoin(row.coin, desired)
+            CoinAction.ADJUST -> setExistingCoin(row, desired)
+        }
+    }
+
+    /**
+     * `adjustQuantity {operation:'set'}` against the stack [WalletRow.propertyId] names.
+     *
+     * ### The head-stack arithmetic, and why the target is not written straight through
+     *
+     * [adjustExistingCoin]'s clamp exists because [WalletRow.quantity] sums every stack of a
+     * denomination while [WalletRow.propertyId] names only the first. The same fact bites a
+     * `set` harder: writing "50" at the head of a 5 + 100 split leaves the row reading 150, so a
+     * player who typed 50 would *gain* money. So the head is set to the target minus what the
+     * stacks this call cannot reach already hold, floored at zero.
+     *
+     * On the ordinary sheet — one stack per denomination — `quantity == headQuantity` and this
+     * is the target, exactly. On a split one the row lands on the target when the head can carry
+     * it and stops at the unreachable sum when it cannot, which is the same honest floor a
+     * decrement has and the same limit FR-9's multi-property write would be needed to lift.
+     */
+    private fun setExistingCoin(row: WalletRow, desired: Int) {
+        val propertyId = row.propertyId ?: return
+        val unreachable = (row.quantity - row.headQuantity).coerceAtLeast(0)
+        val head = (desired - unreachable).coerceAtLeast(0)
+        session.writeQueue.submit(
+            WriteOp.AdjustQuantity(
+                propertyId = propertyId,
+                operation = WriteOperation.SET,
+                value = head,
+                resultingValue = head,
+                // The head's own previous count, so UNDO restores the stack this call touched
+                // rather than the row's total — which no single `adjustQuantity` could write.
+                undo = WriteOp.AdjustQuantity(
+                    propertyId = propertyId,
+                    operation = WriteOperation.SET,
+                    value = row.headQuantity,
+                    resultingValue = row.headQuantity,
+                    targetName = row.coin.itemName,
+                    intent = TrackerWriteKind.ITEM_SET,
+                ),
+                targetName = row.coin.itemName,
+                intent = TrackerWriteKind.ITEM_SET,
+            ),
+        )
     }
 
     /**
@@ -1151,9 +1632,21 @@ internal class DefaultOpenCharacter(
             }
 
             val row = if (created) awaitCreatedCoinRow(coin) else null
-            val pending = synchronized(coinLock) { coinInserts.remove(coin)?.pending ?: 0 }
+            val latch = synchronized(coinLock) { coinInserts.remove(coin) }
             slotReleased = true
-            if (row != null && pending != 0) adjustCoins(row, pending)
+            if (row != null && latch != null) {
+                // FR-22's barrier for the wallet: a parked direct entry is the player's
+                // conclusion and **replaces** the deltas that accumulated with it, rather than
+                // queueing behind them. That differs from `adjustItem`'s order deliberately —
+                // there the deltas are already reflected in a running `predicted` that the set
+                // was clamped against, so dropping them would lose taps; here nothing has been
+                // dispatched at all and the typed number is a complete statement of the count.
+                val queuedSet = latch.pendingSet
+                when {
+                    queuedSet != null -> adjustCoins(row, ExactQuantity(queuedSet))
+                    latch.pending != 0 -> adjustCoins(row, latch.pending)
+                }
+            }
         } finally {
             if (!slotReleased) synchronized(coinLock) { coinInserts.remove(coin) }
         }
@@ -1267,3 +1760,16 @@ private val FAILURE_IDS = java.util.concurrent.atomic.AtomicLong(0)
  * denomination for the rest of the session.
  */
 private const val COIN_INSERT_SETTLE_MILLIS: Long = 2_000
+
+/**
+ * What a death-save write calls itself in the history sheet and the undo snackbar.
+ *
+ * Not `strings.xml`, and that is the standing split rather than an oversight: `WriteOp.targetName`
+ * is `:core:data`'s and is used the same way `WalletRow.coin.itemName` already is — the row's own
+ * name, carried so the snackbar can say *what* moved instead of quoting a Meteor id. The sheet's
+ * own property names are not read for it because the pair is discovered by `variableName` and a
+ * sheet is free to call the properties anything (decision 19); a fixed pair of words is the one
+ * thing that cannot come back as "Succeeded Saves (do not rename)".
+ */
+private const val DEATH_SAVE_SUCCESS_NAME = "Death save successes"
+private const val DEATH_SAVE_FAILURE_NAME = "Death save failures"

@@ -35,6 +35,7 @@ import com.hashtagchow.magehand.core.data.tracker.CreatureSheet
 import com.hashtagchow.magehand.core.data.write.FakeDdpMethodCaller
 import com.hashtagchow.magehand.core.ddp.DdpError
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -162,6 +163,27 @@ class DefaultOpenCharacterWriteTest {
 
     private fun item(id: String, name: String, quantity: Int = 1, extra: String = "") =
         """{"_id":"$id","type":"item","name":"$name","quantity":$quantity,"order":1$extra}"""
+
+    /** The HP attribute, discovered by `variableName` (03 §3). */
+    private fun hp(current: Int, total: Int = 20) =
+        """{"_id":"hp1","type":"attribute","attributeType":"healthBar",
+            "variableName":"hitPoints","name":"Hit Points","total":$total,"value":$current}"""
+
+    /**
+     * One half of FR-23's pair, discovered by `variableName` (decision 19).
+     *
+     * `value` is the **mark count**, not what is left — the inversion decision 19 records. The
+     * `attributeType` is `spellSlot` because that is what the probe's sheets carry, and it is
+     * deliberately not what discovery keys on.
+     */
+    private fun deathSave(id: String, variableName: String, marks: Int) =
+        """{"_id":"$id","type":"attribute","attributeType":"spellSlot",
+            "variableName":"$variableName","name":"$variableName","total":3,"value":$marks}"""
+
+    private fun deathSaves(successes: Int, failures: Int) = arrayOf(
+        deathSave("ds-ok", "deathSaveSuccesses", successes),
+        deathSave("ds-no", "deathSaveFails", failures),
+    )
 
     private fun coin(id: String, kind: CoinKind, quantity: Int, order: Int = 1) =
         """{"_id":"$id","type":"item","name":"${kind.itemName}","quantity":$quantity,
@@ -1049,6 +1071,402 @@ class DefaultOpenCharacterWriteTest {
         assertTrue(h.caller.calls.isEmpty())
         assertTrue(h.character.writeHistory.value.isEmpty())
     }
+
+
+    // -----------------------------------------------------------------------
+    // FR-22 direct entry: the absolute shape and the latch barrier
+    // (docs/design/15-polish-batch.md decisions 6 and 7)
+    // -----------------------------------------------------------------------
+
+    /**
+     * The plain case: nothing outstanding, so the set goes straight out as one
+     * `adjustQuantity {operation:'set'}`.
+     *
+     * `set` and not an `increment` computed from the board is the whole of decision 6's
+     * "absolute-shaped", and it is what the next two tests need to be true before they mean
+     * anything.
+     */
+    @Test
+    fun `a direct entry on an item sends one adjustQuantity set`() = runTest {
+        val h = harness(item("i1", "Torch", quantity = 5))
+
+        h.character.adjustItem(trackedItem("i1", "Torch", 5), ExactQuantity(12))
+        advanceUntilIdle()
+
+        val call = h.callsTo(ADJUST).single()
+        assertEquals("set", call.text("operation"))
+        assertEquals(12, call.int("value"))
+    }
+
+    /**
+     * Decision 7: quantities floor at zero. A negative target is not an error and is not
+     * dropped — the dialog cannot produce one (its field takes digits only), so this is the
+     * belt to that field's braces, and clamping is the same direction every other quantity
+     * clamp in this class takes.
+     */
+    @Test
+    fun `a direct entry below zero is clamped to zero rather than sent`() = runTest {
+        val h = harness(item("i1", "Torch", quantity = 5))
+
+        h.character.adjustItem(trackedItem("i1", "Torch", 5), ExactQuantity(-4))
+        advanceUntilIdle()
+
+        assertEquals(0, h.callsTo(ADJUST).single().int("value"))
+    }
+
+    /**
+     * **Decision 6's barrier, and the reason it exists.**
+     *
+     * A press-and-hold is still settling when the player types a number. The deltas that piled
+     * up behind the in-flight flush must still go out — they are taps the app accepted — and the
+     * set must go out **after** them, because it is the player's latest word and the server
+     * would otherwise be free to apply the two in either order.
+     *
+     * The assertion is on the *sequence*: increments first, one `set` last, and the set carries
+     * the typed number rather than anything derived from the board (which by then is several
+     * flushes stale — the exact failure a `target - item.value` implementation would have).
+     */
+    @Test
+    fun `a direct entry arriving mid-hold flushes the pending deltas first and lands last`() = runTest {
+        val h = harness(item("i1", "Torch", quantity = 5))
+        val row = trackedItem("i1", "Torch", 5)
+        // The in-flight window, held open — the same gate HIGH-1's burst test uses, and the
+        // only way to observe a latch whose whole job is to exist between a call going out and
+        // that call landing.
+        val onTheWire = CompletableDeferred<Unit>()
+        h.caller.gate = onTheWire
+
+        h.character.adjustItem(row, -1)
+        advanceUntilIdle()
+        assertEquals("the first tap is on the wire", 1, h.callsTo(ADJUST).size)
+
+        // A second stepper repeat, then the player gives up and types the number they want.
+        h.character.adjustItem(row, -1)
+        h.character.adjustItem(row, ExactQuantity(9))
+        advanceUntilIdle()
+        assertEquals("one op per property on the wire at a time", 1, h.callsTo(ADJUST).size)
+
+        onTheWire.complete(Unit)
+        advanceUntilIdle()
+
+        val calls = h.callsTo(ADJUST)
+        assertEquals(3, calls.size)
+        assertEquals("increment", calls[0].text("operation"))
+        assertEquals("the accumulated tap is not dropped", "increment", calls[1].text("operation"))
+        assertEquals("the typed number is the last word", "set", calls[2].text("operation"))
+        assertEquals(9, calls[2].int("value"))
+    }
+
+    /**
+     * A stepper tap arriving **behind** a parked set re-bases it instead of being dispatched
+     * separately.
+     *
+     * The player typed 9 and then pressed `+`, which means 10 — not "set 9, and separately add
+     * one", which is two calls where one will do and two entries in the history for one
+     * decision. One `set` carrying 10 is the whole assertion.
+     */
+    @Test
+    fun `a stepper tap behind a parked direct entry re-bases it into one set`() = runTest {
+        val h = harness(item("i1", "Torch", quantity = 5))
+        val row = trackedItem("i1", "Torch", 5)
+
+        val onTheWire = CompletableDeferred<Unit>()
+        h.caller.gate = onTheWire
+
+        h.character.adjustItem(row, -1)               // claims the latch
+        advanceUntilIdle()
+        h.character.adjustItem(row, ExactQuantity(9)) // parks a set behind it
+        h.character.adjustItem(row, +1)               // re-bases the parked set to 10
+        onTheWire.complete(Unit)
+        advanceUntilIdle()
+
+        val sets = h.callsTo(ADJUST).filter { it.text("operation") == "set" }
+        assertEquals(1, sets.size)
+        assertEquals(10, sets.single().int("value"))
+    }
+
+    /**
+     * The wallet's absolute path on a denomination the sheet already carries.
+     *
+     * The head-stack arithmetic is the interesting half and it is trivial here on purpose —
+     * one stack, so `target - (quantity - headQuantity)` is the target. The split-stack case is
+     * the next test, and MED-2's decrement clamp is what this generalizes.
+     */
+    @Test
+    fun `a direct entry on a present coin row sets the head stack to the typed number`() = runTest {
+        val h = harness(coin("g1", CoinKind.GOLD, 12))
+
+        h.character.adjustCoins(h.walletRow(CoinKind.GOLD), ExactQuantity(50))
+        advanceUntilIdle()
+
+        val call = h.callsTo(ADJUST).single()
+        assertEquals("g1", call.text("_id"))
+        assertEquals("set", call.text("operation"))
+        assertEquals(50, call.int("value"))
+    }
+
+    /**
+     * **MED-2's shape, re-derived for a set.**
+     *
+     * A 5 gp stack followed by a 100 gp stack reads 105 in the wallet, and one
+     * `adjustQuantity` can only reach the first. Writing the typed 50 straight at the head
+     * would leave the row reading 150 — the player would *gain* money by asking for less — so
+     * the head takes the target minus what the unreachable stacks already hold, floored at
+     * zero. Here that is `50 - 100 = -50`, floored to 0: the head empties and the row stops at
+     * the 100 this app cannot reach, which is the same honest floor a decrement has.
+     */
+    @Test
+    fun `a direct entry on a split coin row subtracts the stacks it cannot reach`() = runTest {
+        val h = harness(
+            coin("g1", CoinKind.GOLD, 5, order = 1),
+            coin("g2", CoinKind.GOLD, 100, order = 2),
+        )
+
+        h.character.adjustCoins(h.walletRow(CoinKind.GOLD), ExactQuantity(50))
+        advanceUntilIdle()
+
+        val call = h.callsTo(ADJUST).single()
+        assertEquals("the head stack, not the row's total", "g1", call.text("_id"))
+        assertEquals(0, call.int("value"))
+    }
+
+    /**
+     * A typed number on a denomination the sheet lacks **creates** the item carrying the whole
+     * count — one `insert`, not an insert followed by an adjust.
+     *
+     * The same guarantee HIGH-1's latch buys for a hold, reached by a different gesture.
+     */
+    @Test
+    fun `a direct entry on an absent coin row inserts one item with the typed count`() = runTest {
+        val h = harness(item("i1", "Torch"))
+
+        h.character.adjustCoins(h.walletRow(CoinKind.SILVER), ExactQuantity(37))
+        advanceUntilIdle()
+
+        val insert = h.callsTo("creatureProperties.insert").single()
+        assertEquals(37, insert.creatureProperty().int("quantity"))
+        assertTrue("no adjust — the insert carried the count", h.callsTo(ADJUST).isEmpty())
+    }
+
+    /**
+     * Zero on an absent row writes nothing.
+     *
+     * Creating an item holding no coins would put a property on the sheet that this release
+     * cannot delete (10 decision 12), to express a fact the four always-present wallet rows
+     * already state.
+     */
+    @Test
+    fun `a direct entry of zero on an absent coin row writes nothing`() = runTest {
+        val h = harness(item("i1", "Torch"))
+
+        h.character.adjustCoins(h.walletRow(CoinKind.COPPER), ExactQuantity(0))
+        advanceUntilIdle()
+
+        assertTrue(h.caller.calls.isEmpty())
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-23 death saves (decisions 18-21)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Discovery reaches the board, and the write is decision 19's `damage {set}`.
+     *
+     * The method matters as much as the value: `damage` is the 20-per-5-second class, which is
+     * what makes a run of pip taps behave, and `adjustQuantity` would be the 1 s class against a
+     * property that has no quantity.
+     */
+    @Test
+    fun `setDeathSaves sends damage set for each half that moved`() = runTest {
+        val h = harness(hp(0), *deathSaves(successes = 0, failures = 1))
+
+        h.character.setDeathSaves(successes = 2, failures = 1)
+        advanceUntilIdle()
+
+        val call = h.callsTo("creatureProperties.damage").single()
+        assertEquals("ds-ok", call.text("_id"))
+        assertEquals("set", call.text("operation"))
+        assertEquals(2, call.int("value"))
+    }
+
+    /**
+     * The half that did not move is not sent — [setEquipped]'s no-op guard, applied to a pair.
+     *
+     * Two calls per pip tap would burn twice the rate budget and file a history entry for a
+     * change that did not happen.
+     */
+    @Test
+    fun `setDeathSaves writes nothing when neither half moved`() = runTest {
+        val h = harness(hp(0), *deathSaves(successes = 1, failures = 2))
+
+        h.character.setDeathSaves(successes = 1, failures = 2)
+        advanceUntilIdle()
+
+        assertTrue(h.caller.calls.isEmpty())
+    }
+
+    /** Decision 18: a sheet with no pair is ordinary, and a write against it is dropped. */
+    @Test
+    fun `setDeathSaves on a sheet without the pair writes nothing`() = runTest {
+        val h = harness(hp(0), item("i1", "Torch"))
+
+        h.character.setDeathSaves(successes = 3, failures = 0)
+        advanceUntilIdle()
+
+        assertTrue(h.caller.calls.isEmpty())
+    }
+
+    /**
+     * **Decision 20's clear, attached to our own heal.**
+     *
+     * Healing off zero sends the heal *and* `set 0` to both marked properties, in one gesture.
+     * Three calls: the `damage increment` that heals, and one `damage set 0` per marked half.
+     */
+    @Test
+    fun `healing off zero clears both death save properties`() = runTest {
+        val h = harness(hp(0), *deathSaves(successes = 1, failures = 2))
+
+        h.character.changeHitPoints(+5)
+        advanceUntilIdle()
+
+        val calls = h.callsTo("creatureProperties.damage")
+        assertEquals(3, calls.size)
+        val clears = calls.filter { it.text("operation") == "set" }
+        assertEquals(setOf("ds-ok", "ds-no"), clears.map { it.text("_id") }.toSet())
+        assertTrue("both cleared to zero", clears.all { it.int("value") == 0 })
+    }
+
+    /**
+     * **H1's pin.** The heal's `damage increment` and the two `set 0` clears all dispatch —
+     * three calls, as the test above confirms — but only the heal may mint a receipt. Before
+     * the fix, `clearDeathSavesForHeal` called [DefaultOpenCharacter.setDeathSaves], which
+     * submits *with* a receipt; the two clears then filed their own history rows on top of
+     * the heal's, newest first, so the snackbar's `history.first()` read as a death-save line
+     * instead of the heal that tap actually made.
+     */
+    @Test
+    fun `healing off zero files exactly one history entry, for the heal`() = runTest {
+        val h = harness(hp(0), *deathSaves(successes = 1, failures = 2))
+
+        h.character.changeHitPoints(+5)
+        advanceUntilIdle()
+
+        val entry = h.character.writeHistory.value.single()
+        assertEquals("Hit Points", entry.targetName)
+    }
+
+    /**
+     * **H1's other half.** The undo stack is LIFO; before the fix the clears' own inverses
+     * were the last two pushed, so UNDO reversed a death-save clear instead of the heal. With
+     * the clears submitted `recordUndo = false`, the heal's inverse is the only thing on the
+     * stack — UNDO must restore hit points, and the death-save marks (already cleared, with
+     * no receipt of their own) stay cleared. That is `Undoable.HitPoints`' documented cost on
+     * the local path, pinned here for the server path.
+     */
+    @Test
+    fun `undoing a heal off zero restores hit points and leaves the death saves cleared`() = runTest {
+        val h = harness(hp(0), *deathSaves(successes = 1, failures = 2))
+
+        h.character.changeHitPoints(+5)
+        advanceUntilIdle()
+        assertTrue("the heal is the only entry on the stack", h.character.canUndo.value)
+        h.caller.reset()
+
+        assertTrue(h.character.undoLastWrite())
+        advanceUntilIdle()
+
+        val call = h.callsTo("creatureProperties.damage").single()
+        assertEquals("hp1", call.text("_id"))
+        assertEquals("undo of a +5 heal must be +5 damage", "increment", call.text("operation"))
+        assertEquals(5, call.int("value"))
+        assertTrue("the heal's entry is the one marked undone", h.character.writeHistory.value.single().undone)
+        assertFalse("nothing left on the stack — the clears never joined it", h.character.canUndo.value)
+    }
+
+    /**
+     * A heal that does **not** start at zero clears nothing.
+     *
+     * Without this the app would file two no-op writes on every heal for the whole game, against
+     * the same 20-per-5-second bucket the pip taps use.
+     */
+    @Test
+    fun `healing a character who is already up clears nothing`() = runTest {
+        val h = harness(hp(4), *deathSaves(successes = 1, failures = 2))
+
+        h.character.changeHitPoints(+5)
+        advanceUntilIdle()
+
+        assertEquals(1, h.callsTo("creatureProperties.damage").size)
+    }
+
+    /** Damage is not a heal. The marks stay, which is the point of them. */
+    @Test
+    fun `taking damage at zero clears nothing`() = runTest {
+        val h = harness(hp(0), *deathSaves(successes = 1, failures = 2))
+
+        h.character.changeHitPoints(-3)
+        advanceUntilIdle()
+
+        assertEquals(1, h.callsTo("creatureProperties.damage").size)
+    }
+
+    /** FR-22's direct entry on HP is a heal too, and clears by the same path. */
+    @Test
+    fun `a direct entry taking hit points off zero clears the death saves`() = runTest {
+        val h = harness(hp(0), *deathSaves(successes = 0, failures = 3))
+
+        h.character.setHitPoints(11)
+        advanceUntilIdle()
+
+        val clears = h.callsTo("creatureProperties.damage")
+            .filter { it.text("operation") == "set" && it.text("_id") != "hp1" }
+        assertEquals(1, clears.size)
+        assertEquals(0, clears.single().int("value"))
+    }
+
+    /**
+     * **The observer-storm rule, as a regression test** (decision 20, in capitals).
+     *
+     * Another client heals the character: the mirror publishes hit points above zero and this
+     * client observes the 0 → positive transition without having written anything. Nothing may
+     * go out. A reactive implementation — a collector on `board.hp` — passes every other test in
+     * this group and fails only this one, which is precisely why it is here: with N clients
+     * watching one sheet (the DM dashboard watches six), that implementation is N duplicate
+     * clears per heal against a shared bucket.
+     */
+    @Test
+    fun `an observed heal from another client sends nothing`() = runTest {
+        val h = harness(hp(0), *deathSaves(successes = 1, failures = 2))
+
+        h.feed.changeProperty(
+            "hp1",
+            Json.parseToJsonElement(hp(current = 9)) as JsonObject,
+        )
+        advanceUntilIdle()
+
+        assertEquals("the sheet moved; this client did not write", 9, h.session.board.value.hp?.value)
+        assertTrue("no clear may be fired from observed state", h.caller.calls.isEmpty())
+    }
+
+    /** Marks already at zero need no clearing, so a heal off zero is one call. */
+    @Test
+    fun `healing off zero with no marks sends only the heal`() = runTest {
+        val h = harness(hp(0), *deathSaves(successes = 0, failures = 0))
+
+        h.character.changeHitPoints(+5)
+        advanceUntilIdle()
+
+        assertEquals(1, h.callsTo("creatureProperties.damage").size)
+    }
+
+    /** The `TrackedResource` the direct-entry overload is handed, as the UI would build it. */
+    private fun trackedItem(id: String, name: String, quantity: Int) = TrackedResource(
+        propertyId = id,
+        kind = TrackerKind.ITEM,
+        name = name,
+        value = quantity,
+        total = quantity,
+    )
 
     private fun FakeDdpMethodCaller.Call.bool(key: String): Boolean =
         (body[key] as? JsonPrimitive)?.booleanOrNull ?: error("no boolean `$key` in $body")

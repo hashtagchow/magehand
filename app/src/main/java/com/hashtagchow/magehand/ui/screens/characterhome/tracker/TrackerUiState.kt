@@ -2,9 +2,13 @@ package com.hashtagchow.magehand.ui.screens.characterhome.tracker
 
 import androidx.annotation.StringRes
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.components.DirectEntryKeys
+import com.hashtagchow.magehand.ui.components.DirectEntryKind
+import com.hashtagchow.magehand.ui.components.DirectEntryTarget
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DamageDefense
+import com.hashtagchow.magehand.core.model.DeathSaves
 import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.RollAdvantage
@@ -356,6 +360,17 @@ data class TrackerUiState(
     val concentratingOn: String? = null,
     val hp: HpState? = null,
     /**
+     * The **discovered** death-save pair (FR-23 decision 18), straight off
+     * `TrackerBoard.deathSaves` and carried unchanged.
+     *
+     * Not what the screen renders — [deathSaves] is, and it adds the HP-reads-zero half of
+     * decision 18's trigger. The two are separate fields rather than one pre-gated value
+     * because the *counts* have to survive the gate closing: a heal takes the block off screen
+     * and the marks are still on the sheet, which is what decision 20's "shows its marks
+     * honestly" depends on.
+     */
+    val deathSavePair: DeathSaves? = null,
+    /**
      * The Defenses section, or empty when the character has none — in which case the
      * section is *absent*, not empty. Sits between HP and the spell slots: it is combat
      * reference, so it belongs next to the other combat reference, and it is read-only, so
@@ -480,7 +495,107 @@ data class TrackerUiState(
         get() = hasConnection &&
             status.isWorthMentioning &&
             (!isLoading || status.isTerminalUntilActedOn)
+
+    /**
+     * FR-23 decision 18's trigger, as one boolean.
+     *
+     * > *"the death-save block renders iff the sheet's `hitPoints` attribute reads `value === 0`
+     * > AND discovery finds the pair — NEVER off the '0 HP?' toggle or `inactive` flags."*
+     *
+     * ### Why the HP half is read here and not in the engine
+     *
+     * [hp] is the **overlay-adjusted** number — the one on screen. `TrackerBoard.deathSaves` is
+     * discovery only, deliberately, because a board built before the optimistic overlay is
+     * applied still says zero for the frame after a heal is tapped: gating there would leave the
+     * block up through the heal and take it down when the server echoed, which is the one
+     * moment a player is watching it. Gating on what is drawn makes the block appear and
+     * disappear with the number above it, and roll back with it if the write fails.
+     *
+     * ### Why not the "0 HP?" toggle
+     *
+     * The probe found it lags — it is a computed toggle whose `inactive` flag only settles after
+     * a server recompute — so a client reading it would show the block seconds late and hide it
+     * seconds late. `hitPoints.value` is the number the server already sent. Decision 18 puts
+     * this in capitals for a reason: the toggle is the obvious-looking source and it is wrong.
+     *
+     * ### A hidden HP row means no block, and that is honest
+     *
+     * `TrackerEngine` drops [hp] entirely when the player has hidden it from the tracker. With
+     * no HP row there is no `value === 0` to read, so the condition is false. The alternative —
+     * reaching around the override layer to a row the player asked not to see — would be this
+     * app deciding it knows better about the one screen it lets them arrange.
+     */
+    val deathSaves: DeathSaves?
+        get() = deathSavePair?.takeIf { hp?.current == 0 }
+
+    /**
+     * What an open FR-22 direct-entry dialog is editing, resolved from a [DirectEntryKeys] key
+     * against **this** state (15 decisions 5–7).
+     *
+     * ### Why a key and not the row
+     *
+     * `InventoryUiState.row`'s argument, applied to a dialog instead of a bottom sheet: the
+     * dialog is opened by id and looks itself up on every recomposition, so a sync that lands
+     * while it is open moves the number it is editing rather than leaving the player typing
+     * against a frozen copy. `null` is the honest answer when the row stops existing underneath
+     * it — the composable closes rather than offering to set something that is gone.
+     *
+     * A key is also the only form of this a `Bundle` can carry, which is what lets the tab hold
+     * the gesture in `rememberSaveable` and survive a rotation mid-type.
+     *
+     * ### The ceilings are decision 7's, in one place
+     *
+     * *"floor 0 everywhere, ceiling = total where the row has one (slots/resources/HP); coins
+     * floor 0, no ceiling; quantities floor 0, no ceiling."* HP and pip rows carry a `max`; a
+     * consumable's is `null`. Resolved here rather than in the composable so `TrackerUiStateTest`
+     * can assert it without a Compose runtime — a wrong ceiling is exactly the kind of thing that
+     * looks fine until someone types 30 into a 3-slot row.
+     */
+    fun directEntryTarget(key: String): DirectEntryTarget? = when {
+        key == DirectEntryKeys.HIT_POINTS -> hp?.let {
+            DirectEntryTarget(
+                kind = DirectEntryKind.HIT_POINTS,
+                propertyId = it.propertyId,
+                // The label is the one piece of copy this function needs and the one thing it
+                // must not resolve: `strings.xml` belongs to the composable. Empty here, filled
+                // by `TrackerTab`, which is the same split every `spokenLabel` on this screen
+                // already makes.
+                label = "",
+                current = it.current,
+                max = it.max,
+            )
+        }
+
+        key.startsWith(DirectEntryKeys.RESOURCE_PREFIX) -> {
+            val id = key.removePrefix(DirectEntryKeys.RESOURCE_PREFIX)
+            (slots + resources).firstOrNull { it.propertyId == id }?.let {
+                DirectEntryTarget(
+                    kind = DirectEntryKind.RESOURCE,
+                    propertyId = it.propertyId,
+                    label = it.label,
+                    current = it.value,
+                    max = it.total,
+                )
+            }
+        }
+
+        key.startsWith(DirectEntryKeys.ITEM_PREFIX) -> {
+            val id = key.removePrefix(DirectEntryKeys.ITEM_PREFIX)
+            consumables.firstOrNull { it.propertyId == id }?.let {
+                DirectEntryTarget(
+                    kind = DirectEntryKind.ITEM,
+                    propertyId = it.propertyId,
+                    label = it.name,
+                    current = it.quantity,
+                    max = null,
+                )
+            }
+        }
+
+        else -> null
+    }
 }
+
 
 /**
  * Board → UI, and the status-strip derivation, in one pure step.
@@ -535,6 +650,8 @@ fun toTrackerUiState(
         ),
         concentratingOn = board.concentratingOn,
         hp = board.hp?.toHpState(tempHp = board.tempHp?.value ?: 0),
+        // Discovery, carried through unchanged. The trigger's other half is `deathSaves`.
+        deathSavePair = board.deathSaves,
         defenses = toDefenseRows(board.defenses),
         rolls = toRollPicker(board.rolls, selectedRollId),
         slots = board.slots.map { it.toPipRow() },

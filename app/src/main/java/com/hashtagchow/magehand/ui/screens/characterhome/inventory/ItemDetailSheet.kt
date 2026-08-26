@@ -42,6 +42,8 @@ import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.components.DirectEntryDialog
+import com.hashtagchow.magehand.ui.components.directEntry
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.MINUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.PLUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.StepperButton
@@ -94,6 +96,10 @@ import com.hashtagchow.magehand.ui.screens.characterhome.tracker.StepperButton
  * @param moveTargets where this item may go, already filtered of the container it is in — pass
  *   `InventoryUiState.moveTargetsFor(row)`. Empty hides the Move control even where the row
  *   would offer it, which is the honest rendering of a sheet with nowhere else to put things.
+ * @param onQuantitySet FR-22 direct entry (15 decision 5): the long press on the quantity
+ *   number, as an absolute. Its own callback rather than a delta the sheet computes, because the
+ *   number on screen may be several latch flushes behind the sheet — see
+ *   `OpenCharacter.adjustItem`'s `ExactQuantity` overload.
  * @param onDelete confirmed deletion. The dialog has already been shown and accepted.
  * @param onMove `containerId` is `null` for the carried root — see `InventoryMoveTargetState`.
  */
@@ -103,6 +109,7 @@ fun ItemDetailSheet(
     row: InventoryRowState,
     canWrite: Boolean,
     onQuantityDelta: (propertyId: String, delta: Int) -> Unit,
+    onQuantitySet: (propertyId: String, value: Int) -> Unit,
     onEquip: (propertyId: String, equipped: Boolean) -> Unit,
     onEquippableOverride: (propertyId: String, canEquip: Boolean) -> Unit,
     onDismiss: () -> Unit,
@@ -119,6 +126,10 @@ fun ItemDetailSheet(
     // a silently cancelled delete.
     var confirmingDelete by rememberSaveable { mutableStateOf(false) }
     var choosingMove by rememberSaveable { mutableStateOf(false) }
+    // FR-22 (15 decision 5). A third latch of the same shape, and saved for the same reason:
+    // a rotation mid-type must not throw a half-typed number away. There is no id to key on
+    // here — the sheet is already open on exactly one row — so a plain flag is the whole state.
+    var entering by rememberSaveable { mutableStateOf(false) }
     // 12 decision 2's verb split, the same call the row makes — so the chip in the sheet and
     // the chip on the row it was opened from cannot say different things about one item.
     val equipDescription = row.spokenEquipLabel(
@@ -221,6 +232,17 @@ fun ItemDetailSheet(
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier
                         .width(64.dp)
+                        // FR-22 decisions 5 and 7: quantities floor at zero and have no ceiling.
+                        // The two steppers either side are untouched — this is additive.
+                        .directEntry(
+                            enabled = canWrite,
+                            spoken = stringResource(
+                                R.string.direct_entry_spoken,
+                                row.name,
+                                row.quantity,
+                            ),
+                            onOpen = { entering = true },
+                        )
                         .testTag("inventory:detail:quantity"),
                 )
                 StepperButton(
@@ -379,6 +401,22 @@ fun ItemDetailSheet(
                 onDismiss()
             },
             onDismiss = { choosingMove = false },
+        )
+    }
+
+    // FR-22 (15 decision 5). Unlike the two dialogs above, this one does **not** dismiss the
+    // sheet on confirm: setting a quantity is a change to the thing the sheet is reading out,
+    // not a departure from it, and the sheet re-renders with the new number (it looks itself up
+    // by id on every recomposition — see `InventoryUiState.row`). Closing would make a player
+    // correcting two numbers reopen the item in between.
+    if (entering) {
+        DirectEntryDialog(
+            label = row.name,
+            current = row.quantity,
+            // Decision 7: quantities have no ceiling.
+            max = null,
+            onSet = { value -> onQuantitySet(row.propertyId, value) },
+            onDismiss = { entering = false },
         )
     }
 }

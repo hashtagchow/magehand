@@ -184,6 +184,15 @@ class WriteQueue(
      */
     fun submit(op: WriteOp): Deferred<Unit> = submitInternal(op, recordUndo = true)
 
+    /**
+     * [submit], but files no [history] row and pushes nothing onto the undo stack — the
+     * no-receipt path [undo] already uses internally for the inverse it fires. For a write
+     * that must reach the wire as part of a *different* call's gesture without minting a
+     * receipt of its own (death-save clearing riding on a heal; see
+     * `DefaultOpenCharacter.clearDeathSavesForHeal`).
+     */
+    fun submitWithoutReceipt(op: WriteOp): Deferred<Unit> = submitInternal(op, recordUndo = false)
+
     /** [submit] plus awaiting the outcome. Throws on failure. */
     suspend fun enqueue(op: WriteOp) = submit(op).await()
 

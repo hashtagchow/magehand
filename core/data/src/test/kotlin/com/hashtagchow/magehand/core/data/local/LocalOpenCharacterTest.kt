@@ -31,7 +31,9 @@ import com.hashtagchow.magehand.core.data.fake.FakeInventoryLayoutStore
 import com.hashtagchow.magehand.core.data.fake.FakePaneLayoutStore
 import com.hashtagchow.magehand.core.data.fake.FakeSelectedRollStore
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
+import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.RestKind
@@ -101,6 +103,8 @@ class LocalOpenCharacterTest {
         maxHp: Int = 20,
         currentHp: Int = maxHp,
         rows: List<LocalTrackerRowEntity> = emptyList(),
+        deathSuccesses: Int = 0,
+        deathFailures: Int = 0,
     ) {
         dao.save(
             LocalCharacterEntity(
@@ -112,6 +116,8 @@ class LocalOpenCharacterTest {
                 maxHp = maxHp,
                 currentHp = currentHp,
                 armorClass = 15,
+                deathSuccesses = deathSuccesses,
+                deathFailures = deathFailures,
                 createdAt = 1,
                 updatedAt = 1,
             ),
@@ -360,6 +366,170 @@ class LocalOpenCharacterTest {
         character.awaitIdle()
 
         assertTrue(character.writeHistory.value.isEmpty())
+    }
+
+    // --- FR-22 direct entry (15 decisions 5-7) -------------------------------
+
+    /**
+     * The absolute overload lands the typed number, floored at zero and with no ceiling.
+     *
+     * The row handle is deliberately stale (see the class KDoc) — 999/999 — which is the point:
+     * an absolute owes the caller's frame nothing, where a delta computed from it would be
+     * nonsense. That is the same property `DefaultOpenCharacter`'s barrier buys on the server
+     * path, arrived at here for free because every local write re-reads inside its own lock.
+     */
+    @Test
+    fun `a direct entry sets an item quantity outright`() = runTest {
+        seed(rows = listOf(rowEntity("i-1", kind = LocalRowKind.ITEM, total = 2, current = 2)))
+        val character = open()
+
+        character.adjustItem(handle("i-1", TrackerKind.ITEM), ExactQuantity(17))
+        character.awaitIdle()
+
+        with(dao.findRow("i-1")!!) {
+            assertEquals(17, current)
+            assertEquals("an item's total tracks its quantity", 17, total)
+        }
+        assertEquals(TrackerWriteKind.ITEM_SET, character.writeHistory.value.first().kind)
+    }
+
+    @Test
+    fun `a direct entry below zero is floored`() = runTest {
+        seed(rows = listOf(rowEntity("i-1", kind = LocalRowKind.ITEM, total = 2, current = 2)))
+        val character = open()
+
+        character.adjustItem(handle("i-1", TrackerKind.ITEM), ExactQuantity(-5))
+        character.awaitIdle()
+
+        assertEquals(0, dao.findRow("i-1")?.current)
+    }
+
+    /** Setting a row to what it already reads is genuinely nothing, locally — see the KDoc. */
+    @Test
+    fun `a direct entry matching the stored quantity writes nothing`() = runTest {
+        seed(rows = listOf(rowEntity("i-1", kind = LocalRowKind.ITEM, total = 2, current = 2)))
+        val character = open()
+
+        character.adjustItem(handle("i-1", TrackerKind.ITEM), ExactQuantity(2))
+        character.awaitIdle()
+
+        assertTrue(character.writeHistory.value.isEmpty())
+    }
+
+    /**
+     * The wallet's absolute path. No insert branch and no head stack: locally a denomination is
+     * an integer column, which is the whole of what `LocalOpenCharacter.adjustCoins` documents.
+     */
+    @Test
+    fun `a direct entry sets a coin column outright and is undoable`() = runTest {
+        seed()
+        val character = open()
+        character.adjustCoins(character.inventory.value.wallet.row(CoinKind.GOLD), +7)
+        character.awaitIdle()
+
+        character.adjustCoins(character.inventory.value.wallet.row(CoinKind.GOLD), ExactQuantity(120))
+        character.awaitIdle()
+        assertEquals(120, dao.find(characterId)?.gp)
+
+        character.undoLastWrite()
+        character.awaitIdle()
+        assertEquals("the undo restores the count the set replaced", 7, dao.find(characterId)?.gp)
+    }
+
+    // --- FR-23 death saves (15 decisions 13 and 20) --------------------------
+
+    /** Both columns in one write, clamped to the three pips a row can show. */
+    @Test
+    fun `setDeathSaves writes both columns and clamps them`() = runTest {
+        seed(currentHp = 0)
+        val character = open()
+
+        character.setDeathSaves(successes = 9, failures = 2)
+        character.awaitIdle()
+
+        with(dao.find(characterId)!!) {
+            assertEquals(3, deathSuccesses)
+            assertEquals(2, deathFailures)
+        }
+    }
+
+    /** Decision 13's parity: the marks reach the board the tracker renders. */
+    @Test
+    fun `death save marks reach the board with stable synthetic ids`() = runTest {
+        seed(currentHp = 0, deathSuccesses = 1, deathFailures = 2)
+        val character = open()
+
+        val saves = character.board.first { it.deathSaves != null }.deathSaves!!
+        assertEquals(1, saves.successes)
+        assertEquals(2, saves.failures)
+        assertEquals(LocalTrackerBoard.DEATH_SUCCESS_ROW_ID, saves.successesPropertyId)
+        assertEquals(LocalTrackerBoard.DEATH_FAILURE_ROW_ID, saves.failuresPropertyId)
+    }
+
+    /** The pair is undone as a pair — half an undo is a state no tap could have produced. */
+    @Test
+    fun `undoing a death save write restores both counts`() = runTest {
+        seed(currentHp = 0, deathSuccesses = 1, deathFailures = 1)
+        val character = open()
+
+        character.setDeathSaves(successes = 3, failures = 0)
+        character.awaitIdle()
+        character.undoLastWrite()
+        character.awaitIdle()
+
+        with(dao.find(characterId)!!) {
+            assertEquals(1, deathSuccesses)
+            assertEquals(1, deathFailures)
+        }
+    }
+
+    /**
+     * **Decision 20 locally**: the clear rides on a heal that takes hit points off zero.
+     *
+     * Decision 13's *"local rest clears them on any heal above 0"* resolves to this — a local
+     * `rest` does not touch `currentHp` at all (09 decision 7), so whatever heals is what clears.
+     */
+    @Test
+    fun `healing off zero clears both death save columns`() = runTest {
+        seed(currentHp = 0, deathSuccesses = 2, deathFailures = 1)
+        val character = open()
+
+        character.changeHitPoints(+6)
+        character.awaitIdle()
+
+        with(dao.find(characterId)!!) {
+            assertEquals(6, currentHp)
+            assertEquals(0, deathSuccesses)
+            assertEquals(0, deathFailures)
+        }
+    }
+
+    /** FR-22's direct entry on HP is a heal too, and clears by the same path. */
+    @Test
+    fun `a direct entry taking hit points off zero clears the marks`() = runTest {
+        seed(currentHp = 0, deathSuccesses = 0, deathFailures = 3)
+        val character = open()
+
+        character.setHitPoints(12)
+        character.awaitIdle()
+
+        assertEquals(0, dao.find(characterId)?.deathFailures)
+    }
+
+    /** A heal that did not start at zero leaves them alone; so does damage. */
+    @Test
+    fun `only a heal off zero clears the marks`() = runTest {
+        seed(maxHp = 20, currentHp = 8, deathSuccesses = 1, deathFailures = 1)
+        val character = open()
+
+        character.changeHitPoints(+5)
+        character.awaitIdle()
+        assertEquals("nothing to clear — the character was never down", 1, dao.find(characterId)?.deathFailures)
+
+        character.changeHitPoints(-13)
+        character.awaitIdle()
+        assertEquals(0, dao.find(characterId)?.currentHp)
+        assertEquals("damage is not a heal", 1, dao.find(characterId)?.deathFailures)
     }
 
     // --- rest (09 decision 7) -----------------------------------------------

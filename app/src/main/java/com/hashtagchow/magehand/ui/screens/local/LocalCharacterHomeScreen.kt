@@ -295,7 +295,13 @@ fun LocalCharacterHomeScreen(
                         onRestore = viewModel::restore,
                         onHpDelta = viewModel::changeHitPoints,
                         onHpTap = { hpPadOpen = true },
+                        // FR-22 (15 decisions 5 and 6). `onHpSet` is the number pad's own Set
+                        // intent, reached by the long press instead of the pad.
+                        onHpSet = viewModel::setHitPoints,
+                        onResourceSet = viewModel::setResourceValue,
                         onItemDelta = viewModel::adjustItem,
+                        onItemSet = viewModel::setItemQuantity,
+                        onDeathSaves = viewModel::setDeathSaves,
                         // A local board carries no toggles (09 decision 4), so nothing can
                         // reach this; there is also no connection sheet to open.
                         onToggle = {},
@@ -310,7 +316,9 @@ fun LocalCharacterHomeScreen(
                     actions = InventoryActions(
                         onEquip = viewModel::setEquipped,
                         onCoinDelta = viewModel::adjustCoins,
+                        onCoinSet = viewModel::setCoins,
                         onQuantityDelta = viewModel::adjustItemQuantity,
+                        onQuantitySet = viewModel::setInventoryItemQuantity,
                         onRowTap = { detailItemId = it },
                         // FR-9. Both arrive from the detail sheet, which is where the
                         // confirm and the picker live — nothing on the list can reach them.
@@ -373,6 +381,7 @@ fun LocalCharacterHomeScreen(
                 row = row,
                 canWrite = uiState.inventory.canWrite,
                 onQuantityDelta = viewModel::adjustItemQuantity,
+                onQuantitySet = viewModel::setInventoryItemQuantity,
                 onEquip = viewModel::setEquipped,
                 onEquippableOverride = viewModel::setEquippableOverride,
                 onDismiss = { detailItemId = null },

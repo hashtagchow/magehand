@@ -36,7 +36,7 @@ import androidx.room.migration.Migration
         LocalCharacterEntity::class,
         LocalTrackerRowEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class MageHandDatabase : RoomDatabase() {
@@ -53,6 +53,6 @@ abstract class MageHandDatabase : RoomDatabase() {
 
         /** Every migration, in order. Hand this to `RoomDatabase.Builder.addMigrations`. */
         val MIGRATIONS: Array<Migration>
-            get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
     }
 }

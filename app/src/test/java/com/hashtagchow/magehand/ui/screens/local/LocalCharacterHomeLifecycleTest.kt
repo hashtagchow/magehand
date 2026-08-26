@@ -171,6 +171,8 @@ private object EmptyLocalCharacterDao : LocalCharacterDao {
 
     // FR-8's three. `maxSortIndex` is a read, so it answers like the other reads rather than
     // throwing: "no rows" is the honest answer from a DAO that has none.
+    override suspend fun setDeathSaves(id: String, successes: Int, failures: Int, at: Long) = Unit
+
     override suspend fun setCoins(id: String, pp: Int, gp: Int, sp: Int, cp: Int, at: Long) =
         unreachable()
 

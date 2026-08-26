@@ -227,3 +227,50 @@ val MIGRATION_4_5: Migration = object : Migration(4, 5) {
         )
     }
 }
+
+/**
+ * v5 → v6: local death saves (FR-23, docs/design/15-polish-batch.md decision 13).
+ *
+ * ```
+ * local_characters += deathSuccesses INTEGER NOT NULL DEFAULT 0
+ * local_characters += deathFailures  INTEGER NOT NULL DEFAULT 0
+ * ```
+ *
+ * **Additive in [MIGRATION_4_5]'s sense**, and against `local_characters` this time rather than
+ * `local_tracker_rows`: two `ALTER TABLE … ADD COLUMN`s, no table re-created, so there is no copy
+ * step that could drop a character, no temporary table, and no window in which
+ * `local_tracker_rows`' foreign key points at a table that does not exist. Nothing on
+ * `local_tracker_rows` is touched at all.
+ *
+ * ### What the default means, and why it is not a data loss
+ *
+ * There is nothing to migrate. Every existing row was written by a build with no death-save
+ * feature in it, so no character has ever had a mark to preserve — `0` is not a chosen reading
+ * standing in for a lost fact (the way [MIGRATION_4_5]'s `'gear'` is), it is the fact.
+ *
+ * ### Why the `DEFAULT` is load-bearing
+ *
+ * [MIGRATION_3_4]'s reason, unchanged: SQLite refuses `ADD COLUMN … NOT NULL` without one on a
+ * table that already has rows. The matching `@ColumnInfo(defaultValue = "0")` on
+ * [LocalCharacterEntity] is what makes the exported v6 schema say the same thing as this
+ * statement, which is the claim `MageHandDatabaseMigrationTest` checks against Room's own
+ * validator rather than by reading either.
+ *
+ * ### Two statements, one migration
+ *
+ * SQLite's `ALTER TABLE` adds one column per statement, so this is two `execSQL`s and not a
+ * style choice. They are not individually atomic against each other, and they do not need to be:
+ * Room runs a migration inside a transaction, so a failure between them rolls both back and the
+ * database stays at v5 rather than landing half-migrated.
+ *
+ * As with every migration before it, this is proven rather than trusted:
+ * `MageHandDatabaseMigrationTest` builds a real v5 database from the **committed** v5 JSON,
+ * populates both local tables, runs this migration, and lets Room's validator compare the result
+ * against the compiled v6 expectation.
+ */
+val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `local_characters` ADD COLUMN `deathSuccesses` INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE `local_characters` ADD COLUMN `deathFailures` INTEGER NOT NULL DEFAULT 0")
+    }
+}

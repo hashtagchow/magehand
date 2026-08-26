@@ -28,6 +28,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.ui.components.PORTRAIT_SIZE_CARD
+import com.hashtagchow.magehand.ui.components.PortraitAvatar
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.MINUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.PLUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.PipRowState
@@ -79,12 +81,26 @@ internal fun DmCard(
                 modifier = Modifier.spokenAs(card.spoken()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    text = card.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                // FR-21 decision 1: the portrait sits on the name's own line rather than above
+                // it, so it costs the card no vertical space at all — decision 12's five facts
+                // are what a card is for, and a dashboard is scanned by scrolling.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PortraitAvatar(
+                        url = card.portraitUrl,
+                        monogram = card.monogram,
+                        size = PORTRAIT_SIZE_CARD,
+                        textStyle = MaterialTheme.typography.labelLarge,
+                    )
+                    Text(
+                        text = card.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
 
                 when (card.availability) {
                     DmCardAvailability.LOADING -> Text(

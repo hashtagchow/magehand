@@ -37,6 +37,7 @@ import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.ui.panes.togglePane as nextPaneSet
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
@@ -406,6 +407,41 @@ class LocalCharacterHomeViewModel @Inject constructor(
         character.adjustItem(row, delta)
     }
 
+    /**
+     * FR-22 direct entry on a slot or resource row (15 decisions 5–7).
+     *
+     * The DiceCloud path's arithmetic, verbatim and deliberately so: decision 6 makes these rows
+     * delta-shaped through `spend`/`restore`, and both implementations of those intents already
+     * carry the same clamps. A local-only "just set the column" shortcut would have been the one
+     * place in this feature where the two kinds of character behaved differently for no reason a
+     * player could see.
+     */
+    fun setResourceValue(propertyId: String, value: Int) = withRow(propertyId) { character, row ->
+        val delta = value.coerceIn(0, row.total) - row.value
+        when {
+            delta < 0 -> character.spend(row, -delta)
+            delta > 0 -> character.restore(row, delta)
+        }
+    }
+
+    /** FR-22 direct entry on a consumable's quantity. Floor 0, no ceiling (decision 7). */
+    fun setItemQuantity(propertyId: String, value: Int) = withRow(propertyId) { character, row ->
+        character.adjustItem(row, ExactQuantity(value.coerceAtLeast(0)))
+    }
+
+    /**
+     * FR-23 (15 decisions 19–21): a death-save pip was tapped.
+     *
+     * Straight through, with no board lookup — unlike every other tracker write here. There is
+     * no id to re-resolve: the intent names no property, and the implementation reads the pair
+     * off its own board inside the write. A guard here would only turn a tap that raced a
+     * re-sync into a dropped tap, where one layer down it is a write against whatever the pair
+     * currently is.
+     */
+    fun setDeathSaves(successes: Int, failures: Int) {
+        open.value?.setDeathSaves(successes, failures)
+    }
+
     /** 09 decision 7. The confirm dialog is the screen's job and has already been answered. */
     fun rest(kind: RestKind) {
         open.value?.rest(kind)
@@ -456,6 +492,28 @@ class LocalCharacterHomeViewModel @Inject constructor(
     }
 
     /**
+     * FR-22 direct entry on the inventory side of an item quantity — the list row and the detail
+     * sheet (15 decision 5).
+     *
+     * Resolved against the inventory board for [adjustItemQuantity]'s reason, whole.
+     */
+    fun setInventoryItemQuantity(propertyId: String, value: Int) {
+        val character = open.value ?: return
+        val item = character.inventory.value.allItems
+            .firstOrNull { it.propertyId == propertyId } ?: return
+        character.adjustItem(
+            TrackedResource(
+                propertyId = item.propertyId,
+                kind = TrackerKind.ITEM,
+                name = item.name,
+                value = item.quantity,
+                total = item.quantity,
+            ),
+            ExactQuantity(value.coerceAtLeast(0)),
+        )
+    }
+
+    /**
      * A wallet stepper. Locally the four denominations are integer columns, so
      * `WalletRow.propertyId` is never null and there is no insert branch — see
      * `LocalOpenCharacter.adjustCoins`. The screen cannot tell, which is the point.
@@ -463,6 +521,15 @@ class LocalCharacterHomeViewModel @Inject constructor(
     fun adjustCoins(coin: CoinKind, delta: Int) {
         val character = open.value ?: return
         character.adjustCoins(character.inventory.value.wallet.row(coin), delta)
+    }
+
+    /** FR-22 direct entry on a wallet row. Floor 0, no ceiling (15 decision 7). */
+    fun setCoins(coin: CoinKind, value: Int) {
+        val character = open.value ?: return
+        character.adjustCoins(
+            character.inventory.value.wallet.row(coin),
+            ExactQuantity(value.coerceAtLeast(0)),
+        )
     }
 
     /**

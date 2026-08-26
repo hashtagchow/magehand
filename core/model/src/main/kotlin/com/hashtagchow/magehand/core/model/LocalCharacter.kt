@@ -47,6 +47,21 @@ data class LocalCharacter(
      * tests — keeps compiling and every pre-FR-8 character reads as broke, which they are.
      */
     val coins: CoinPurse = CoinPurse.EMPTY,
+    /**
+     * Death-save **marks**, 0..[DeathSaves.MAX] (FR-23,
+     * docs/design/15-polish-batch.md decision 13).
+     *
+     * Two counts on the character rather than a [DeathSaves] for [coins]' reason, one step
+     * further: a `DeathSaves` carries the two `creatureProperties` ids the write targets, and a
+     * local character has no properties at all — `LocalTrackerBoard` mints synthetic ids for the
+     * board and they are not a fact worth storing. What is stored is the only thing a player
+     * could lose: the marks.
+     *
+     * Defaulted so every existing construction keeps compiling and every pre-1.8.0 character
+     * reads as un-marked, which they are — there was nowhere to record a death save before this.
+     */
+    val deathSuccesses: Int = 0,
+    val deathFailures: Int = 0,
     val createdAt: Long,
     val updatedAt: Long,
 )

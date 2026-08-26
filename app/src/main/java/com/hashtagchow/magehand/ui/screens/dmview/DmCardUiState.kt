@@ -113,6 +113,27 @@ fun toDmInventorySummary(board: InventoryBoard): DmInventorySummary = DmInventor
 data class DmCardUiState(
     val creatureId: String,
     val name: String,
+    /**
+     * FR-21 decision 1's portrait URL for this card — `CharacterSummary.picture`, which the
+     * mapping has already resolved as `avatarPicture ?: picture`.
+     *
+     * Carried on the card rather than looked up in the composable because it comes from
+     * `characterList` and not from the `singleCharacter` subscription — the same source, and the
+     * same argument, as [name]: it is what lets a decision-19 "Not available" card still show
+     * whose card it is. A card whose summary this account cannot see gets `null` and draws the
+     * monogram, which is the fallback the whole feature is built on.
+     */
+    val portraitUrl: String? = null,
+    /**
+     * Up to two letters for the fallback portrait — `CharacterSummary.monogram`.
+     *
+     * Passed in rather than derived from [name] here, deliberately: the bracket/parenthesis
+     * stripping that turns `Fenwick (Warden of the Vale)` into `F` rather than `F(` lives on
+     * `CharacterSummary` and is tested there, and a second copy of it on this screen is exactly
+     * the kind of thing that drifts. Defaults to `"?"` for the same reason that property does —
+     * a card with no summary yet still draws a disc rather than an empty circle.
+     */
+    val monogram: String = "?",
     val availability: DmCardAvailability = DmCardAvailability.LOADING,
     val hp: HpState? = null,
     val slots: List<PipRowState> = emptyList(),
@@ -305,6 +326,8 @@ fun dmCardAvailability(tracker: TrackerUiState): DmCardAvailability = when {
 fun toDmCardUiState(
     creatureId: String,
     name: String,
+    portraitUrl: String?,
+    monogram: String,
     tracker: TrackerUiState,
     inventory: DmInventorySummary?,
     isEditableByMe: Boolean,
@@ -322,6 +345,13 @@ fun toDmCardUiState(
     return DmCardUiState(
         creatureId = creatureId,
         name = name,
+        // FR-21: passed straight through and **not** gated on `isAvailable`, unlike every
+        // tracker row below. A "Not available" card is one whose subscription readied empty —
+        // the DM still knows whose card it is (that is what `name` is for) and a face is the
+        // fastest way to say so on a six-card grid. Nothing about a portrait can be a stale
+        // tracker reading, which is the whole reason those rows are dropped.
+        portraitUrl = portraitUrl,
+        monogram = monogram,
         availability = availability,
         // Every row is dropped when the card is not available, rather than trusted to be empty.
         // They *are* empty by construction today — that is what `dmCardAvailability` measured —

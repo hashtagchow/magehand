@@ -666,7 +666,13 @@ class ContractExportTest {
         val deathSaves = input.filter { it.str("_id") in setOf(ContractFixtures.deathSaveSuccessId, ContractFixtures.deathSaveFailureId) }
         assertEquals("both death saves must be present in the INPUT", 2, deathSaves.size)
         assertTrue(
-            "a death save is a spellSlot with no reset rule",
+            // FR-23 decision 19 retired the reading this used to assert. These two *are* spell
+            // slots with no reset rule, and that is a fact about **this fixture**, not the
+            // discriminator: the pair is found by `variableName`, and "reset null means death
+            // save" was a coincidence (see `TrackerEngine.spellSlot`, where the correction
+            // lives). Kept as written because the exclusion below still depends on this shape
+            // being what the input carries — it is what makes the fixture exercise the branch.
+            "this fixture's death saves are spellSlots carrying no reset rule",
             deathSaves.all { it.str("attributeType") == "spellSlot" && it.str("reset") == null },
         )
 

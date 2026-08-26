@@ -1,6 +1,7 @@
 package com.hashtagchow.magehand.core.data.local
 
 import com.hashtagchow.magehand.core.model.Ability
+import com.hashtagchow.magehand.core.model.DeathSaves
 import com.hashtagchow.magehand.core.model.LocalCharacter
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.LocalTrackerRow
@@ -64,8 +65,35 @@ object LocalTrackerBoard {
             // full list because the customize sheet reads it.
             pinnedItems = items,
             allItems = items,
+            // FR-23 decision 13: the same UI over two columns. Unconditional, exactly as
+            // `hitPointsRow` is — a local character always *has* the pair, because the columns
+            // always exist, which is the local counterpart of a sheet whose subtree was
+            // discovered. Whether the block renders is still the HP-reads-zero gate in
+            // `TrackerUiState`, so the two kinds of character reach it by the same rule.
+            deathSaves = deathSaves(character),
         )
     }
+
+    /**
+     * The death-save pair, built from the character's two columns (FR-23 decision 13).
+     *
+     * ### Why the ids are synthetic and fixed
+     *
+     * [hitPointsRow]'s argument, whole: they are the identity the block keys on and must be the
+     * same across every rebuild, and nothing writes *by* them — `LocalOpenCharacter.setDeathSaves`
+     * writes `local_characters.deathSuccesses`/`deathFailures` directly. Namespaced like
+     * [HP_ROW_ID] so a local id can never be mistaken for a Meteor one.
+     *
+     * The counts are clamped on the way out for the server engine's reason: the column is an
+     * `INTEGER` and nothing in SQLite stops a future bug storing 4, and a fourth pip painted
+     * into a row of three is a rendering artefact rather than a fact.
+     */
+    private fun deathSaves(character: LocalCharacter): DeathSaves = DeathSaves(
+        successesPropertyId = DEATH_SUCCESS_ROW_ID,
+        failuresPropertyId = DEATH_FAILURE_ROW_ID,
+        successes = character.deathSuccesses.coerceIn(0, DeathSaves.MAX),
+        failures = character.deathFailures.coerceIn(0, DeathSaves.MAX),
+    )
 
     /**
      * HP as the tracker's first row, built from the character rather than from a stored row.
@@ -137,6 +165,10 @@ object LocalTrackerBoard {
 
     /** The HP row's stable identity. */
     const val HP_ROW_ID: String = "local:hitPoints"
+
+    /** The death-save pair's stable identities. Namespaced like [HP_ROW_ID]; nothing writes by them. */
+    const val DEATH_SUCCESS_ROW_ID: String = "local:deathSaveSuccesses"
+    const val DEATH_FAILURE_ROW_ID: String = "local:deathSaveFails"
 
     /**
      * Matches DiceCloud's own name for the attribute, so the row reads identically whichever

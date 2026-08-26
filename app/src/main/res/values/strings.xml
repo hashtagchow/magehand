@@ -407,6 +407,52 @@
     <string name="dm_view_card_ratio">%1$d/%2$d</string>
     <string name="dm_view_card_open">Open %1$s</string>
 
+    <!-- FR-23 (docs/design/15-polish-batch.md decisions 18–21): death saves.
+         The block is only ever on screen at 0 HP, so the heading does not have to explain
+         itself — "Death saves" over six pips is the whole of it at a table.
+         `death_saves_stable` / `_dead` are the two derivations (three successes / three
+         failures), stated as a short line rather than by recolouring the pips: colour alone
+         is not a signal a colour-blind player at a dim table can read, which is the same rule
+         the HP bar follows.
+         The two pip descriptions are spoken per pip and name the row, the position and what a
+         tap does, because a pip is a control with no text of its own. -->
+    <string name="tracker_section_death_saves">Death saves</string>
+    <string name="death_saves_successes">Successes</string>
+    <string name="death_saves_failures">Failures</string>
+    <string name="death_saves_stable">Stable — three successes</string>
+    <string name="death_saves_dead">Three failures</string>
+    <string name="death_saves_mark_success">Successes, %1$d of %2$d, tap to set %3$d</string>
+    <string name="death_saves_mark_failure">Failures, %1$d of %2$d, tap to set %3$d</string>
+
+    <!-- FR-22 (docs/design/15-polish-batch.md decisions 5–8): direct number entry.
+         `direct_entry_spoken` and `_spoken_of` are the two shapes of decision 8's house
+         sentence — with a ceiling ("Hit points, 14 of 20, tap to enter a number") and without
+         (a quantity or a coin count, which have no maximum). Two strings rather than one with
+         an optional half, because a translator handed "%1$s, %2$d%3$s, tap to enter a number"
+         cannot see where the clause goes. `direct_entry_range` is the field's supporting line
+         and appears only where there is a ceiling to state. The confirm button reuses
+         `tracker_pad_set` — one concept, one word, so the pad and the dialog cannot end up
+         disagreeing about what "Set" is called. -->
+    <string name="direct_entry_title">Set %1$s</string>
+    <string name="direct_entry_label">New value</string>
+    <string name="direct_entry_range">0–%1$d</string>
+    <string name="direct_entry_spoken">%1$s, %2$d, tap to enter a number</string>
+    <string name="direct_entry_spoken_of">%1$s, %2$d of %3$d, tap to enter a number</string>
+
+    <!-- FR-24 (15 decisions 14–17): inventory search. `inventory_filter_matches` is spoken by
+         a polite live region rather than shown, so it is a whole sentence and a plural: a
+         screen-reader user gets "1 item matches" as the list under them changes, and "1 items"
+         is exactly the kind of thing they would hear in full. `inventory_filter_none` prints
+         the query back, because "No items match" alone leaves a player who mistyped with
+         nothing to correct. -->
+    <string name="inventory_filter_label">Search items</string>
+    <string name="inventory_filter_clear">Clear the search</string>
+    <string name="inventory_filter_none">No items match “%1$s”</string>
+    <plurals name="inventory_filter_matches">
+        <item quantity="one">%1$d item matches</item>
+        <item quantity="other">%1$d items match</item>
+    </plurals>
+
     <!-- Actions -->
     <string name="action_settings">Settings</string>
     <string name="action_back">Back</string>

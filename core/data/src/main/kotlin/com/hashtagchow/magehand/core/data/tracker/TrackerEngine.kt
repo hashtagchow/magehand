@@ -3,6 +3,7 @@ package com.hashtagchow.magehand.core.data.tracker
 import kotlinx.serialization.json.JsonObject
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.DamageDefense
+import com.hashtagchow.magehand.core.model.DeathSaves
 import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.RollAdvantage
@@ -38,6 +39,14 @@ object TrackerEngine {
 
     /** Public so the contract export states the rule from the constant that implements it. */
     const val VAR_HIT_POINTS = "hitPoints"
+
+    /**
+     * FR-23 decision 19's discriminators. `Fails`, not `Failures` — DiceCloud's own spelling,
+     * and the whole value of a variable-name rule is that it is the server's word rather than
+     * ours.
+     */
+    const val VAR_DEATH_SAVE_SUCCESSES = "deathSaveSuccesses"
+    const val VAR_DEATH_SAVE_FAILURES = "deathSaveFails"
 
     /**
      * 03 says temp HP is `variableName == "tempHitPoints"`. The live sheet calls it
@@ -125,6 +134,14 @@ object TrackerEngine {
             defenses = orderDefenses(defenses, overrides),
             rolls = orderRolls(rolls, overrides),
             concentratingOn = concentrationSource(properties),
+            // FR-23 decision 18. Discovery only — the block's *visibility* also needs the HP row
+            // to read zero, and that gate is in `TrackerUiState` (see `TrackerBoard.deathSaves`).
+            //
+            // Deliberately **not** filtered by the override layer: the hide/pin machinery is for
+            // rows a player chose to manage, and there is no customize-sheet control that can
+            // reach this pair. A block that is only on screen at 0 HP is not clutter anyone
+            // needs to hide.
+            deathSaves = deathSaves(properties),
         )
     }
 
@@ -137,10 +154,23 @@ object TrackerEngine {
 
     /**
      * 03 §1. `attributeType == 'spellSlot'`, excluding:
-     * - `reset == null` — **death saves**. "Succeeded Saves" / "Failed Saves" are stored
-     *   as spell slots with no reset rule (docs/design/02-ddp-and-api.md §Known server
-     *   quirks). This is the exclusion that keeps them off the tracker.
+     * - `reset == null` — a slot-shaped row with **no reset rule**, which the tracker has
+     *   nothing to say about: every control on a slot row is "spend it and a rest brings it
+     *   back", and a row that no rest restores would offer a promise the sheet does not keep.
      * - `total == 0` — slot levels the character cannot reach yet.
+     *
+     * ### What this exclusion is NOT (FR-23 decision 19)
+     *
+     * It used to be documented as *"`reset == null` — **death saves**"*, on the strength of
+     * 02 §Known server quirks. That reading was a **coincidence** and the death-save probe
+     * (2026-08-24) retired it: the pair happens to carry no reset rule, but so may anything
+     * else, and nothing on the wire says "this null means death save". Death saves are
+     * discovered by [deathSaves] from their `variableName`, which is what the server actually
+     * guarantees — and `docs/dicecloud-api.md`'s line carries the same amendment.
+     *
+     * The *exclusion* still does its job and is unchanged; only the claim about why has been
+     * corrected. Believing the old one would have made the FR-23 block impossible to build on
+     * a sheet whose death saves are typed `attribute` rather than `spellSlot`.
      */
     private fun spellSlot(p: JsonObject): TrackedResource? {
         if (!p.isAttribute(ATTR_SPELL_SLOT) || p.isSkipped()) return null
@@ -170,6 +200,61 @@ object TrackerEngine {
         }
         if (!matches) return null
         return p.toResource(kind, total = p.number("total") ?: 0, reset = ResetRule.fromWire(p.string("reset")))
+    }
+
+    /**
+     * FR-23 decision 19: the death-save pair, discovered by **`variableName`**.
+     *
+     * ### The discriminator, and the one it replaced
+     *
+     * `variableName ∈ {deathSaveSuccesses, deathSaveFails}` — the names DiceCloud's own sheet
+     * computes against, so they are stable in a way a shape is not. The design's own words:
+     * *"the old 'reset==null ⇒ death save' reading is a COINCIDENCE"*. [spellSlot]'s comment
+     * carries the correction from the other side.
+     *
+     * The `type` is checked (`attribute`) and the `attributeType` deliberately is **not**: the
+     * probe found the pair typed `spellSlot` on the sheets it saw and the design allows either
+     * (*"type attribute/spellSlot"*), so keying on the sub-type would re-create exactly the
+     * fragility the variable-name rule exists to remove.
+     *
+     * ### The inversion, applied once, here
+     *
+     * Storage is `value` = marks and `damage` = `3 − value`. [remaining] already returns the
+     * property's `value` when it has one, so a mark count falls straight out — and on a sheet
+     * that omits `value`, `total − damage` is the same number by the identity above. Nothing
+     * downstream of this function has to know; see [DeathSaves] for why that is the point.
+     *
+     * ### Both, or neither
+     *
+     * `null` unless **both** halves are found (decision 18: *"no pair, no block, no error"*).
+     * A sheet carrying only successes is not a sheet this block can render — three failure pips
+     * would have nowhere to write — and half a death-save tracker at a table is worse than
+     * none. The Dummy has neither, which is the case that made this explicit rather than
+     * assumed.
+     *
+     * Counts are clamped into `0..MAX` on the way in. The server clamps natively on write
+     * (probe-verified) and this is the read side of the same rule: a sheet whose `value` drifted
+     * to 4 through some other client would otherwise paint a fourth pip into a row of three.
+     */
+    private fun deathSaves(properties: List<JsonObject>): DeathSaves? {
+        fun find(variableName: String): JsonObject? = properties.firstOrNull {
+            it.string("type") == TYPE_ATTRIBUTE &&
+                !it.isSkipped() &&
+                it.string("variableName") == variableName
+        }
+
+        val successes = find(VAR_DEATH_SAVE_SUCCESSES) ?: return null
+        val failures = find(VAR_DEATH_SAVE_FAILURES) ?: return null
+
+        fun marks(p: JsonObject): Int =
+            p.remaining(p.number("total") ?: DeathSaves.MAX).coerceIn(0, DeathSaves.MAX)
+
+        return DeathSaves(
+            successesPropertyId = successes.string("_id") ?: return null,
+            failuresPropertyId = failures.string("_id") ?: return null,
+            successes = marks(successes),
+            failures = marks(failures),
+        )
     }
 
     /**

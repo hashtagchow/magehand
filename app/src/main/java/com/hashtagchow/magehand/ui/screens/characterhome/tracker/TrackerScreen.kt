@@ -73,6 +73,11 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.core.model.DeathSaves
+import com.hashtagchow.magehand.ui.components.DirectEntryDialog
+import com.hashtagchow.magehand.ui.components.DirectEntryKeys
+import com.hashtagchow.magehand.ui.components.DirectEntryKind
+import com.hashtagchow.magehand.ui.components.directEntry
 import com.hashtagchow.magehand.ui.theme.DisabledContent
 import com.hashtagchow.magehand.ui.theme.mageHandIconButtonColors
 
@@ -98,8 +103,44 @@ data class TrackerActions(
     /** The HP number was tapped — 04 §3's "damage/heal number pad on tap". */
     val onHpTap: () -> Unit = {},
 
+    /**
+     * FR-22 direct entry on the HP row (15 decisions 5 and 6): set hit points to an absolute
+     * value.
+     *
+     * The same intent the number pad's Set button already calls, reached by the long press
+     * decision 5 names. It is a *separate* callback from [onHpTap] because that one opens a
+     * dialog and this one is a write — see [TrackerTab] for why the long press does not simply
+     * reopen the pad.
+     */
+    val onHpSet: (value: Int) -> Unit = {},
+
+    /**
+     * FR-22 direct entry on a slot or resource row (decision 6: delta-shaped, one op).
+     *
+     * The value is absolute — what the row should read — and the view model turns it into the
+     * single `spend` or `restore` that gets there. The composable does not do that arithmetic,
+     * for the reason every other callback here carries an id and nothing else: the row is
+     * re-resolved against the live board before anything is written.
+     */
+    val onResourceSet: (propertyId: String, value: Int) -> Unit = { _, _ -> },
+
     /** A consumable's − / + stepper. */
     val onItemDelta: (propertyId: String, delta: Int) -> Unit = { _, _ -> },
+
+    /** FR-22 direct entry on a consumable's quantity (decision 6: absolute-shaped, one op). */
+    val onItemSet: (propertyId: String, value: Int) -> Unit = { _, _ -> },
+
+    /**
+     * FR-23 (15 decisions 19–21): a death-save pip was tapped, carrying the marks the block
+     * should read afterwards.
+     *
+     * **Both counts, always**, even though a tap only ever moves one of them. The intent behind
+     * it is pair-shaped — `OpenCharacter.setDeathSaves` writes two properties and skips the half
+     * that did not change — and a callback that carried only the moved half would have made the
+     * composable responsible for remembering the other, on a screen that re-derives everything
+     * from state on every frame.
+     */
+    val onDeathSaves: (successes: Int, failures: Int) -> Unit = { _, _ -> },
 
     /** A condition chip, or the concentration banner's ✕ (the same `flipToggle` write). */
     val onToggle: (propertyId: String) -> Unit = {},
@@ -229,12 +270,55 @@ fun TrackerTab(
     actions: TrackerActions = TrackerActions(),
     shake: ShakeSignal? = null,
 ) {
+    // FR-22 (15 decision 5). The dialog is hoisted to the tab rather than owned by each row so
+    // that only one can be open, and it is keyed by **id** rather than by a captured row for
+    // `InventoryUiState.row`'s reason: an open dialog stays live against a sync, and a row that
+    // stops existing underneath it closes the dialog instead of freezing a stale number.
+    //
+    // `rememberSaveable` of a `String?` rather than of the row: a rotation mid-type must not
+    // throw the gesture away (the field's own text is saved by `DirectEntryDialog`), and a key
+    // is the only part of this that a `Bundle` can carry.
+    var entryKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val entry = entryKey?.let { state.directEntryTarget(it) }
+    // A key naming a row the board no longer has: drop the gesture rather than leave a dialog
+    // that cannot resolve what it is editing.
+    if (entryKey != null && entry == null) entryKey = null
+
+    entry?.let { target ->
+        DirectEntryDialog(
+            // HP has no name on the sheet — `directEntryTarget` leaves it blank on purpose and
+            // the copy is resolved here, which is this screen's standing split between rules
+            // (testable, in the state) and words (`strings.xml`, in the composable).
+            label = target.label.ifEmpty { stringResource(R.string.tracker_hit_points) },
+            current = target.current,
+            max = target.max,
+            onSet = { value ->
+                when (target.kind) {
+                    DirectEntryKind.HIT_POINTS -> actions.onHpSet(value)
+                    DirectEntryKind.RESOURCE -> actions.onResourceSet(target.propertyId, value)
+                    DirectEntryKind.ITEM -> actions.onItemSet(target.propertyId, value)
+                    // The tracker has no wallet — `directEntryTarget` never mints a coin key
+                    // here — but the enum is shared with the inventory tab, so the branch is
+                    // named rather than swept into an `else` that would silently absorb a
+                    // future kind this tab *does* need to handle.
+                    DirectEntryKind.COIN -> Unit
+                }
+            },
+            onDismiss = { entryKey = null },
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .semantics { testTagsAsResourceId = true },
     ) {
-        TrackerContent(state = state, actions = actions, shake = shake)
+        TrackerContent(
+            state = state,
+            actions = actions,
+            shake = shake,
+            onDirectEntry = { key -> entryKey = key },
+        )
 
         // Quiet when healthy, and quiet over the spinner while a redial is in flight —
         // but never over a spinner that is never going to end (offline / signed out),
@@ -259,6 +343,7 @@ private fun TrackerContent(
     state: TrackerUiState,
     actions: TrackerActions,
     shake: ShakeSignal?,
+    onDirectEntry: (String) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         state.concentratingOn?.let { name ->
@@ -294,6 +379,20 @@ private fun TrackerContent(
             ),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // FR-23 decision 18: "Unmissable, above HP." Above rather than inside the HP block
+            // and above rather than below it — a player at 0 HP is looking for one thing, and it
+            // is not their hit points. `state.deathSaves` is already the whole trigger (pair
+            // discovered AND the HP row reads zero); see `TrackerUiState.deathSaves`.
+            state.deathSaves?.let { saves ->
+                item(key = "death-saves") {
+                    DeathSaveBlock(
+                        saves = saves,
+                        canWrite = state.canWrite,
+                        onMark = actions.onDeathSaves,
+                    )
+                }
+            }
+
             state.hp?.let { hp ->
                 item(key = "hp") {
                     HpBlock(
@@ -301,6 +400,7 @@ private fun TrackerContent(
                         canWrite = state.canWrite,
                         onDelta = actions.onHpDelta,
                         onTapNumber = actions.onHpTap,
+                        onDirectEntry = { onDirectEntry(DirectEntryKeys.HIT_POINTS) },
                         modifier = Modifier.shakeOn(shake, hp.propertyId),
                     )
                 }
@@ -336,6 +436,7 @@ private fun TrackerContent(
                         canWrite = state.canWrite,
                         onSpend = actions.onSpend,
                         onRestore = actions.onRestore,
+                        onDirectEntry = { onDirectEntry(DirectEntryKeys.resource(row.propertyId)) },
                         modifier = Modifier.shakeOn(shake, row.propertyId),
                     )
                 }
@@ -352,6 +453,7 @@ private fun TrackerContent(
                         canWrite = state.canWrite,
                         onSpend = actions.onSpend,
                         onRestore = actions.onRestore,
+                        onDirectEntry = { onDirectEntry(DirectEntryKeys.resource(row.propertyId)) },
                         modifier = Modifier.shakeOn(shake, row.propertyId),
                     )
                 }
@@ -366,6 +468,7 @@ private fun TrackerContent(
                         row = row,
                         canWrite = state.canWrite,
                         onDelta = actions.onItemDelta,
+                        onDirectEntry = { onDirectEntry(DirectEntryKeys.item(row.propertyId)) },
                         modifier = Modifier.shakeOn(shake, row.propertyId),
                     )
                 }
@@ -561,6 +664,7 @@ private fun HpBlock(
     canWrite: Boolean,
     onDelta: (Int) -> Unit,
     onTapNumber: () -> Unit,
+    onDirectEntry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -582,7 +686,23 @@ private fun HpBlock(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(12.dp))
-                        .clickable(enabled = canWrite, onClick = onTapNumber)
+                        // FR-22 decisions 5 and 8. The **tap keeps the number pad** — it has
+                        // opened it since WP7 and removing a shipped control to make four
+                        // surfaces symmetrical would be a regression dressed as consistency —
+                        // so here the long press is the whole of the new gesture. The pad's own
+                        // Set button reaches the same intent, which is why the spoken sentence
+                        // is true of both.
+                        .directEntry(
+                            enabled = canWrite,
+                            spoken = stringResource(
+                                R.string.direct_entry_spoken_of,
+                                stringResource(R.string.tracker_hit_points),
+                                hp.current,
+                                hp.max,
+                            ),
+                            onOpen = onDirectEntry,
+                            onClick = onTapNumber,
+                        )
                         .testTag("tracker:hp:pad"),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
@@ -652,6 +772,152 @@ private fun HpBlock(
 }
 
 /**
+ * FR-23's death-save block (docs/design/15-polish-batch.md decisions 18–21).
+ *
+ * ### Why it is at the top and why it is loud
+ *
+ * Decision 18: *"Unmissable, above HP."* A character at 0 HP is the one moment in a session
+ * where the tracker has something urgent to say, and the block is only ever on screen then — so
+ * it can afford the error container and the full width. Nothing is competing with it, because
+ * the trigger guarantees the situation.
+ *
+ * ### Two rows of pips, and why they are not [PipRow]s
+ *
+ * A `PipRow` means "you have N of these left and spending one takes it away": its filled pips
+ * are what remains, its taps go to `spend`/`restore`, and it draws a progress bar past eight.
+ * Death saves invert every one of those — the pips fill as things get *worse*, there is no
+ * resource being consumed, the write is an absolute `set`, and there are always exactly three.
+ * Reusing the row would have meant four exceptions inside a composable built on the opposite
+ * reading; six `Pip`s and the shared 48 dp target is the part actually worth sharing.
+ *
+ * ### What a tap does (decision 20's "one tap fixes")
+ *
+ * Tapping pip *i* sets that row to `i + 1`, **except** when the row already reads `i + 1`, in
+ * which case it sets `i` — so the last filled pip toggles itself off and every count from 0 to 3
+ * is one tap away. That is what makes a stale-marks sheet correctable: the design accepts that a
+ * character healed by another client keeps their marks, on the explicit grounds that the pips
+ * are tappable, so "clear these" has to be reachable and cheap. Clearing both rows is two taps.
+ *
+ * Taps are refused off-LIVE like every other write on this screen, and the pips dim rather than
+ * disappear (04 §UX principles).
+ *
+ * ### Stable and dead are a *line*, not a colour
+ *
+ * `hpBarColor`'s rule, applied here: colour is the second signal and never the only one. A
+ * player at three failures in a dim room reads the sentence.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun DeathSaveBlock(
+    saves: DeathSaves,
+    canWrite: Boolean,
+    onMark: (successes: Int, failures: Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("tracker:deathsaves"),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.tracker_section_death_saves).uppercase(),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+            )
+
+            DeathSaveRow(
+                label = stringResource(R.string.death_saves_successes),
+                marks = saves.successes,
+                canWrite = canWrite,
+                descriptionRes = R.string.death_saves_mark_success,
+                testTag = "tracker:deathsaves:successes",
+                onSet = { onMark(it, saves.failures) },
+            )
+            DeathSaveRow(
+                label = stringResource(R.string.death_saves_failures),
+                marks = saves.failures,
+                canWrite = canWrite,
+                descriptionRes = R.string.death_saves_mark_failure,
+                testTag = "tracker:deathsaves:failures",
+                onSet = { onMark(saves.successes, it) },
+            )
+
+            // Derived, never read off the sheet — `creature.deathSave` is vestigial (decision
+            // 19). Both can be true at once on a sheet another client left inconsistent, and
+            // both are then printed rather than one being chosen: the block's job here is to
+            // report what the marks say, and "3 and 3" is a state a player has to see to fix.
+            if (saves.isStable) {
+                Text(
+                    text = stringResource(R.string.death_saves_stable),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.testTag("tracker:deathsaves:stable"),
+                )
+            }
+            if (saves.isDead) {
+                Text(
+                    text = stringResource(R.string.death_saves_dead),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.testTag("tracker:deathsaves:dead"),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One labelled row of three death-save pips.
+ *
+ * [onSet] receives the count this row should hold — see [DeathSaveBlock] for the toggle rule.
+ * The description names the row, the count and the number the tap will produce, because a pip
+ * carries no text and "button" is all a screen reader would otherwise have to work with.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun DeathSaveRow(
+    label: String,
+    marks: Int,
+    canWrite: Boolean,
+    @androidx.annotation.StringRes descriptionRes: Int,
+    testTag: String,
+    onSet: (Int) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier
+                .weight(1f)
+                // The count is on the pips; naming it here too is what lets a screen-reader
+                // user hear the row without stepping through three buttons to count them.
+                .semantics { contentDescription = "$label, $marks / ${DeathSaves.MAX}" }
+                .testTag(testTag),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            repeat(DeathSaves.MAX) { index ->
+                val filled = index < marks
+                val next = if (marks == index + 1) index else index + 1
+                Pip(
+                    filled = filled,
+                    enabled = canWrite,
+                    onClick = { onSet(next) },
+                    contentDescription = stringResource(descriptionRes, marks, DeathSaves.MAX, next),
+                    modifier = Modifier.testTag("$testTag:pip:$index"),
+                )
+            }
+        }
+    }
+}
+
+/**
  * Red below a quarter, amber below a half, otherwise the accent.
  *
  * Colour is the *second* signal here, never the only one — the number is right above it —
@@ -681,6 +947,7 @@ private fun PipRow(
     canWrite: Boolean,
     onSpend: (String) -> Unit,
     onRestore: (String) -> Unit,
+    onDirectEntry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
@@ -699,10 +966,30 @@ private fun PipRow(
             )
             Text(
                 // The probe's parity anchor: one string, "value / total", per row.
+                //
+                // FR-22 adds a gesture to this node and deliberately changes **nothing** about
+                // it otherwise. The FR-20 wave's constraint is that the probe reads `text` and
+                // `resource-id` off `adb uiautomator dump`: `directEntry` writes
+                // `contentDescription` (a different attribute) and adds a click action, so the
+                // string and the tag the probe compares against the REST snapshot are byte-for-
+                // byte what they were. The tag must stay on this modifier chain for the same
+                // reason — a tag set after `clearAndSetSemantics` would be erased, which is the
+                // trap `ResetBadge` documents.
                 text = "${row.value} / ${row.total}",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.testTag(testTag),
+                modifier = Modifier
+                    .directEntry(
+                        enabled = canWrite,
+                        spoken = stringResource(
+                            R.string.direct_entry_spoken_of,
+                            row.label,
+                            row.value,
+                            row.total,
+                        ),
+                        onOpen = onDirectEntry,
+                    )
+                    .testTag(testTag),
             )
         }
 
@@ -855,6 +1142,7 @@ private fun ConsumableRow(
     row: ConsumableState,
     canWrite: Boolean,
     onDelta: (String, Int) -> Unit,
+    onDirectEntry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -881,6 +1169,13 @@ private fun ConsumableRow(
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier
                 .width(48.dp)
+                // FR-22. No ceiling: an item has no maximum (decision 7). See [PipRow]'s note
+                // for why this leaves the probe's anchor intact.
+                .directEntry(
+                    enabled = canWrite,
+                    spoken = stringResource(R.string.direct_entry_spoken, row.name, row.quantity),
+                    onOpen = onDirectEntry,
+                )
                 .testTag("tracker:item:${row.propertyId}"),
         )
         StepperButton(

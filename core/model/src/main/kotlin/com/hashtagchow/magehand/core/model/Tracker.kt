@@ -85,6 +85,108 @@ data class TrackedResource(
 )
 
 /**
+ * The number a player typed into FR-22's direct-entry dialog — an **absolute target**, not a
+ * nudge (docs/design/15-polish-batch.md decision 6).
+ *
+ * ### Why a type and not an `Int`
+ *
+ * Because it is the *only* thing distinguishing "move this item by 3" from "make this item say
+ * 3", and both are `adjustItem`. Decision 9 is binding — *"no new DDP methods, no new intents…
+ * direct entry composes existing intents"* — so direct entry cannot introduce a
+ * `setItemQuantity` alongside `adjustItem`; `WritePostureTest`'s allow-list is the catalog and
+ * this wave does not widen it. What it can do is give the existing intent a second **shape**,
+ * and an overload needs a parameter type the delta overload cannot be confused with. A boolean
+ * flag would have compiled just as well and read as nothing at the call site.
+ *
+ * Deliberately **not** a `@JvmInline value class`: Kotlin mangles the JVM name of any function
+ * taking one (`adjustItem-hbXcOEA`), which would change `OpenCharacter`'s method-name set and
+ * fail the very posture assertion this type exists to keep true. One allocation per typed
+ * number is not a cost worth that.
+ *
+ * ### Why it is in `:core:model`
+ *
+ * `WritePostureTest` asserts that `:app` holds no reference to `core.data.write`, so the
+ * vocabulary a composable uses to ask for an absolute write cannot live beside `WriteOperation`.
+ * It lives here, with `TrackedResource` and `WalletRow` — the two rows it is ever paired with.
+ *
+ * @param value what the row should read afterwards. Callers clamp before constructing; the
+ *   implementations clamp again at the floor, because a negative quantity is a state neither
+ *   DiceCloud's own UI nor this app can produce and nothing in this release could undo one.
+ */
+data class ExactQuantity(val value: Int)
+
+/**
+ * The death-save pair — three successes and three failures (FR-23,
+ * docs/design/15-polish-batch.md decisions 18–21).
+ *
+ * ### One type for two properties, and why
+ *
+ * On the wire these are two independent `creatureProperties`, and the app could have carried two
+ * [TrackedResource]s. It does not, because **nothing in this feature is ever true of one of them
+ * alone**: the block renders iff *both* were discovered (decision 18), stable and dead are
+ * derived by comparing the two counts against the same cap, and the clear-on-heal write sends
+ * `set 0` to **both** (decision 20). A pair of nullable rows would have made every one of those
+ * a two-null check at the call site, and "one arrived and the other did not" a state the UI had
+ * to have an opinion about.
+ *
+ * ### Storage is inverted, and this type is where that stops being true
+ *
+ * Decision 19: the sheet stores `value` = **marks** and `damage` = `3 − value`, which is the
+ * reverse of every other attribute in this app (where `value` is what is *left* and `damage` is
+ * what was spent). [successes] and [failures] are marks — the number of filled pips — so that
+ * nothing above `TrackerEngine` has to remember the inversion. The write is `damage
+ * {operation:'set', value:n}` with `n` in the same units, because `set` takes the resulting
+ * `value` (the deviation `WriteOp.setValue` records).
+ *
+ * ### Not a `TrackedResource`, deliberately
+ *
+ * A `TrackedResource` means "spend this and it goes down"; every control that consumes one — the
+ * pip row, the steppers, the `spend`/`restore` intents — is built on that reading. Death saves
+ * go *up* as things get worse, have no reset rule the client may act on (decision 20: the server
+ * never clears them), and are written with an absolute set rather than an increment. Reusing the
+ * type would have put all four of those exceptions inside code that assumes none of them.
+ *
+ * @param successesPropertyId the `deathSaveSuccesses` property, for the write.
+ * @param failuresPropertyId the `deathSaveFails` property.
+ * @param successes filled success pips, 0..[MAX].
+ * @param failures filled failure pips, 0..[MAX].
+ */
+data class DeathSaves(
+    val successesPropertyId: String,
+    val failuresPropertyId: String,
+    val successes: Int,
+    val failures: Int,
+) {
+    /**
+     * Three successes: the character is stable.
+     *
+     * A **derivation**, not a stored flag — decision 19 says so in as many words. `creature.
+     * deathSave` exists in DiceCloud's schema and the probe found it vestigial and unwritable,
+     * so a client that read a "stabilized" boolean off the sheet would be reading a field
+     * nothing maintains. Counting pips is the only honest answer.
+     */
+    val isStable: Boolean get() = successes >= MAX
+
+    /** Three failures. The other derivation, for the same reason. */
+    val isDead: Boolean get() = failures >= MAX
+
+    /**
+     * Whether the block should still offer taps.
+     *
+     * It should, even at three-and-out: decision 20's *"pips are tappable; one tap fixes"* is
+     * the remedy for a sheet another client healed without clearing, and a block that locked
+     * itself at three failures would be a block a player could not correct. Kept as a named
+     * property anyway so a future rule change has one place to live.
+     */
+    val isEditable: Boolean get() = true
+
+    companion object {
+        /** 5e: three of either ends it. Also the properties' `total` on every sheet seen. */
+        const val MAX: Int = 3
+    }
+}
+
+/**
  * A user-flippable `toggle` property, rendered as a quick chip and written with
  * `creatureProperties.flipToggle`.
  */
@@ -327,6 +429,23 @@ data class TrackerBoard(
     val rolls: List<RollModifier> = emptyList(),
     /** Name of the active concentration source, or `null`. */
     val concentratingOn: String? = null,
+    /**
+     * The discovered death-save pair, or `null` when this sheet carries no such subtree
+     * (FR-23 decision 18: *"Sheets without the subtree exist (the Dummy) — no pair, no block,
+     * no error"*).
+     *
+     * **Presence here is discovery, not visibility.** Whether the block *renders* also needs
+     * the HP row to read zero, and that gate lives in `TrackerUiState` rather than here — for
+     * the reason `TrackerEngine.build` produces this board **before** the optimistic overlay is
+     * applied: `hp` on *that* board can still read zero for the frame after a heal is tapped.
+     * The type is reused for the overlay-adjusted board too — `CreatureSession.board`, what a
+     * consumer like `DefaultOpenCharacter` actually holds, is `overlay.applyTo(...)` of this
+     * same class — so "this object" is not a safe stand-in for "the sheet's value" in general;
+     * only the pre-overlay instance the engine builds is. Gating discovery on the pre-overlay
+     * `hp` would leave the block on screen through an optimistic heal and take it away again on
+     * the rollback.
+     */
+    val deathSaves: DeathSaves? = null,
 ) {
     val isEmpty: Boolean
         get() = hp == null && tempHp == null && slots.isEmpty() && resources.isEmpty() &&

@@ -73,6 +73,26 @@ data class LocalCharacterEntity(
     @ColumnInfo(defaultValue = "0") val gp: Int = 0,
     @ColumnInfo(defaultValue = "0") val sp: Int = 0,
     @ColumnInfo(defaultValue = "0") val cp: Int = 0,
+    /**
+     * The two death-save columns schema **version 6** adds (FR-23,
+     * docs/design/15-polish-batch.md decision 13). Marks, not remaining — `0..DeathSaves.MAX`.
+     *
+     * ### Two `Int`s, not a `DeathSaves`
+     *
+     * A local character has no `creatureProperties` and therefore no pair of property ids to
+     * carry, which is most of what `DeathSaves` is. What survives the trip to a Room row is the
+     * two counts, and `LocalTrackerBoard` rebuilds the domain type from them with synthetic ids
+     * — exactly the shape the four coin columns already have against `CoinPurse`.
+     *
+     * `defaultValue` is declared for the coin columns' reason, unchanged: SQLite requires a
+     * `DEFAULT` when adding a `NOT NULL` column to a populated table, so the migrated column
+     * carries one, and an entity that did not declare it would make a fresh install's
+     * `CREATE TABLE` disagree with the migrated schema. `0` is also the only honest value —
+     * every row predating this column belongs to a character nobody has ever rolled a death
+     * save for, because the app had nowhere to record one.
+     */
+    @ColumnInfo(defaultValue = "0") val deathSuccesses: Int = 0,
+    @ColumnInfo(defaultValue = "0") val deathFailures: Int = 0,
     val createdAt: Long,
     val updatedAt: Long,
 )
@@ -103,9 +123,16 @@ data class LocalTrackerRowEntity(
      * The *same* wire strings DiceCloud uses (`"shortRest"` / `"longRest"`), not a second
      * private vocabulary, so [ResetRule.fromWire] is the only parser in the app and a
      * database dump reads the same either side of the local/server line. `NOT NULL` with an
-     * explicit `"none"` rather than a nullable column: on a discovered spell slot a null
-     * reset means "this is a death-save counter" (02 §Known server quirks), and reusing null
-     * for a user's deliberate "no reset" would put two unrelated meanings on one absence.
+     * explicit `"none"` rather than a nullable column: on a *discovered* sheet a null reset is
+     * already load-bearing — `TrackerEngine.spellSlot` drops those rows, because a slot no rest
+     * restores is a slot the tracker's controls would lie about — so reusing null for a user's
+     * deliberate "no reset" would put two unrelated meanings on one absence.
+     *
+     * The clause this used to carry — *"a null reset means this is a death-save counter"* — is
+     * **retired** by FR-23 decision 19: that reading was a coincidence, and death saves are
+     * discovered by `variableName`. The column's argument survives it intact, because the
+     * exclusion it depends on is unchanged; only the story about what the null *means* was
+     * wrong. See `TrackerEngine.spellSlot`, where the correction lives in full.
      */
     val resetRule: String,
     val sortIndex: Int,
@@ -181,6 +208,8 @@ fun LocalCharacterEntity.toDomain(): LocalCharacter = LocalCharacter(
     currentHp = currentHp,
     armorClass = armorClass,
     coins = CoinPurse(platinum = pp, gold = gp, silver = sp, copper = cp),
+    deathSuccesses = deathSuccesses,
+    deathFailures = deathFailures,
     createdAt = createdAt,
     updatedAt = updatedAt,
 )
@@ -202,6 +231,8 @@ fun LocalCharacter.toEntity(): LocalCharacterEntity = LocalCharacterEntity(
     gp = coins.gold,
     sp = coins.silver,
     cp = coins.copper,
+    deathSuccesses = deathSuccesses,
+    deathFailures = deathFailures,
     createdAt = createdAt,
     updatedAt = updatedAt,
 )

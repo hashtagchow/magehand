@@ -7,6 +7,7 @@ import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
@@ -83,6 +84,13 @@ class FakeOpenCharacter(
         writes += "item ${item.propertyId} $delta"
     }
 
+    // FR-22's absolute shape, recorded with a distinct verb (`item=`, as `hp=` already reads)
+    // so a test asserting these strings can tell "move it by 3" from "make it say 3" — which is
+    // the one difference the overload exists to carry.
+    override fun adjustItem(item: TrackedResource, target: ExactQuantity) {
+        writes += "item= ${item.propertyId} ${target.value}"
+    }
+
     override val inventory = MutableStateFlow(InventoryBoard.EMPTY)
 
     override fun setEquipped(
@@ -115,6 +123,14 @@ class FakeOpenCharacter(
 
     override fun adjustCoins(row: WalletRow, delta: Int) {
         writes += "coins ${row.coin} $delta"
+    }
+
+    override fun adjustCoins(row: WalletRow, target: ExactQuantity) {
+        writes += "coins= ${row.coin} ${target.value}"
+    }
+
+    override fun setDeathSaves(successes: Int, failures: Int) {
+        writes += "deathsaves $successes/$failures"
     }
 
     override fun toggle(condition: ConditionToggle) {
