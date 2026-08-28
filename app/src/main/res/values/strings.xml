@@ -177,6 +177,11 @@
     <string name="tracker_section_slots">Spell slots</string>
     <string name="tracker_section_resources">Resources</string>
     <string name="tracker_section_consumables">Consumables</string>
+    <!-- FR-30 (docs/design/18-table-pack.md decision 17). The row label is composed here and
+         not in TrackerEngine, which has no R class: the engine carries the die size as a fact
+         (TrackedResource.dieSize) and this is the one place the word "Hit Dice" is written. -->
+    <string name="tracker_section_hit_dice">Hit dice</string>
+    <string name="tracker_hit_dice_row">Hit Dice %1$s</string>
     <string name="tracker_section_conditions">Conditions</string>
     <string name="tracker_conditions_inactive">%1$d inactive</string>
     <string name="tracker_conditions_show_inactive">Show %1$d inactive conditions</string>
@@ -189,6 +194,15 @@
     <string name="tracker_add_one">Add one %1$s</string>
     <string name="tracker_concentrating">Concentrating: %1$s</string>
     <string name="tracker_drop_concentration">Drop concentration</string>
+    <!-- FR-31 (docs/design/18-table-pack.md decisions 9-12). Decision 10: "The DC math is
+         labeled transparently — the transparency IS the variant-rules answer", so the rule is
+         printed beside the number rather than the number alone. The spoken sentence carries the
+         DC first because that is what the prompt is for, and it is announced assertively (the
+         check is time-sensitive) — decision 12. -->
+    <string name="tracker_concentration_prompt">Concentration check — DC %1$d</string>
+    <string name="tracker_concentration_prompt_rule">half of %1$d damage, minimum 10</string>
+    <string name="tracker_concentration_prompt_spoken">Concentration check. DC %1$d, half of %2$d damage, minimum 10. Concentrating on %3$s.</string>
+    <string name="tracker_concentration_prompt_dismiss">Dismiss concentration check</string>
     <string name="tracker_short_rest">Short</string>
     <string name="tracker_long_rest">Long</string>
     <string name="tracker_snapshot_synced">Showing the last saved copy — synced %1$s.</string>
@@ -341,7 +355,7 @@
     <string name="local_section_abilities">Ability scores</string>
     <string name="local_section_combat">Combat</string>
     <string name="local_section_rows">Tracker rows</string>
-    <string name="local_rows_note">Spell slots, resources and items you want on the tracker.</string>
+    <string name="local_rows_note">Spell slots, resources and items you want on the tracker, and actions you want to use.</string>
     <string name="local_kind_slot">Slot</string>
     <string name="local_kind_resource">Resource</string>
     <string name="local_kind_item">Item</string>
@@ -364,6 +378,21 @@
     <string name="local_delete_title">Delete this character?</string>
     <string name="local_delete_body">%1$s and everything on their tracker will be removed from this device.</string>
     <string name="local_delete_not_undoable">This cannot be undone — local characters are not backed up anywhere.</string>
+
+    <!-- FR-29: local actions (docs/design/18-table-pack.md decisions 1-4).
+         `local_field_uses` names the "0" case in the label rather than leaving it to a hint,
+         because zero is a CHOICE here (unlimited) and not the error it is on a slot — see
+         LocalTrackerRow.total. `local_cost_none` is one of the picker's options and not the
+         absence of the others, matching how `local_reset_none` reads. -->
+    <string name="local_kind_action">Action</string>
+    <string name="local_add_action">Add action</string>
+    <string name="local_field_uses">Uses (0 for unlimited)</string>
+    <string name="local_field_description">Description</string>
+    <string name="local_field_cost">Each use spends</string>
+    <string name="local_field_cost_amount">How many</string>
+    <string name="local_cost_none">Nothing</string>
+    <string name="local_cost_unnamed_row">Unnamed row</string>
+    <string name="local_error_row_cost">Pick what this spends and how many, or choose Nothing.</string>
 
 
     <!-- FR-19: DM view (docs/design/14-large-screen-arc.md decisions 11-19) -->
@@ -620,13 +649,39 @@
     <string name="action_use_dropped">Couldn\'t use that right now — try again</string>
     <string name="action_use_ritual">Cast as a ritual (takes 10 minutes longer, spends no slot)</string>
 
+    <!-- FR-32: quest log (docs/design/18-table-pack.md decisions 13-16). Read-only in v1, so
+         there is no "mark done" copy here and deliberately none to add. `quests_closed` labels
+         the group rather than each row: closed quests sort to the bottom as a block. -->
+    <string name="quests_title">Quests</string>
+    <string name="quests_open_header">Open</string>
+    <string name="quests_closed_header">Closed</string>
+    <string name="quests_expand">Show details</string>
+    <string name="quests_collapse">Hide details</string>
+
     <!-- Actions -->
     <string name="action_settings">Settings</string>
     <string name="action_back">Back</string>
+    <!-- 1.9.1 app-bar decrowding: the character-home overflow icon's TalkBack label. The
+         DropdownMenuItems it opens keep their own existing labels (customize_title,
+         inventory_customize_title, quests_title, panes_order_title, action_settings,
+         action_edit_character) — this string names only the trigger, spoken by itself the
+         way `action_back`/`action_settings` are. -->
+    <string name="action_more_options">More options</string>
     <string name="action_close">Close</string>
     <string name="action_cancel">Cancel</string>
     <string name="action_undo">Undo</string>
     <string name="action_sign_in">Sign in</string>
+    <!-- FR-33: the password field's reveal toggle. Two pairs, not one, and both halves earn
+         their place. The *visible* label is one word because it lives in a text field's trailing
+         slot, where "Show password" would squeeze the field it belongs to. The *spoken* label is
+         the whole phrase, because "Show" on its own tells a screen-reader user nothing about what
+         it shows. And each is two strings rather than one, because the label has to say what
+         pressing it DOES and that flips with the state — a single "Password visibility" would
+         leave the same user unable to tell which way it is currently set. -->
+    <string name="credentials_password_show">Show</string>
+    <string name="credentials_password_hide">Hide</string>
+    <string name="action_show_password">Show password</string>
+    <string name="action_hide_password">Hide password</string>
     <string name="action_sign_out">Sign out</string>
     <string name="action_add_account">Add another account</string>
     <string name="action_new_character">New character</string>

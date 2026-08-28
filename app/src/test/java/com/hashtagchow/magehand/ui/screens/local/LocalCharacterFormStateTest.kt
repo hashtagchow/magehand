@@ -185,7 +185,7 @@ class LocalCharacterFormStateTest {
     }
 
     @Test
-    fun `a reset rule is kept while editing but only saved on a resource`() {
+    fun `a reset rule is kept while editing but only saved on a resource or an action`() {
         val row = LocalRowFormState(
             kind = LocalRowKind.SLOT,
             label = "1st Level",
@@ -193,10 +193,13 @@ class LocalCharacterFormStateTest {
             reset = ResetRule.SHORT_REST,
         )
 
-        // 09 decision 4 gives the reset rule to resources only…
+        // 09 decision 4 gives the reset rule to resources; slots and items never save one…
         assertNull(row.toRowForm().reset)
         // …but flipping the kind back must not have lost what the player picked.
         assertEquals(ResetRule.SHORT_REST, row.copy(kind = LocalRowKind.RESOURCE).toRowForm().reset)
+        // H2 [architect ruling]: 18 decision 1 extends the same vocabulary to an action's uses —
+        // the reset chips are un-gated on the editor for exactly this reason.
+        assertEquals(ResetRule.SHORT_REST, row.copy(kind = LocalRowKind.ACTION).toRowForm().reset)
     }
 
     @Test
@@ -288,15 +291,32 @@ class LocalCharacterFormStateTest {
         assertEquals(listOf("row-1"), state.toForm().rows.map { it.id })
     }
 
+    /**
+     * FR-29 changed half of what this used to assert, and the half it changed is worth stating.
+     *
+     * The **character** still has no id until it is saved — `form.id == null` is what tells
+     * `LocalCharacterRepository.save` this is a create rather than an edit, and that is unchanged
+     * and load-bearing.
+     *
+     * A freshly added **row** now does have one, minted by [LocalRowFormState.new]. That is not a
+     * relaxation: 18 decision 1's cost is a reference from one row of this form to another, and a
+     * reference needs a referent — before the change, an action and the resource it spends, added
+     * in the same sitting, could not be wired together without a save-and-reopen. See
+     * `LocalRowFormState.new` for the argument, and `LocalRowForm.id` for why storage cannot tell
+     * the two mints apart.
+     */
     @Test
-    fun `a freshly created form is not an edit and its rows have no ids yet`() {
+    fun `a freshly created form is not an edit, though its rows already carry ids`() {
         val state = LocalCharacterFormState().copy(
             rows = listOf(LocalRowFormState.new(LocalRowKind.RESOURCE)),
         )
 
         assertFalse(state.isEditing)
         assertNull(state.toForm().id)
-        assertNull(state.toForm().rows.single().id)
+        assertNotNull(
+            "FR-29: a new row needs an id a cost can name",
+            state.toForm().rows.single().id,
+        )
     }
 
     @Test
@@ -310,4 +330,111 @@ class LocalCharacterFormStateTest {
         assertEquals(listOf(LocalCharacterFormError.NameRequired), fresh.errors)
         assertNotNull(fresh.copy(showErrors = true).nameErrorRes)
     }
+
+    // --- FR-29: the action row's fields and the cost picker (18 decisions 1-2) ---
+
+    private fun rageAndAction(
+        costRowId: String? = "rage",
+        costAmount: String = "2",
+        description: String = "Advantage on Strength checks.",
+    ) = LocalCharacterFormState(id = "local-1").copy(
+        rows = listOf(
+            LocalRowFormState(id = "rage", kind = LocalRowKind.RESOURCE, label = "Rage", total = "3"),
+            LocalRowFormState(
+                id = "act",
+                kind = LocalRowKind.ACTION,
+                label = "Enter Rage",
+                total = "2",
+                description = description,
+                costRowId = costRowId,
+                costAmount = costAmount,
+            ),
+        ),
+    )
+
+    /**
+     * The picker offers the character's **other** non-action rows, and nothing else.
+     *
+     * Decision 1's *"lists the character's other rows (slots/resources/items)"* plus decision 2's
+     * chaining fence. Not offering an action is the first half of enforcing that fence; the
+     * validator refusing one is the second, and both exist because a picker is a suggestion while
+     * a validator is a guarantee.
+     */
+    @Test
+    fun `the cost picker offers other rows and never another action`() {
+        val state = rageAndAction().let { s ->
+            s.copy(
+                rows = s.rows + listOf(
+                    LocalRowFormState(id = "potion", kind = LocalRowKind.ITEM, label = "Potion", total = "2"),
+                    LocalRowFormState(id = "other", kind = LocalRowKind.ACTION, label = "Dodge", total = "0"),
+                ),
+            )
+        }
+
+        val options = state.costOptions(index = 1).map { it.id }
+
+        assertEquals(listOf("rage", "potion"), options)
+        assertFalse("decision 2: a cost row cannot itself be an action", "other" in options)
+        assertFalse("and an action never costs itself", "act" in options)
+    }
+
+    /**
+     * FR-29's three fields survive a trip through the kind chooser and back, on the state — and
+     * are dropped on the way *out*, for [reset]'s and [category]'s reason exactly.
+     *
+     * That split is what lets a player flip a row to a slot and back without losing what they had
+     * typed, while what reaches the database is only ever what the kind allows.
+     */
+    @Test
+    fun `an action's fields are kept on the state and dropped for every other kind`() {
+        val action = rageAndAction().rows[1]
+
+        with(action.toRowForm()) {
+            assertEquals("Advantage on Strength checks.", description)
+            assertEquals("rage", costRowId)
+            assertEquals(2, costAmount)
+        }
+
+        with(action.copy(kind = LocalRowKind.RESOURCE).toRowForm()) {
+            assertNull(description)
+            assertNull(costRowId)
+            assertNull(costAmount)
+        }
+        // …and the state still holds them, so switching back restores what was typed.
+        assertEquals("rage", action.copy(kind = LocalRowKind.RESOURCE).costRowId)
+    }
+
+    /**
+     * The pair moves together: clearing the picker drops the amount whatever the box holds, and a
+     * blank amount with a picker set becomes the sentinel so validation catches it.
+     *
+     * `toFormInt`'s whole design — see its KDoc — is that an empty box fails every range rather
+     * than defaulting to something plausible.
+     */
+    @Test
+    fun `no cost row means no amount, and a blank amount is an error rather than a default`() {
+        assertNull(rageAndAction(costRowId = null).rows[1].toRowForm().costAmount)
+
+        val blank = rageAndAction(costAmount = "").rows[1].toRowForm()
+        assertEquals(INVALID_NUMBER, blank.costAmount)
+        assertTrue(
+            LocalCharacterFormError.RowCostInvalid(1) in rageAndAction(costAmount = "").toForm().validate(),
+        )
+    }
+
+    /** The message is only drawn once the player has tried to save — this form's standing rule. */
+    @Test
+    fun `the cost error is quiet until the first submit`() {
+        val bad = rageAndAction(costRowId = "nope")
+
+        assertNull(bad.rowCostErrorRes(1))
+        assertNotNull(bad.copy(showErrors = true).rowCostErrorRes(1))
+    }
+
+    /** An action's number field is uses, and zero is a legal answer there — see the range. */
+    @Test
+    fun `an action's total range reaches zero because zero means unlimited`() {
+        assertEquals(0, LocalRowFormState(kind = LocalRowKind.ACTION).totalRange.first)
+    }
+
 }

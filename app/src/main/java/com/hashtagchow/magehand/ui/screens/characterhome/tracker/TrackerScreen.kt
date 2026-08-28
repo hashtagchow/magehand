@@ -224,9 +224,12 @@ fun shakeIsHiddenByExpander(
  *
  * ### Layout, top→bottom, exactly as 04 §3 orders it
  *
- * concentration banner · HP block · defenses · spell slots · resources · consumables ·
+ * concentration banner · HP block · hit dice · defenses · spell slots · resources · consumables ·
  * condition chips (the active ones, then an "N inactive" expander — see
  * [InactiveConditions]).
+ *
+ * Hit dice are FR-30's addition and sit where 18 decision 17 puts them — directly *below HP*,
+ * above the reference sections, because they are the other thing attached to hit points.
  *
  * Defenses are the one addition to 04 §3's order. They are read-only reference rather than
  * a tracked resource, and they sit directly under HP because that is the question they
@@ -402,6 +405,33 @@ private fun TrackerContent(
                         onTapNumber = actions.onHpTap,
                         onDirectEntry = { onDirectEntry(DirectEntryKeys.HIT_POINTS) },
                         modifier = Modifier.shakeOn(shake, hp.propertyId),
+                    )
+                }
+            }
+
+            // FR-30 decision 17: "rows below HP". Directly below, and above the reference
+            // sections, because hit dice are the *other* thing attached to hit points — a
+            // resource you spend to get some of the block above back — and a player looking at a
+            // battered HP bar is looking for them next. Absent, header and all, for the many
+            // characters whose sheet carries none.
+            if (state.hitDice.isNotEmpty()) {
+                item(key = "hit-dice-header") {
+                    SectionHeader(stringResource(R.string.tracker_section_hit_dice))
+                }
+                items(state.hitDice, key = { "hit-die-${it.propertyId}" }) { row ->
+                    PipRow(
+                        row = row,
+                        testTag = "tracker:hitdie:${row.propertyId}",
+                        canWrite = state.canWrite,
+                        // Decision 18: the EXISTING damage-increment path, same shape as a slot
+                        // spend, zero new intents. A spend decrements and nothing else — the app
+                        // does not roll the die and does not heal (decision 18's ruling: "give the
+                        // number, the dice stay on the table"), so the player rolls and applies
+                        // the result through the HP controls above.
+                        onSpend = actions.onSpend,
+                        onRestore = actions.onRestore,
+                        onDirectEntry = { onDirectEntry(DirectEntryKeys.resource(row.propertyId)) },
+                        modifier = Modifier.shakeOn(shake, row.propertyId),
                     )
                 }
             }
@@ -950,10 +980,23 @@ private fun PipRow(
     onDirectEntry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // FR-30 decision 17's label, composed here because "Hit Dice" is copy and this is the layer
+    // that has an `R` class — see [PipRowState.dieSize] for the split, which is the one
+    // `DirectEntryTarget.label` already makes for the HP row's name. Every other row prints its
+    // source's own name, and a hit-dice row with no readable die size falls back to doing the
+    // same.
+    val label = row.dieSize
+        ?.let { stringResource(R.string.tracker_hit_dice_row, it) }
+        ?: row.label
+    // The spoken form follows the visible one. `spokenLabel` appends FR-20's reset rule, and a
+    // hit-dice row provably has none — `TrackerEngine.hitDice` passes `reset = null` because the
+    // property carries no such field (decision 17) — so for these rows the two are the same
+    // string, and substituting the composed label loses nothing.
+    val spoken = row.dieSize?.let { label } ?: row.spokenLabel
     Column(modifier = modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = row.label,
+                text = label,
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -962,7 +1005,7 @@ private fun PipRow(
                 // own node instead of the three being merged into one sentence.
                 modifier = Modifier
                     .weight(1f)
-                    .semantics { contentDescription = row.spokenLabel },
+                    .semantics { contentDescription = spoken },
             )
             Text(
                 // The probe's parity anchor: one string, "value / total", per row.
@@ -983,7 +1026,7 @@ private fun PipRow(
                         enabled = canWrite,
                         spoken = stringResource(
                             R.string.direct_entry_spoken_of,
-                            row.label,
+                            label,
                             row.value,
                             row.total,
                         ),
@@ -1018,7 +1061,7 @@ private fun PipRow(
                         onClick = { if (filled) onSpend(row.propertyId) else onRestore(row.propertyId) },
                         contentDescription = stringResource(
                             if (filled) R.string.tracker_spend_one else R.string.tracker_restore_one,
-                            row.label,
+                            label,
                         ),
                         modifier = Modifier.testTag("$testTag:pip:$index"),
                     )
@@ -1028,7 +1071,7 @@ private fun PipRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StepperButton(
                     glyph = MINUS,
-                    contentDescription = stringResource(R.string.tracker_spend_one, row.label),
+                    contentDescription = stringResource(R.string.tracker_spend_one, label),
                     enabled = canWrite && row.value > 0,
                     onStep = { onSpend(row.propertyId) },
                     testTag = "$testTag:minus",
@@ -1045,7 +1088,7 @@ private fun PipRow(
                 )
                 StepperButton(
                     glyph = PLUS,
-                    contentDescription = stringResource(R.string.tracker_restore_one, row.label),
+                    contentDescription = stringResource(R.string.tracker_restore_one, label),
                     enabled = canWrite && row.value < row.total,
                     onStep = { onRestore(row.propertyId) },
                     testTag = "$testTag:plus",

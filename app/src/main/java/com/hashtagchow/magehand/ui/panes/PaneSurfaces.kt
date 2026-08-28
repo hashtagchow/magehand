@@ -42,6 +42,7 @@ val LocalCharacterHomeTab.surface: PaneSurface
     get() = when (this) {
         LocalCharacterHomeTab.Tracker -> PaneSurface.TRACKER
         LocalCharacterHomeTab.Inventory -> PaneSurface.INVENTORY
+        LocalCharacterHomeTab.Actions -> PaneSurface.ACTIONS
     }
 
 /**
@@ -103,8 +104,47 @@ fun serverPaneSurfaces(hasActions: Boolean): List<PaneSurface> =
 fun serverHomeTabs(hasActions: Boolean): List<CharacterHomeTab> =
     if (hasActions) CharacterHomeTab.entries else CharacterHomeTab.entries - CharacterHomeTab.Actions
 
-/** The surfaces an on-device character has — decision 6's "local: Tracker / Inventory". */
-val localPaneSurfaces: List<PaneSurface> = LocalCharacterHomeTab.entries.map { it.surface }
+/**
+ * Every surface an on-device character *can* have, in display order — decision 6's
+ * "local: Tracker / Inventory", plus FR-29's Actions.
+ *
+ * Derived from `LocalCharacterHomeTab.entries` for [allServerPaneSurfaces]' reason, and still with
+ * no Sheet in it because that enum still has no such constant.
+ *
+ * **Not what the screen passes to `resolvePanes`** — see [localPaneSurfaces], which applies
+ * FR-29's discovery gate on top of this.
+ */
+val allLocalPaneSurfaces: List<PaneSurface> = LocalCharacterHomeTab.entries.map { it.surface }
+
+/**
+ * The surfaces **this** on-device character has — [allLocalPaneSurfaces] with FR-29's discovery
+ * gate applied (docs/design/18-table-pack.md decision 3).
+ *
+ * The local twin of [serverPaneSurfaces], and deliberately the same shape rather than a shared
+ * generic one: the two operate on different `PaneSurface` subsets and the server's also has a
+ * Sheet to keep. Decision 3 asks for the *"same discovery-gating rule"* as FR-26, and this is what
+ * "same" looks like from here — the tab and the pane both appear when the character has at least
+ * one action row, and everything downstream (the picker's segments, `resolvePanes`' filtering of a
+ * stored `actions` token, the fall back to Tracker when that leaves nothing) is free, exactly as
+ * it was for the server path.
+ *
+ * @param hasActions whether the character has any [com.hashtagchow.magehand.core.model.ActionEntry]
+ *   at all — `ActionBoard.isEmpty` inverted. False while the character is still loading, which is
+ *   the honest default for [serverPaneSurfaces]' stated reason.
+ */
+fun localPaneSurfaces(hasActions: Boolean): List<PaneSurface> =
+    if (hasActions) allLocalPaneSurfaces else allLocalPaneSurfaces - PaneSurface.ACTIONS
+
+/**
+ * The tabs the row draws for this on-device character — the tab-side twin of [localPaneSurfaces],
+ * exactly as [serverHomeTabs] is of [serverPaneSurfaces] and for the reason stated there.
+ */
+fun localHomeTabs(hasActions: Boolean): List<LocalCharacterHomeTab> =
+    if (hasActions) {
+        LocalCharacterHomeTab.entries
+    } else {
+        LocalCharacterHomeTab.entries - LocalCharacterHomeTab.Actions
+    }
 
 /**
  * The picker's label for a surface — the *same* strings the tab row uses.

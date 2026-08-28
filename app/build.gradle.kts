@@ -72,8 +72,17 @@ android {
         // design's own operator scope; the bump belongs with the build regardless, because
         // `exportContract` re-runs at every version bump (16 addendum, L5) and the export in this
         // tree is the one this version produced.
-        versionCode = 19
-        versionName = "1.10.0"
+        // 20 / 1.11.0 carries the table pack (docs/design/18-table-pack.md): FR-29 local character
+        // actions, FR-30 hit dice, FR-31 the concentration prompt, FR-32 the quest log, plus FR-33's
+        // password-reveal toggle as a ride-along. A MINOR bump for 1.10.0's reason — four surfaces
+        // gain capabilities — and it carries the second **schema change of the app's life this
+        // cycle**: Room v6→v7 (`local_tracker_rows.costRowId`/`costAmount`) and contract schema 7
+        // (the `hitDice` discovery rule, which WebHand pins on). Neither is optional to the bump:
+        // a device that upgrades runs the migration, and a consumer that re-syncs reads the new
+        // rule. **DEPLOY IS HELD** for the operator's word per the design's own operator scope;
+        // the bump belongs with the build regardless, for the reason two entries up.
+        versionCode = 20
+        versionName = "1.11.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

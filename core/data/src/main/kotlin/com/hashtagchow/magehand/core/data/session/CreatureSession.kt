@@ -25,6 +25,7 @@ import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
 import com.hashtagchow.magehand.core.data.tracker.ActionEngine
 import com.hashtagchow.magehand.core.data.tracker.CreatureSheet
 import com.hashtagchow.magehand.core.data.tracker.InventoryEngine
+import com.hashtagchow.magehand.core.data.tracker.QuestEngine
 import com.hashtagchow.magehand.core.data.tracker.TrackerEngine
 import com.hashtagchow.magehand.core.data.tracker.isTrue
 import com.hashtagchow.magehand.core.data.write.OptimisticOverlay
@@ -33,6 +34,7 @@ import com.hashtagchow.magehand.core.data.write.WriteQueueConfig
 import com.hashtagchow.magehand.core.model.ActionBoard
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.InventoryBoard
+import com.hashtagchow.magehand.core.model.QuestEntry
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import kotlin.time.Duration
@@ -305,6 +307,31 @@ class CreatureSession(
     val actions: StateFlow<ActionBoard> = sheet
         .map { ActionEngine.build(it) }
         .stateIn(scope, SharingStarted.WhileSubscribed(UNHIDDEN_BOARD_GRACE_MILLIS), ActionBoard.EMPTY)
+
+    /**
+     * FR-32's quest log (docs/design/18-table-pack.md decisions 13–16).
+     *
+     * ### `Eagerly`, where [actions] is `WhileSubscribed`
+     *
+     * The two are read at different moments, and the difference decides it. The Actions surface is
+     * collected only while its tab or pane is drawn, so eager derivation there would run an engine
+     * for a board nothing would look at. This one is read by the **app bar**: decision 14 puts the
+     * Quests entry there *"present only when ≥1 quest note exists"*, so the list has to be known
+     * for the top bar to be drawn at all. A `WhileSubscribed` flow whose only subscriber is the
+     * thing its emptiness decides is a control that cannot appear.
+     *
+     * The cost is one cheap pass per sheet emission — a `type == 'note'` filter over the property
+     * list, which is the same order of work `inventory` already does eagerly beside it.
+     *
+     * ### Read-only, no override layer, no optimistic overlay
+     *
+     * [actions]' paragraph, and one reason stronger: decision 15 makes the log read-only in v1, so
+     * there is no write to be optimistic about, and the customize sheet has no control that could
+     * pin, hide or reorder a note.
+     */
+    val quests: StateFlow<List<QuestEntry>> = sheet
+        .map { QuestEngine.build(it) }
+        .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     /** What the tracker renders. */
     val board: StateFlow<TrackerBoard> = combine(

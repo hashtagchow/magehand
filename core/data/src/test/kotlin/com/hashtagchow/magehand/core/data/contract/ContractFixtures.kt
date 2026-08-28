@@ -68,6 +68,9 @@ object ContractFixtures {
     val emptyResourceId: String = fakeId("resource-empty")
     val hitPointsId: String = fakeId("hit-points")
     val tempHitPointsId: String = fakeId("temp-hit-points")
+    // M6: FR-30's own row, exercised as its own vector rather than folded into
+    // `trackerSheetBody` — see `hitDiceSheetBody`.
+    val hitDiceD8Id: String = fakeId("hit-dice-d8")
     val downedHitPointsId: String = fakeId("death-save-hit-points")
     val rageToggleId: String = fakeId("toggle-rage")
     val concentrationToggleId: String = fakeId("toggle-concentration")
@@ -205,6 +208,26 @@ object ContractFixtures {
             toggle(id = rageToggleId, name = "Rage", enabled = true, order = 30),
             toggle(id = concentrationToggleId, name = "Concentration: Bless", enabled = true, order = 31),
             toggle(id = computedToggleId, name = "Bloodied", enabled = null, order = 32),
+        ),
+    )
+
+    /**
+     * M6: FR-30's own row (docs/design/18-table-pack.md decision 17), run through the
+     * production engine like every other vector — never hand-computed.
+     *
+     * A one-property sheet rather than a row folded into [trackerSheetBody]: hit dice are their
+     * own [TrackerEngine.ATTR_HIT_DICE] discriminator over `spellSlot`/`resource`, which is
+     * exactly the six-release miss probe H4 found (`domain/rules.json#discovery.hitDice
+     * .discoveryTrap`), so the vector that proves it is discovered stands on its own rather
+     * than riding in on a fixture built to exercise five *other* rules.
+     */
+    fun hitDiceSheetBody(): JsonObject = snapshotBody(
+        creature = creature(),
+        properties = listOf(
+            attribute(
+                id = hitDiceD8Id, name = "Hit Dice", attributeType = TrackerEngine.ATTR_HIT_DICE,
+                total = 4, damage = 1, order = 10, hitDiceSize = "d8",
+            ),
         ),
     )
 
@@ -504,6 +527,11 @@ object ContractFixtures {
         removed: Boolean = false,
         inactive: Boolean = false,
         explicitNullReset: Boolean = false,
+        /**
+         * M6: `hitDiceSize` — FR-30's die, `"d8"` on the live sheet.
+         * [TrackerEngine.ATTR_HIT_DICE] rows only.
+         */
+        hitDiceSize: String? = null,
     ): JsonObject = buildJsonObject {
         put("_id", id)
         put("type", "attribute")
@@ -518,6 +546,7 @@ object ContractFixtures {
         if (variableName != null) put("variableName", variableName)
         if (removed) put("removed", true)
         if (inactive) put("inactive", true)
+        if (hitDiceSize != null) put("hitDiceSize", hitDiceSize)
     }
 
     /**

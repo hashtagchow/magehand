@@ -209,14 +209,34 @@ enum class LocalRowKind {
 
     /** Label + quantity. No ceiling — see [LocalTrackerRow.total]. */
     ITEM,
+
+    /**
+     * Label + optional description + optional uses + optional cost — the row FR-29 adds
+     * (docs/design/18-table-pack.md decision 1).
+     *
+     * The one kind that is **not** a tracker row. It renders on the Actions surface, which is
+     * where "a thing you do" belongs, and [trackerKind] returning `null` is what keeps it off
+     * the tracker structurally rather than by a filter somebody has to remember.
+     */
+    ACTION,
     ;
 
-    /** How this row renders on the shared board. */
-    val trackerKind: TrackerKind
+    /**
+     * How this row renders on the shared board, or `null` for a row that is **not** a tracker
+     * row at all.
+     *
+     * Nullable as of FR-29, and the nullability is load-bearing rather than a widening: it is
+     * what makes `LocalTrackerRow.toTrackedResource` return `null` for an [ACTION], so an action
+     * row cannot reach [TrackerBoard] however a caller maps its list. The alternative — mapping
+     * ACTION to [TrackerKind.RESOURCE] and filtering it out at each of the four places the board
+     * splits rows by kind — is four rules to remember instead of one type that says no.
+     */
+    val trackerKind: TrackerKind?
         get() = when (this) {
             SLOT -> TrackerKind.SPELL_SLOT
             RESOURCE -> TrackerKind.RESOURCE
             ITEM -> TrackerKind.ITEM
+            ACTION -> null
         }
 
     /** The value stored in `local_tracker_rows.kind`. Lowercase, per 09's own wording. */
@@ -225,6 +245,7 @@ enum class LocalRowKind {
             SLOT -> "slot"
             RESOURCE -> "resource"
             ITEM -> "item"
+            ACTION -> "action"
         }
 
     companion object {
@@ -253,6 +274,15 @@ data class LocalTrackerRow(
      * For [LocalRowKind.ITEM] this tracks [current]: an item has no maximum (the server path
      * says the same thing — see [TrackedResource.total]), so the two are kept equal rather
      * than inventing a cap the form never asked for.
+     *
+     * For [LocalRowKind.ACTION] it is the **uses** total, and `0` means *unlimited* (18 decision
+     * 1: uses are optional on an action). Zero rather than a nullable column, because the column
+     * is `INTEGER NOT NULL` and shared with three kinds that all mean something by it — and
+     * because zero is unreachable as a real answer here: an action limited to zero uses is an
+     * action that cannot be used, which the form has no reason to let anybody type. `ActionUses`
+     * is `null` for such a row, which is exactly what the server path publishes for an unlimited
+     * action (`ActionEngine.usesFor` returns `null` when the row states no `uses`), so the two
+     * sources produce the same domain value for the same fact.
      */
     val total: Int,
     val current: Int,
@@ -300,12 +330,42 @@ data class LocalTrackerRow(
      * through the `equipped` disjunct, and an unequipped one through 11 decision 2's override.
      */
     val category: CatalogCategory = CatalogCategory.GEAR,
+    /**
+     * The row this action spends from, or `null` for a free one (FR-29, 18 decision 1).
+     *
+     * A reference to **another row of the same character** by id — *"1 × Rage"* — and never to an
+     * [LocalRowKind.ACTION]: 18 decision 2 fences cost chaining out of v1 ("a cost row cannot
+     * itself be an action"), and `LocalCharacterForm.validate` is where that is enforced, because
+     * the fence is a statement about a *pair* of rows and this type only ever knows about one.
+     *
+     * No foreign key on the column, and that is the deliberate half. `ON DELETE CASCADE` from a
+     * row to a row would take an action down with the resource it costs — deleting Rage would
+     * silently delete Rage-the-action too, which is not what deleting a resource means. So a cost
+     * naming a row that no longer exists is a *live* possibility, and it is handled where it is
+     * read: `LocalActionBoard` renders such a line with no available count, which
+     * `CostLine.satisfied` treats as permitted (an unresolvable cost is not an evaluated zero).
+     * The same asymmetry the server path already has for a cost naming an item the sheet dropped.
+     *
+     * Meaningless on the other three kinds, and the editor draws the picker on action rows only —
+     * the arrangement [weightLb] and [category] already have, for the reason stated on the first
+     * of them.
+     */
+    val costRowId: String? = null,
+    /** How many of [costRowId] one use spends. `null` exactly when [costRowId] is. */
+    val costAmount: Int? = null,
 )
 
-/** The row as the shared tracker renders it. */
-fun LocalTrackerRow.toTrackedResource(): TrackedResource = TrackedResource(
+/**
+ * The row as the shared tracker renders it, or `null` for a row that is not a tracker row.
+ *
+ * `null` only for [LocalRowKind.ACTION] (FR-29): an action is a thing you *do*, and it renders on
+ * the Actions surface through `LocalActionBoard`. Returning null rather than mapping it to some
+ * tracker kind is what makes "an action never appears on the tracker" a property of the type
+ * instead of a filter at each of the four places `LocalTrackerBoard` splits rows by kind.
+ */
+fun LocalTrackerRow.toTrackedResource(): TrackedResource? = TrackedResource(
     propertyId = id,
-    kind = kind.trackerKind,
+    kind = kind.trackerKind ?: return null,
     name = label,
     value = current,
     total = if (kind == LocalRowKind.ITEM) current else total,

@@ -183,6 +183,23 @@ data class PipRowState(
     val total: Int,
     val pinned: Boolean,
     val kind: TrackerKind,
+    /**
+     * The die a hit-dice row counts — `"d8"` (FR-30, 18 decision 17). `null` on every other row.
+     *
+     * ### Why the composed label is not in [label]
+     *
+     * [label] is the row's name as its *source* gives it, and every other row on this screen
+     * prints exactly that. A hit-dice row prints *"Hit Dice d8"* instead, and "Hit Dice" is copy —
+     * `strings.xml`'s, not `TrackerEngine`'s, which has no `R` class and would otherwise make the
+     * row untranslatable. So the state carries the fact and `PipRow` spends it on
+     * `tracker_hit_dice_row`, which is the same split `DirectEntryTarget.label` already makes for
+     * the HP row's name.
+     *
+     * `null` also means the row falls back to [label] — a sheet whose hit-dice attribute carries
+     * no readable `hitDiceSize` still renders, under whatever the sheet calls it. See
+     * `TrackerEngine.hitDice` for why that tolerance is deliberate.
+     */
+    val dieSize: String? = null,
 ) {
     val spent: Int get() = (total - value).coerceAtLeast(0)
 
@@ -386,6 +403,17 @@ data class TrackerUiState(
     val rolls: RollPickerState = RollPickerState(),
     val slots: List<PipRowState> = emptyList(),
     val resources: List<PipRowState> = emptyList(),
+    /**
+     * The hit-dice rows, one per die size (FR-30, 18 decision 17: *"rendered as tracker rows
+     * below HP … pips spent/total, FR-22 direct entry applies"*).
+     *
+     * Its own list rather than folded into [resources], carrying `TrackerBoard.hitDice`'s
+     * argument up one layer: [rowsRestoredBy] — the rest confirm dialog's promise about what the
+     * button will do — is `(slots + resources)`, and decision 19 says the app predicts **nothing**
+     * about hit dice, because the server restores half of them itself on a long rest and logs it.
+     * A third list is what makes that structural rather than a reset-rule coincidence.
+     */
+    val hitDice: List<PipRowState> = emptyList(),
     val consumables: List<ConsumableState> = emptyList(),
     val conditions: List<ConditionChipState> = emptyList(),
     /**
@@ -448,7 +476,7 @@ data class TrackerUiState(
 ) {
     /** Nothing discovered yet — a cold open with no snapshot and no live sub. */
     val isEmpty: Boolean
-        get() = hp == null && slots.isEmpty() && resources.isEmpty() &&
+        get() = hp == null && slots.isEmpty() && resources.isEmpty() && hitDice.isEmpty() &&
             consumables.isEmpty() && conditions.isEmpty() && inactiveConditions.isEmpty() &&
             defenses.isEmpty() && !rolls.isPresent
 
@@ -568,7 +596,11 @@ data class TrackerUiState(
 
         key.startsWith(DirectEntryKeys.RESOURCE_PREFIX) -> {
             val id = key.removePrefix(DirectEntryKeys.RESOURCE_PREFIX)
-            (slots + resources).firstOrNull { it.propertyId == id }?.let {
+            // [hitDice] joins the lookup rather than getting a fourth key prefix: 18 decision 17
+            // says *"FR-22 direct entry applies"*, and a hit-dice row is written by the same
+            // `spend`/`restore` intents against the same ceiling as a resource — the key prefix
+            // names the *shape* of the target, not the section it was drawn in.
+            (slots + resources + hitDice).firstOrNull { it.propertyId == id }?.let {
                 DirectEntryTarget(
                     kind = DirectEntryKind.RESOURCE,
                     propertyId = it.propertyId,
@@ -656,6 +688,7 @@ fun toTrackerUiState(
         rolls = toRollPicker(board.rolls, selectedRollId),
         slots = board.slots.map { it.toPipRow() },
         resources = board.resources.map { it.toPipRow() },
+        hitDice = board.hitDice.map { it.toPipRow() },
         consumables = board.pinnedItems.map { it.toConsumable() },
         conditions = conditions,
         inactiveConditions = inactive.map { it.toChip() },
@@ -663,19 +696,15 @@ fun toTrackerUiState(
         canWrite = canWrite,
         canUndo = canUndo && canWrite,
         history = history.map { it.toHistoryRow(canUndo = canWrite && it.id == topOfStack, zone = zone) },
-        // Resolved from `board.activeToggles`, deliberately **not** from `conditions` — the
-        // banner is property-driven (09 decision 9), so what the chip row happens to be
-        // drawing must not arm or disarm its ✕. See [TrackerUiState.concentrationToggleId].
+        // Resolved from the **board's own rule**, deliberately not from `conditions` — the banner
+        // is property-driven (09 decision 9), so what the chip row happens to be drawing must not
+        // arm or disarm its ✕. See [TrackerUiState.concentrationToggleId].
         //
-        // The narrowing that *is* real is WP7's and it is unchanged: 03 §5 lets the banner
-        // come from a `buff` as well as a `toggle`, and `flipToggle` rejects anything that is
-        // not a toggle — so the ✕ is live only when the source *is* a flippable, switched-on
-        // toggle. That is what these three clauses say, against the board.
-        concentrationToggleId = board.concentratingOn?.let { name ->
-            board.activeToggles
-                .firstOrNull { it.name == name && it.enabled && it.flippable }
-                ?.propertyId
-        },
+        // The three clauses that make the ✕ live — a discovered toggle, switched on, flippable —
+        // moved onto `TrackerBoard.concentrationToggle` when FR-31 needed the identical answer
+        // from `:core:data`, which cannot see this module. One rule, two readers; that type's
+        // KDoc carries the whole argument, including WP7's narrowing about buff-sourced banners.
+        concentrationToggleId = board.concentrationToggle?.propertyId,
         hasConnection = hasConnection,
     )
 }
@@ -815,6 +844,7 @@ private fun TrackedResource.toPipRow() = PipRowState(
     total = total.coerceAtLeast(0),
     pinned = pinned,
     kind = kind,
+    dieSize = dieSize,
 )
 
 private fun TrackedResource.toConsumable() = ConsumableState(

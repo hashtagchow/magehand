@@ -897,6 +897,32 @@ class CharacterHomeViewModelTest {
         assertTrue("a stale id must not be written blind: ${character.writes}", character.writes.isEmpty())
     }
 
+    /**
+     * M5 [architect ruling]: a stale toggle id — the FR-31 prompt's source cleared, or the row
+     * left the sheet, before Drop was tapped — used to be the one lookup miss above that dropped
+     * with no signal at all. It now rides the same "confirmed and nothing went out" lane `use`
+     * (FR-28, M3) already has: [TrackerWriteFailure.dropped] `true`, no row to shake.
+     */
+    @Test
+    fun `toggling a stale condition id surfaces the dropped-write failure lane`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        character.board.value = writableBoard()
+        val (vm, _) = viewModel(character)
+        var failure: TrackerWriteFailure? = null
+        val rollbacks = launch { vm.failureEvents.collect { failure = it.failure } }
+        collecting(vm)
+        advanceUntilIdle()
+
+        vm.toggleCondition("gone")
+        advanceUntilIdle()
+
+        assertTrue("a stale id must not be written blind: ${character.writes}", character.writes.isEmpty())
+        assertEquals(TrackerWriteKind.TOGGLE, failure?.kind)
+        assertTrue("no write was in flight to roll back", failure?.dropped == true)
+        assertEquals("nothing optimistic was applied, so nothing shakes", null, failure?.propertyId)
+        rollbacks.cancel()
+    }
+
     @Test
     fun `a fresh history entry raises exactly one undo snackbar`() = runTest(dispatcher) {
         val character = FakeOpenCharacter(creatureId = creatureId)

@@ -37,6 +37,24 @@ object TrackerEngine {
     private const val ATTR_RESOURCE = "resource"
     const val ATTR_ABILITY = "ability"
 
+    /**
+     * FR-30 decision 17's discriminator — `attributeType: 'hitDice'`.
+     *
+     * Public because the contract export states the discovery rule from the constant that
+     * implements it, exactly as [VAR_HIT_POINTS] is, so the two cannot drift.
+     *
+     * **Probe H4's "one-line unblock", and what was actually blocked.** The documents were in the
+     * mirror the whole time: `singleCharacter` publishes every `creatureProperties` row and
+     * nothing about the transport dropped them. They were filtered out *here* — [spellSlot] wants
+     * `spellSlot`, [resource] wants `resource`, and a `hitDice` attribute matched neither, so it
+     * fell out of discovery with no error and no empty section to notice. That is the whole of why
+     * this feature was a predicate rather than a protocol change.
+     */
+    const val ATTR_HIT_DICE = "hitDice"
+
+    /** The die a hit-dice row counts — `"d8"` on the live sheet. See [hitDieSize]. */
+    private const val FIELD_HIT_DICE_SIZE = "hitDiceSize"
+
     /** Public so the contract export states the rule from the constant that implements it. */
     const val VAR_HIT_POINTS = "hitPoints"
 
@@ -114,6 +132,7 @@ object TrackerEngine {
 
         val slots = properties.mapNotNull { spellSlot(it) }
         val resources = properties.mapNotNull { resource(it) }
+        val hitDice = properties.mapNotNull { hitDice(it) }
         val items = properties.mapNotNull { item(it) }
         val toggles = properties.mapNotNull { toggle(it) }
         val defenses = properties.mapNotNull { damageDefense(it) }
@@ -128,6 +147,12 @@ object TrackerEngine {
                 ?.takeUnless { overrides[it.propertyId]?.hidden == true },
             slots = order(slots, overrides, SLOT_ORDER),
             resources = order(resources, overrides, NATURAL_ORDER),
+            // FR-30 decision 17. Sorted but **not** override-filtered, unlike the two lists above
+            // and for `deathSaves`' reason one line down: the customize sheet builds its sections
+            // from slots, resources, items and toggles, so nothing anywhere can pin, hide or
+            // reorder a hit-dice row. Running them through `order` would let a stale preference
+            // hide one with no control on screen able to bring it back. See `TrackerBoard.hitDice`.
+            hitDice = hitDice.sortedWith(NATURAL_ORDER),
             allItems = order(items, overrides, NATURAL_ORDER),
             pinnedItems = order(items.filter { it.propertyId in pinnedIds }, overrides, NATURAL_ORDER),
             activeToggles = orderToggles(toggles, overrides),
@@ -187,6 +212,71 @@ object TrackerEngine {
         val value = p.remaining(total)
         if (total <= 0 && value <= 0) return null
         return p.toResource(TrackerKind.RESOURCE, total = total, reset = ResetRule.fromWire(p.string("reset")))
+    }
+
+    /**
+     * FR-30 decision 17: `attributeType == 'hitDice'`, one row per die size.
+     *
+     * ### Deliberately shaped like [resource], because it is the same shape
+     *
+     * `value = total − damage` (via [remaining]), the same `total > 0 || value > 0` keep-rule, and
+     * the same `damage increment` write behind it — decision 18: *"spend is the EXISTING damage
+     * increment … same shape as slot spends, ZERO new intents"*. The addendum calls this a
+     * one-line predicate unblock and that is exactly what it is: the rows were always in the
+     * mirror, [ATTR_HIT_DICE] is the discriminator nothing was matching on.
+     *
+     * ### `reset = null`, and it is a fact rather than a default
+     *
+     * Decision 17: *"NO reset field — by design: the server's own rest machinery bypasses reset"*.
+     * The property genuinely carries none, so this passes `null` rather than reading a field that
+     * is not there. That is not cosmetic. Decision 19 says the server restores half the dice on a
+     * long rest **itself** (highest first, per-creature `hitDiceResetMultiplier`, floor 1) and
+     * logs it, and that *"the app predicts NOTHING"* — so a hit-dice row must never appear in the
+     * rest confirm dialog's restore list, which is `rowsRestoredBy`'s reset-rule filter. A `null`
+     * reset keeps it out of that list twice over: the filter would reject it anyway, and
+     * [TrackerBoard.hitDice] is not one of the two lists the filter reads.
+     *
+     * Short rest: untouched by the server, untouched by us.
+     *
+     * ### A row with no readable die size still renders
+     *
+     * [dieSize] is `null` and the UI falls back to the property's own `name`. Dropping the row
+     * would be losing a resource the player can spend over a *label*, which is the wrong thing to
+     * be strict about — the same tolerance [DamageDefense]'s free-text types get.
+     */
+    private fun hitDice(p: JsonObject): TrackedResource? {
+        if (!p.isAttribute(ATTR_HIT_DICE) || p.isSkipped()) return null
+        val total = p.number("total") ?: 0
+        val value = p.remaining(total)
+        if (total <= 0 && value <= 0) return null
+        return p.toResource(
+            TrackerKind.HIT_DICE,
+            total = total,
+            reset = null,
+            dieSize = p.hitDieSize(),
+        )
+    }
+
+    /**
+     * `hitDiceSize` as the row should print it — `"d8"`.
+     *
+     * Three shapes are tolerated because DiceCloud is not uniform about which one a field arrives
+     * in (see the readers at the foot of `CreatureSheet`): a plain string `"d8"`, a bare number
+     * `8`, and a `_calculation` wrapper holding either under `value`. The live sheet publishes the
+     * first; the other two cost four lines and remove a whole class of "renders on my sheet, not
+     * on yours".
+     *
+     * The `d` is **prepended only when it is missing**, rather than the size being parsed to an
+     * `Int` and re-rendered. That keeps a homebrew `"d3"`, a `"d20"` and anything else the sheet
+     * says intact and unnormalised — [TrackedResource.dieSize]'s own argument, and the same
+     * posture `DamageDefense.damageTypes` takes towards strings a sheet's author typed.
+     */
+    private fun JsonObject.hitDieSize(): String? {
+        val raw = when (val element = this[FIELD_HIT_DICE_SIZE]) {
+            is JsonObject -> element.string("value") ?: element.number("value")?.toString()
+            else -> string(FIELD_HIT_DICE_SIZE) ?: number(FIELD_HIT_DICE_SIZE)?.toString()
+        }?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        return if (raw.startsWith("d", ignoreCase = true)) raw else "d$raw"
     }
 
     /** 03 §3. HP and temp HP, identified by `variableName` rather than by `attributeType`. */
@@ -535,6 +625,8 @@ object TrackerEngine {
         total: Int,
         reset: ResetRule?,
         level: Int? = null,
+        /** [TrackerKind.HIT_DICE] only — see [TrackedResource.dieSize]. */
+        dieSize: String? = null,
     ): TrackedResource? = TrackedResource(
         propertyId = string("_id") ?: return null,
         kind = kind,
@@ -543,6 +635,7 @@ object TrackerEngine {
         total = total,
         reset = reset,
         spellSlotLevel = level,
+        dieSize = dieSize,
         sortOrder = number("order") ?: 0,
     )
 

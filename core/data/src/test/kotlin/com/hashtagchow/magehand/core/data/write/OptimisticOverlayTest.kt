@@ -30,10 +30,13 @@ class OptimisticOverlayTest {
     private val slot = TrackedResource("s1", TrackerKind.SPELL_SLOT, "1st Level", 3, 4)
     private val potion = TrackedResource("i1", TrackerKind.ITEM, "Potion of Healing", 2, 2)
     private val bless = ConditionToggle("t1", "Bless", enabled = false, flippable = true)
+    // H1: FR-30's row, 3 of 4 d8s remaining — the fixture the review's three pins share below.
+    private val hitDie = TrackedResource("hd1", TrackerKind.HIT_DICE, "Hit Dice", 3, 4, dieSize = "d8")
 
     private val board = TrackerBoard(
         hp = hp,
         slots = listOf(slot),
+        hitDice = listOf(hitDie),
         pinnedItems = listOf(potion),
         allItems = listOf(potion),
         activeToggles = listOf(bless),
@@ -105,5 +108,37 @@ class OptimisticOverlayTest {
         // Untouched rows come through unchanged rather than merely equal-looking.
         assertEquals(hp, applied.hp)
         assertEquals(listOf(potion), applied.allItems)
+    }
+
+    // --- H1: `hitDice` was missing from `applyTo`'s `copy` — a spend predicted nothing until
+    // the write resolved, which is exactly the flicker `TrackerBoard.defenses` regressed on. ---
+
+    /** A hit-die spend has to overlay the same frame it is tapped, like every other pip row. */
+    @Test
+    fun `a hit-die spend overlays immediately`() {
+        val spend = OptimisticOverlay.of(listOf(OptimisticChange.ValueDelta("hd1", -1)))
+        val applied = spend.applyTo(board)
+        assertEquals(2, applied.hitDice.single().value)
+    }
+
+    /** Six rapid spends on 3 remaining floors at 0 — the same clamp every other row gets. */
+    @Test
+    fun `six rapid hit-die spends on 3 remaining floor at 0, never negative`() {
+        val sixSpends = OptimisticOverlay.of(List(6) { OptimisticChange.ValueDelta("hd1", -1) })
+        val applied = sixSpends.applyTo(board)
+        assertEquals(0, applied.hitDice.single().value)
+    }
+
+    /** FR-22 direct entry: a later absolute wins over an earlier delta for the same row. */
+    @Test
+    fun `a direct-entry absolute on a hit die supersedes a queued spend`() {
+        val spendThenSet = OptimisticOverlay.of(
+            listOf(
+                OptimisticChange.ValueDelta("hd1", -1),
+                OptimisticChange.ValueAbsolute("hd1", 4),
+            ),
+        )
+        val applied = spendThenSet.applyTo(board)
+        assertEquals(4, applied.hitDice.single().value)
     }
 }

@@ -66,6 +66,7 @@ data class OptimisticOverlay(
             tempHp = board.tempHp?.let(::apply),
             slots = board.slots.map(::apply),
             resources = board.resources.map(::apply),
+            hitDice = board.hitDice.map(::apply),
             pinnedItems = board.pinnedItems.map(::apply),
             allItems = board.allItems.map(::apply),
             activeToggles = board.activeToggles.map(::apply),

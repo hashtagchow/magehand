@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.account.AccountRepository
@@ -27,10 +28,13 @@ import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.DmViewStore
 import com.hashtagchow.magehand.core.model.CharacterSummary
+import com.hashtagchow.magehand.core.model.ConcentrationPrompt
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.FeedEntry
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
+import com.hashtagchow.magehand.core.model.TrackerWriteFailure
+import com.hashtagchow.magehand.core.model.TrackerWriteKind
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.describe
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.toTrackerUiState
@@ -430,11 +434,66 @@ class DmViewViewModel @Inject constructor(
         writable(creatureId)?.changeHitPoints(delta)
     }
 
-    /** A condition chip on a card (or the concentration banner's ✕, which is the same write). */
+    /**
+     * FR-31's prompts for every open card, merged (docs/design/18-table-pack.md decision 9).
+     *
+     * ### Why the dashboard gets these at all
+     *
+     * Decision 9's last clause, and it is the half that is easy to skip: *"the DM's own write
+     * prompts on the DM's screen."* A DM with editing on damages a concentrating character from a
+     * card, and the check is owed **here** — the player whose sheet it is may not even have the app
+     * open. Omitting the dashboard would have made the feature work everywhere except the one
+     * screen where a DM actually applies damage to somebody else.
+     *
+     * ### And why merging six streams cannot storm
+     *
+     * This looks like exactly the shape decision 9's observer-storm rule forbids, and it is the
+     * opposite of it. Each `OpenCharacter.concentrationPrompts` emits only for damage **that
+     * session wrote** — never for damage it observed — so a merge of six of them is still one
+     * prompt per write, on the one client that made it. The storm the rule prevents is six
+     * *clients* reacting to one hit; this is one client watching its own six writes. If the source
+     * were a board collector, merging would multiply the problem instead of being safe.
+     *
+     * Paired with the creature id, because the banner has to name whose check it is: six cards
+     * share one banner slot and *"Concentration check — DC 12"* with no name is a sentence a DM
+     * cannot act on. `flatMapLatest` so a change of membership re-merges rather than leaking the
+     * departed card's flow.
+     */
+    val concentrationPrompts: Flow<Pair<String, ConcentrationPrompt>> =
+        sessions.flatMapLatest { open ->
+            merge(
+                *open.map { (creatureId, character) ->
+                    character.concentrationPrompts.map { creatureId to it }
+                }.toTypedArray(),
+            )
+        }
+
+    /**
+     * A condition chip on a card (or the concentration banner's ✕, which is the same write).
+     *
+     * M5 [architect ruling]: a [propertyId] the card's board no longer carries — the FR-31
+     * prompt's source cleared, or was removed, before the DM tapped Drop — used to return here
+     * silently. `CharacterHomeViewModel.toggleCondition`'s own fix for the same lookup miss
+     * applies here through this screen's own lane instead of that one: [refusalError] is decision
+     * 18's honest-error channel already wired to [DmViewScreen]'s banner, so a stale id surfaces
+     * through it rather than through nothing.
+     */
     fun toggleCondition(creatureId: String, propertyId: String) {
         val character = writable(creatureId) ?: return
-        val toggle = character.board.value.activeToggles
-            .firstOrNull { it.propertyId == propertyId } ?: return
+        val toggle = character.board.value.activeToggles.firstOrNull { it.propertyId == propertyId }
+        if (toggle == null) {
+            refusalError.value = TrackerWriteFailure(
+                id = 0L,
+                kind = TrackerWriteKind.TOGGLE,
+                propertyId = null,
+                targetName = propertyId,
+                reason = null,
+                refusedOffline = false,
+                rateLimited = false,
+                dropped = true,
+            ).describe()
+            return
+        }
         character.toggle(toggle)
     }
 
@@ -490,7 +549,10 @@ class DmViewViewModel @Inject constructor(
     ) {
         val character = writable(creatureId) ?: return
         val board = character.board.value
-        val row = (board.slots + board.resources + board.allItems + listOfNotNull(board.hp))
+        // FR-30: hit dice join the lookup for `CharacterHomeViewModel.withRow`'s reason — they are
+        // written through these same `spend`/`restore` intents (18 decision 18). No DM card draws
+        // one today, and the lookup is one list rather than a rule to remember if one ever does.
+        val row = (board.slots + board.resources + board.hitDice + board.allItems + listOfNotNull(board.hp))
             .firstOrNull { it.propertyId == propertyId } ?: return
         act(character, row)
     }

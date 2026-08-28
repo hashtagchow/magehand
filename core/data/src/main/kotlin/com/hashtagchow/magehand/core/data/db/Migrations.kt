@@ -274,3 +274,57 @@ val MIGRATION_5_6: Migration = object : Migration(5, 6) {
         db.execSQL("ALTER TABLE `local_characters` ADD COLUMN `deathFailures` INTEGER NOT NULL DEFAULT 0")
     }
 }
+
+/**
+ * v6 → v7: a local action's cost (FR-29, docs/design/18-table-pack.md decision 1).
+ *
+ * ```
+ * local_tracker_rows += costRowId  TEXT
+ * local_tracker_rows += costAmount INTEGER
+ * ```
+ *
+ * **Additive in [MIGRATION_4_5]'s sense**, back on `local_tracker_rows` this time: two
+ * `ALTER TABLE … ADD COLUMN`s, no table re-created, so there is no copy step that could drop a
+ * row, no temporary table, and no window in which the foreign key to `local_characters` does not
+ * exist. Nothing on `local_characters` is touched at all.
+ *
+ * ### The first migration in this file whose columns take **no** `DEFAULT`
+ *
+ * Every column added since v4 has carried one, and the KDoc on each says why: SQLite refuses
+ * `ADD COLUMN … NOT NULL` without one on a populated table. These two are **nullable**, so the
+ * refusal does not apply and `NULL` is what the existing rows get — which is also the only honest
+ * value. No row that predates v7 is an action row (the kind did not exist), so none of them has a
+ * cost to preserve or to guess at. That makes this migration the *simplest* kind rather than a
+ * departure: there is no reading to choose, unlike [MIGRATION_4_5]'s `'gear'`.
+ *
+ * The matching absence of `@ColumnInfo(defaultValue = …)` on
+ * [LocalTrackerRowEntity.costRowId] / [LocalTrackerRowEntity.costAmount] is what keeps the
+ * exported v7 schema saying the same thing as these two statements — the same discipline, read
+ * from the other end.
+ *
+ * ### No `FOREIGN KEY` on `costRowId`, deliberately
+ *
+ * It names another row in this same table, and a self-referencing FK with `ON DELETE CASCADE`
+ * would delete an action when the resource it costs is deleted — "delete Rage" silently taking
+ * "Rage (action)" with it, which is not what the player asked for. `ON DELETE SET NULL` would be
+ * closer but would leave a `costAmount` naming nothing, which is the half-a-cost state
+ * `LocalTrackerRowEntity.toDomain` already normalises away. So the reference is *soft* and the
+ * dangling case is handled where it is read — see [LocalTrackerRow.costRowId].
+ *
+ * ### Two statements, one migration
+ *
+ * [MIGRATION_5_6]'s note, unchanged: SQLite's `ALTER TABLE` adds one column per statement, and
+ * Room runs a migration inside a transaction, so a failure between them rolls both back and the
+ * database stays at v6 rather than landing half-migrated.
+ *
+ * As with every migration before it, this is proven rather than trusted:
+ * `MageHandDatabaseMigrationTest` builds a real v6 database from the **committed** v6 JSON,
+ * populates both local tables, runs this migration, and lets Room's own validator compare the
+ * result against the compiled v7 expectation.
+ */
+val MIGRATION_6_7: Migration = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `local_tracker_rows` ADD COLUMN `costRowId` TEXT")
+        db.execSQL("ALTER TABLE `local_tracker_rows` ADD COLUMN `costAmount` INTEGER")
+    }
+}

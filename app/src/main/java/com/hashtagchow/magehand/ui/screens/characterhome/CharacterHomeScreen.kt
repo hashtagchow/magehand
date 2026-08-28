@@ -8,9 +8,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -43,9 +40,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
+import com.hashtagchow.magehand.core.model.ConcentrationPrompt
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.ui.navigation.CharacterHomeTab
 import com.hashtagchow.magehand.ui.panes.CharacterHomeChrome
+import com.hashtagchow.magehand.ui.panes.HomeOverflowCustomize
+import com.hashtagchow.magehand.ui.panes.HomeOverflowMenu
 import com.hashtagchow.magehand.ui.panes.HomeTabRow
 import com.hashtagchow.magehand.ui.panes.PaneOrderSheet
 import com.hashtagchow.magehand.ui.panes.PanePicker
@@ -55,6 +55,7 @@ import com.hashtagchow.magehand.ui.panes.resolvePaneLayout
 import com.hashtagchow.magehand.ui.panes.serverHomeTabs
 import com.hashtagchow.magehand.ui.panes.serverPaneSurfaces
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsScreen
+import com.hashtagchow.magehand.ui.screens.characterhome.quests.QuestLogSheet
 import com.hashtagchow.magehand.ui.panes.sheetWanted
 import com.hashtagchow.magehand.ui.panes.surface
 import com.hashtagchow.magehand.ui.window.LocalExpandedWidth
@@ -67,6 +68,7 @@ import com.hashtagchow.magehand.ui.screens.characterhome.inventory.ItemDetailShe
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpNumberPadDialog
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.RestConfirmDialog
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ShakeSignal
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConcentrationPromptBanner
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerActions
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerConnectionSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerCustomizeSheet
@@ -130,6 +132,14 @@ fun CharacterHomeScreen(
     // reason: three sheets, three controls, three pieces of saved state.
     var paneOrderOpen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
+    // FR-32's log, on its own flag for the reason every other sheet on this screen has one.
+    var questsOpen by rememberSaveable { mutableStateOf(false) }
+    // FR-31's prompt (18 decisions 9–12). **Not** `rememberSaveable`, and the distinction is the
+    // feature: a concentration check belongs to the moment its damage landed, so a prompt that
+    // survived process death would greet the player with a check for a hit taken before the app
+    // was killed. It is also not a snackbar — see `ConcentrationPromptBanner` for why the
+    // assertive live region decision 12 asks for rules that widget out.
+    var concentrationPrompt by remember { mutableStateOf<ConcentrationPrompt?>(null) }
     var hpPadOpen by rememberSaveable { mutableStateOf(false) }
     var addItemOpen by rememberSaveable { mutableStateOf(false) }
     // The *id* of the item whose detail sheet is open, not the row — see `InventoryUiState.row`.
@@ -194,6 +204,21 @@ fun CharacterHomeScreen(
                 duration = SnackbarDuration.Short,
             )
         }
+    }
+
+    // FR-31. One prompt at a time: a second replaces the first rather than stacking, which is what
+    // "snackbar-priority" means for a banner — the newer check is the one the player owes.
+    LaunchedEffect(viewModel) {
+        viewModel.concentrationPrompts.collect { concentrationPrompt = it }
+    }
+
+    // The prompt outlives its cause but not its subject: a character who has stopped concentrating
+    // — because the player dropped it, or the buff lapsed, or another client ended it — has no
+    // check to make, so the banner goes with it. Keyed on the banner's source so this fires on the
+    // transition rather than on every recomposition.
+    val concentratingOn = uiState.tracker.concentratingOn
+    LaunchedEffect(concentratingOn) {
+        if (concentratingOn == null) concentrationPrompt = null
     }
 
     LaunchedEffect(selectedTab) {
@@ -288,18 +313,15 @@ fun CharacterHomeScreen(
                                     contentDescription = stringResource(R.string.tracker_history_title),
                                 )
                             }
-                            IconButton(onClick = { customizeOpen = true }) {
-                                Icon(
-                                    imageVector = Icons.Filled.Build,
-                                    contentDescription = stringResource(R.string.customize_title),
-                                )
-                            }
                         }
                         // FR-8's add affordance lives in the app bar, beside the tracker's
-                        // rest/history/customize actions, for the reason those are there:
-                        // it belongs to *one tab* and the bar is where this screen already
-                        // puts per-tab actions. A FAB would have floated over the last
-                        // Carried row on every scroll, on the one tab that is a long list.
+                        // rest/history actions, for the reason those are there: it belongs to
+                        // *one tab* and the bar is where this screen already puts per-tab
+                        // actions. A FAB would have floated over the last Carried row on every
+                        // scroll, on the one tab that is a long list. It stays on the bar
+                        // rather than moving into the overflow menu below for the same reason
+                        // Short/Long/history do: it is what a player reaches for most on this
+                        // tab, not a once-a-session control.
                         if (CharacterHomeTab.Inventory.isShowing(chrome)) {
                             IconButton(
                                 onClick = { addItemOpen = true },
@@ -312,50 +334,43 @@ fun CharacterHomeScreen(
                                     contentDescription = stringResource(R.string.inventory_add),
                                 )
                             }
-                            // 12 decision 3: "the same wrench → sheet affordance as the
-                            // tracker" — same icon, same place in the bar, three actions along
-                            // from the tracker's own. Not gated on `canWrite`, unlike the add
-                            // button beside it: an arrangement is a local preference and stays
-                            // editable while the socket is down, exactly as the tracker's
-                            // customize sheet does.
-                            IconButton(
-                                onClick = { inventoryCustomizeOpen = true },
-                                modifier = Modifier.testTag("inventory:customize:open"),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Build,
-                                    contentDescription = stringResource(
-                                        R.string.inventory_customize_title,
-                                    ),
+                        }
+                        // 1.9.1: the wrench(es), quests, pane-order and settings — every
+                        // low-frequency action this bar carries — collapse into one overflow
+                        // menu. See `HomeOverflowMenu`'s KDoc for why six is the cap this bar
+                        // now respects and the arithmetic behind it (the operator's screenshot:
+                        // the back arrow overlapping "Short" on a bar that could carry up to
+                        // nine controls at once).
+                        HomeOverflowMenu(
+                            onPaneOrder = { paneOrderOpen = true },
+                            settingsLabel = stringResource(R.string.action_settings),
+                            onSettings = onSettingsClick,
+                            customize = when {
+                                CharacterHomeTab.Tracker.isShowing(chrome) -> HomeOverflowCustomize(
+                                    labelRes = R.string.customize_title,
+                                    testTag = "tracker:customize:open",
+                                    onClick = { customizeOpen = true },
                                 )
-                            }
-                        }
-                        // FR-27 decision 2's wrench → sheet, and the one app-bar action here
-                        // that belongs to the *screen* rather than to a tab — so it is drawn
-                        // unconditionally, after the per-tab group and before Settings.
-                        //
-                        // `Menu` rather than a third `Build`: the bar already carries two
-                        // wrenches (tracker, inventory) and in pane mode both can be up at
-                        // once, so a third identical glyph would be unreadable. `List` is
-                        // taken by the tracker's history in the same bar and `MoreVert`
-                        // promises an overflow menu this app does not have; ≡ is "a list of
-                        // lines", which is exactly what the sheet arranges, and this app has
-                        // no navigation drawer anywhere for it to be confused with.
-                        IconButton(
-                            onClick = { paneOrderOpen = true },
-                            modifier = Modifier.testTag("panes:order:open"),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Menu,
-                                contentDescription = stringResource(R.string.panes_order_title),
-                            )
-                        }
-                        IconButton(onClick = onSettingsClick) {
-                            Icon(
-                                imageVector = Icons.Filled.Settings,
-                                contentDescription = stringResource(R.string.action_settings),
-                            )
-                        }
+                                CharacterHomeTab.Inventory.isShowing(chrome) -> HomeOverflowCustomize(
+                                    labelRes = R.string.inventory_customize_title,
+                                    testTag = "inventory:customize:open",
+                                    onClick = { inventoryCustomizeOpen = true },
+                                )
+                                else -> null
+                            },
+                            // FR-32 decision 14: discovery-gated, so a character with no quest
+                            // notes carries no entry (decision 14: "present only when ≥1 quest
+                            // note exists").
+                            quests = if (uiState.hasQuests) {
+                                HomeOverflowCustomize(
+                                    labelRes = R.string.quests_title,
+                                    testTag = "quests:open",
+                                    onClick = { questsOpen = true },
+                                )
+                            } else {
+                                null
+                            },
+                        )
                     },
                 )
             },
@@ -365,6 +380,23 @@ fun CharacterHomeScreen(
                     .fillMaxSize()
                     .padding(innerPadding),
             ) {
+                // FR-31's prompt, above everything — including the tab row, because it is a
+                // statement about the *character* rather than about whichever surface is on
+                // screen, and because the DM card path (decision 9) puts it in the same place.
+                // Its Drop action is the existing `toggle` intent against the property the prompt
+                // names, which is why this feature added no intent at all.
+                concentrationPrompt?.let { prompt ->
+                    ConcentrationPromptBanner(
+                        prompt = prompt,
+                        canWrite = uiState.tracker.canWrite,
+                        onDrop = { toggleId ->
+                            viewModel.toggleCondition(toggleId)
+                            concentrationPrompt = null
+                        },
+                        onDismiss = { concentrationPrompt = null },
+                    )
+                }
+
                 // One body, two chromes. Every argument below is identical in both branches
                 // because they are the same call — see the class KDoc.
                 val tracker = @Composable {
@@ -478,6 +510,16 @@ fun CharacterHomeScreen(
                     status = uiState.tracker.status,
                     onRetry = viewModel::reconnect,
                     onDismiss = { connectionOpen = false },
+                )
+            }
+
+            if (questsOpen) {
+                QuestLogSheet(
+                    // Already ordered and prefix-stripped by `QuestEngine` — open above closed,
+                    // sheet order within each group (decision 13). The sheet draws; it does not
+                    // sort.
+                    quests = uiState.quests,
+                    onDismiss = { questsOpen = false },
                 )
             }
 

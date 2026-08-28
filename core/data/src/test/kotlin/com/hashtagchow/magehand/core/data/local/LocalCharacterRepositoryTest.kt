@@ -775,6 +775,136 @@ class LocalCharacterRepositoryTest {
         assertTrue(repository.save(form(name = "Thistle")) is LocalSaveResult.Saved)
     }
 
+    // --- FR-29: an action's description and cost (18 decisions 1 and 2) ---------
+
+    private fun rageAndAction(
+        costRowId: String? = "rage",
+        costAmount: Int? = 1,
+        description: String? = "Advantage on Strength checks.",
+    ) = form(
+        rows = listOf(
+            LocalRowForm(id = "rage", kind = LocalRowKind.RESOURCE, label = "Rage", total = 3),
+            LocalRowForm(
+                id = "act",
+                kind = LocalRowKind.ACTION,
+                label = "Enter Rage",
+                total = 2,
+                description = description,
+                costRowId = costRowId,
+                costAmount = costAmount,
+            ),
+        ),
+    )
+
+    /**
+     * The three fields an action owns round-trip through the form, and re-saving is a no-op.
+     *
+     * The category's own test one section up, applied to FR-29's fields — and the "re-save what
+     * was re-opened" half is the one with teeth: `formFor` has to load them or an untouched save
+     * would blank the description and drop the cost, which is exactly the FR-8 regression that
+     * section records.
+     */
+    @Test
+    fun `an action's description and cost round-trip through the form`() = runTest {
+        val id = saveOrFail(rageAndAction())
+
+        with(dao.getRows(id).single { it.id == "act" }) {
+            assertEquals("Advantage on Strength checks.", description)
+            assertEquals("rage", costRowId)
+            assertEquals(1, costAmount)
+        }
+
+        val reopened = repository.formFor(id)!!.rows.single { it.id == "act" }
+        assertEquals("Advantage on Strength checks.", reopened.description)
+        assertEquals("rage", reopened.costRowId)
+        assertEquals(1, reopened.costAmount)
+
+        saveOrFail(repository.formFor(id)!!)
+        with(dao.getRows(id).single { it.id == "act" }) {
+            assertEquals("Advantage on Strength checks.", description)
+            assertEquals("rage", costRowId)
+        }
+    }
+
+    /**
+     * `description` is **one column with two owners**, and this is the fork.
+     *
+     * For an *item* it is a note the form has never had a field for, so it survives an edit by
+     * being carried from the stored row — the FR-8 rule, unchanged. For an *action* it is a form
+     * field, so the form is authoritative and carrying the stored value instead would make the
+     * description un-editable. Both directions asserted, because getting either one backwards is
+     * silent: an un-editable field, or a note that vanishes when you rename the character.
+     */
+    @Test
+    fun `an item's note survives the form while an action's description obeys it`() = runTest {
+        val id = saveOrFail(
+            form(rows = listOf(LocalRowForm(id = "potion", kind = LocalRowKind.ITEM, label = "Potion", total = 2))),
+        )
+        // The item's note reaches the row through the inventory path, which is the only thing that
+        // writes it — the editor has no field for it.
+        dao.upsertRows(
+            listOf(dao.findRow("potion")!!.copy(description = "Heals 2d4 + 2.", weight = 0.5)),
+        )
+
+        // An unrelated edit through the form, whose `LocalRowForm` carries a null description.
+        saveOrFail(repository.formFor(id)!!.copy(name = "Renamed"))
+
+        assertEquals("Heals 2d4 + 2.", dao.findRow("potion")?.description)
+        assertEquals(0.5, dao.findRow("potion")?.weight)
+
+        // The action half: the form is authoritative, so clearing the field clears the column.
+        val actionId = saveOrFail(rageAndAction())
+        saveOrFail(repository.formFor(actionId)!!.let { f ->
+            f.copy(rows = f.rows.map { if (it.id == "act") it.copy(description = "  ") else it })
+        })
+        assertNull("blank is an absence, not an empty line", dao.findRow("act")?.description)
+    }
+
+    /**
+     * Changing a row's kind drops the cost, for `category`'s reason: a resource that once was an
+     * action must not keep claiming to spend something.
+     *
+     * The row keeps its id and its `current`; it loses every field that was a claim about being
+     * something else. That is the rule the "what does not survive changing a row's kind" section
+     * states, extended to FR-29's pair.
+     */
+    @Test
+    fun `retyping an action into a resource drops its cost`() = runTest {
+        val id = saveOrFail(rageAndAction())
+        assertEquals("rage", dao.findRow("act")?.costRowId)
+
+        saveOrFail(repository.formFor(id)!!.let { f ->
+            f.copy(rows = f.rows.map { if (it.id == "act") it.copy(kind = LocalRowKind.RESOURCE) else it })
+        })
+
+        assertNull(dao.findRow("act")?.costRowId)
+        assertNull(dao.findRow("act")?.costAmount)
+        assertNull("and the description goes with it", dao.findRow("act")?.description)
+    }
+
+    /** Decision 2's fence, refused at the write as well as at the form's validator. */
+    @Test
+    fun `a form whose cost names an action is refused outright`() = runTest {
+        val result = repository.save(
+            form(
+                rows = listOf(
+                    LocalRowForm(id = "a", kind = LocalRowKind.ACTION, label = "A", total = 0),
+                    LocalRowForm(
+                        id = "b",
+                        kind = LocalRowKind.ACTION,
+                        label = "B",
+                        total = 0,
+                        costRowId = "a",
+                        costAmount = 1,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(result is LocalSaveResult.Invalid)
+        assertEquals(0, dao.count())
+    }
+
     // --- observation --------------------------------------------------------
 
     @Test

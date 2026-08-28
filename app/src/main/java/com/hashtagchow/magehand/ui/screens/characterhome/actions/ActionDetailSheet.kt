@@ -440,13 +440,20 @@ private fun UseConfirmDialog(
                     }
                 }
 
-                Text(
-                    text = stringResource(R.string.action_use_no_undo),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.testTag("actions:use:warning"),
-                )
+                // 18 decision 4: **absent** on an on-device character, where the use IS undoable
+                // and the sentence would be a lie. Not softened, not reworded — the local dialog's
+                // whole content is the cost and the uses-after, which is what "lighter than the
+                // server's" means. See `ActionsUiState.usesAreUndoable` for why the flag is
+                // screen-level, and `LocalOpenCharacter.useAction` for where the undo lives.
+                if (!use.undoable) {
+                    Text(
+                        text = stringResource(R.string.action_use_no_undo),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("actions:use:warning"),
+                    )
+                }
             }
         },
         confirmButton = {

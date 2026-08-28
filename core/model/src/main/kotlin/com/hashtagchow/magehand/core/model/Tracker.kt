@@ -24,6 +24,31 @@ enum class TrackerKind {
 
     /** `attribute` with `variableName == tempHP` (see the delta note in docs/verification/WP4.md). */
     TEMP_HP,
+
+    /**
+     * `attribute` / `attributeType: hitDice` — one row per die size (FR-30,
+     * docs/design/18-table-pack.md decision 17).
+     *
+     * ### Its own kind, and not [RESOURCE]
+     *
+     * The *write* is identical — `creatureProperties.damage increment`, decision 18's "the
+     * EXISTING damage increment path" — so a reader could reasonably ask why this is not simply
+     * a resource with a different `attributeType`. Three things differ, and each one is a place
+     * a shared kind would have gone quietly wrong:
+     *
+     *  - **The rest dialog.** `rowsRestoredBy` lists `slots + resources` filtered by reset rule.
+     *    Hit dice carry **no** reset field at all (decision 17 — the server's rest machinery
+     *    bypasses it), so they would be filtered out today; but the list is the dialog's promise
+     *    about what the button does, and decision 19 is explicit that the app predicts *nothing*
+     *    about hit dice. A separate kind means they can never appear there even if a sheet ever
+     *    grows a `reset` on one.
+     *  - **The label.** Every other row prints the sheet's own `name`; this one prints
+     *    "Hit Dice d8", composed from [TrackedResource.dieSize] because a sheet carries several
+     *    of these and they are all named the same thing.
+     *  - **The section.** Decision 17 puts them directly below HP, which is neither the slots
+     *    section nor the resources section.
+     */
+    HIT_DICE,
 }
 
 /**
@@ -74,6 +99,27 @@ data class TrackedResource(
     val reset: ResetRule? = null,
     /** Slots only, for grouping/ordering. */
     val spellSlotLevel: Int? = null,
+    /**
+     * The die this row counts, as the sheet spells it — `"d8"` (FR-30, 18 decision 17).
+     *
+     * [TrackerKind.HIT_DICE] only; `null` everywhere else, and the `null` is what the UI keys on
+     * to decide whether to print the sheet's [name] or the composed *"Hit Dice d8"* label.
+     *
+     * ### Why the size is carried rather than baked into [name]
+     *
+     * The word "Hit Dice" is **copy**, and copy lives in `strings.xml` — the same split
+     * `DirectEntryTarget.label` already makes ("the label is the one piece of copy this function
+     * needs and the one thing it must not resolve"). `TrackerEngine` is in `:core:data` and has no
+     * `R` class; composing the label there would put an English string in the discovery layer and
+     * make the row untranslatable. So the engine carries the **fact** — which die — and the
+     * composable spends it on `tracker_hit_dice_row`.
+     *
+     * A `String` and not an `Int`, because that is what the server publishes: `hitDiceSize` reads
+     * `"d8"` on the live sheet. Parsing the `8` back out to re-print a `d` in front of it would be
+     * a round trip that can only lose — a homebrew `"d3"` or a size this app has never seen still
+     * renders, unaltered, which is `DamageDefense.damageTypes`' rule applied to one more field.
+     */
+    val dieSize: String? = null,
     /**
      * The server's `order` field. Not in 03's field list; kept because it is the only
      * stable tie-breaker the server gives us, so two rows with the same name/level do
@@ -399,6 +445,24 @@ data class TrackerBoard(
     /** Ordered by spell-slot level, then by the server's `order`. */
     val slots: List<TrackedResource> = emptyList(),
     val resources: List<TrackedResource> = emptyList(),
+    /**
+     * The character's hit dice, one row per die size (FR-30, 18 decision 17).
+     *
+     * ### Its own list, and not folded into [resources]
+     *
+     * [TrackerKind.HIT_DICE]'s own KDoc gives the three reasons; the sharpest of them is the one
+     * this field makes structural. `rowsRestoredBy` — the rest confirm dialog's promise about what
+     * the button is going to do — is `(slots + resources)`, so a hit-dice row filed under
+     * `resources` would be one `reset` field away from appearing in a list decision 19 says it must
+     * never appear in ("the app predicts NOTHING"). A separate list means that cannot happen by
+     * accident, and `TrackerUiStateTest` pins it anyway.
+     *
+     * **Not override-filtered**, unlike [slots] and [resources] and for [deathSaves]' reason: the
+     * customize sheet builds its sections from slots, resources, items and toggles, so there is no
+     * control anywhere that can pin, hide or reorder one of these. Applying the layer would mean a
+     * row could be hidden by a stale preference with nothing on screen able to bring it back.
+     */
+    val hitDice: List<TrackedResource> = emptyList(),
     /** The subset of [allItems] the user has pinned. */
     val pinnedItems: List<TrackedResource> = emptyList(),
     /**
@@ -447,10 +511,47 @@ data class TrackerBoard(
      */
     val deathSaves: DeathSaves? = null,
 ) {
+    /**
+     * The discovered toggle that dropping concentration would flip, or `null`.
+     *
+     * ### One rule, two readers, and the second one is why it moved here
+     *
+     * The tracker banner's ✕ has resolved this since WP7 and the derivation lived in
+     * `toTrackerUiState`. FR-31's prompt needs the identical answer — decision 10's *"executes the
+     * toggle-off write IF the concentration source is a toggleable property"* — from `:core:data`,
+     * which cannot see `:app`. Two copies of a three-clause rule is exactly the drift that ends
+     * with a banner whose ✕ works and a prompt whose Drop button does nothing, so the rule is here
+     * and both of them read it.
+     *
+     * ### Three clauses, and none of them is optional
+     *
+     * 03 §5 lets the banner come from a `buff` as well as a `toggle`, and 02 records that
+     * `flipToggle` **refuses** anything that is not a manual toggle — the server's own
+     * precondition, `if (!property.enabled && !property.disabled) throw 'Computed toggle'`. So the
+     * write is only correct when the source is (1) a discovered toggle, (2) currently on, and
+     * (3) [ConditionToggle.flippable]. A buff-sourced banner therefore resolves to `null`, and
+     * that is the honest answer rather than a missing feature: there is no documented method that
+     * ends a buff, and guessing at one is the class of unverified write this app does not make.
+     *
+     * Matched by **name** because that is all the banner carries —
+     * `TrackerEngine.concentrationSource` returns the source's `name`, since a buff and a toggle
+     * are two collections' worth of shapes with one thing in common. The match is exact rather
+     * than case-insensitive: both sides are the same string off the same document, so any
+     * looseness here would only ever let it match a *different* property.
+     *
+     * Read from [activeToggles], which is the whole discovered set including the switched-off
+     * ones, and deliberately not from whatever the conditions section happens to be drawing — 09
+     * decision 9: *"the concentration banner is property-driven and unaffected"* by FR-6's switch.
+     */
+    val concentrationToggle: ConditionToggle?
+        get() = concentratingOn?.let { name ->
+            activeToggles.firstOrNull { it.name == name && it.enabled && it.flippable }
+        }
+
     val isEmpty: Boolean
         get() = hp == null && tempHp == null && slots.isEmpty() && resources.isEmpty() &&
-            allItems.isEmpty() && activeToggles.isEmpty() && defenses.isEmpty() &&
-            rolls.isEmpty()
+            hitDice.isEmpty() && allItems.isEmpty() && activeToggles.isEmpty() &&
+            defenses.isEmpty() && rolls.isEmpty()
 
     companion object {
         val EMPTY: TrackerBoard = TrackerBoard()
@@ -577,6 +678,24 @@ enum class TrackerWriteKind {
      * activity feed"* — and the confirm dialog before the tap is where the reversibility question
      * actually gets answered. That is [SHORT_REST]'s shape, one step further: a rest has no
      * inverse either, and it too is confirmed rather than undone.
+     *
+     * ### FR-29: a **local** use is fully undoable, and the asymmetry is the whole point
+     *
+     * Every sentence above is about `doAction` — a server method whose effects reach a party log
+     * and a Discord webhook. docs/design/18-table-pack.md decision 4 gives local characters their
+     * own Use, and it is *"fully UNDOABLE (the local journal keeps the inverse — unlike the server
+     * path, no external side effects; KDoc the asymmetry)"*. There is nothing to be honest about
+     * hiding: `LocalOpenCharacter.useAction` decrements two SQLite columns in one transaction, and
+     * putting both back is a complete reversal of everything that happened.
+     *
+     * [inverted] still returns `null` here, and that is **not** the contradiction it looks like.
+     * It answers *"what would the undoing write be called"*, and the two implementations answer it
+     * differently for a reason neither could state through an enum: on the server there is no such
+     * write, and locally the undo is not a second use — it is a restore of two remembered absolute
+     * values, which is `Undoable`'s vocabulary and not this enum's. Whether an UNDO is *offered* has
+     * never been read off this function; it is read off whether the op carries an inverse, exactly
+     * as [ITEM_DELETE]'s KDoc already records for the delete that is reversible on one path and not
+     * on the other.
      */
     USE_ACTION,
 
@@ -638,6 +757,69 @@ data class TrackerWriteFailure(
      */
     val dropped: Boolean = false,
 )
+
+/**
+ * *"You just took damage while concentrating"* — FR-31's prompt
+ * (docs/design/18-table-pack.md decisions 9–12).
+ *
+ * ### An event, and one this client caused
+ *
+ * Decision 9: the trigger is *"a damage write **THIS client** performs … against a character whose
+ * concentration banner is active"*, and *"never reactive to observed damage (the observer-storm
+ * rule)"*. That is the same rule FR-23 decision 20 wrote for the clear-on-heal, and it is here for
+ * the same measured reason: a party of six with the DM dashboard open is six clients watching one
+ * sheet, and a prompt derived from *observed* state would fire on all six screens for one hit — on
+ * five of which nobody pressed anything. So this type is only ever minted inside the write path,
+ * which exactly one client is in.
+ *
+ * The pin worth stating in one sentence, because it is the thing a future refactor would break:
+ * **another client's damage on a concentrating character prompts nothing here.** Not "prompts
+ * quietly", not "prompts once" — nothing. The player who took the hit is prompted on the screen
+ * they took it on, which for a DM editing a card is the DM's own screen.
+ *
+ * ### It carries the numbers, not the sentence
+ *
+ * [dc] is arithmetic and lives here so it can be pinned on the JVM; the words around it are
+ * `strings.xml`'s, resolved by the banner. Decision 10 asks for the DC to be *"labeled
+ * transparently"* — *"Concentration check — DC N (half of D, min 10)"* — and that transparency is
+ * the design's answer to variant rules: the app states the rule it applied and the number it got,
+ * so a table playing something else can see exactly what to disregard. It does not roll, does not
+ * decide, and does not drop concentration on the player's behalf (18's out-of-scope list).
+ *
+ * @property id monotonic within a session. Two identical hits are two prompts, and a state field
+ *   equal to its predecessor would be one — [TrackerWrite.id]'s reason, for the same kind of thing.
+ * @property sourceName the concentration banner's own source, as the sheet names it, so the
+ *   prompt and the banner two rows above it cannot disagree about what is being concentrated on.
+ * @property damage the damage this op did. See [dc] for what "this op" means when several land at
+ *   once.
+ * @property toggleId the property `flipToggle` would drop, or `null` when the banner's source is
+ *   not a flippable toggle. `null` makes the prompt informational — see decision 10, and the
+ *   tracker banner's own ✕, which has had exactly this limitation since WP7.
+ */
+data class ConcentrationPrompt(
+    val id: Long,
+    val sourceName: String,
+    val damage: Int,
+    val toggleId: String? = null,
+) {
+    /**
+     * 5e's rule: **half the damage taken, minimum 10** — floored, as every division in 5e is.
+     *
+     * `damage / 2` and not `damage.floorDiv(2)`, unlike [abilityModifier]'s: [damage] is never
+     * negative (a heal is not a hit and never mints one of these), and for non-negative operands
+     * Kotlin's truncation *is* the floor. The distinction that made `floorDiv` load-bearing there
+     * cannot arise here.
+     */
+    val dc: Int get() = maxOf(MIN_DC, damage / 2)
+
+    /** Whether the prompt can offer decision 10's one action. See [toggleId]. */
+    val canDrop: Boolean get() = toggleId != null
+
+    companion object {
+        /** 5e's floor. Also the DC for every hit up to 21 points, which is most of them. */
+        const val MIN_DC: Int = 10
+    }
+}
 
 /**
  * The local override layer (Room `tracker_prefs`): hide / pin / reorder any discovered

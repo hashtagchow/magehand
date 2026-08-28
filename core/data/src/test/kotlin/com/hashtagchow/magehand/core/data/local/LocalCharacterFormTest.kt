@@ -188,10 +188,122 @@ class LocalCharacterFormTest {
         )
     }
 
+    /**
+     * Two ranges reach zero, and they mean **different things** — which is why they are two
+     * constants rather than one shared bound.
+     *
+     * An item you have run out of is still an item you own. An action whose uses read zero is one
+     * nothing counts — 18 decision 1 makes uses optional, and `LocalTrackerRow.total` records that
+     * `0` is the storage for "unlimited". Two rules that happen to agree on a bound today are still
+     * two rules, and naming them separately is what stops a change to one silently moving the
+     * other.
+     */
     @Test
-    fun `the item range is the only one that reaches zero`() {
+    fun `items and actions reach zero, slots and resources do not`() {
         assertEquals(0, LocalRowKind.ITEM.totalRange().first)
+        assertEquals(0, LocalRowKind.ACTION.totalRange().first)
         assertEquals(1, LocalRowKind.SLOT.totalRange().first)
         assertEquals(1, LocalRowKind.RESOURCE.totalRange().first)
+    }
+
+    // --- FR-29's cost (18 decisions 1 and 2) --------------------------------
+
+    private fun rageAndAction(
+        costRowId: String? = "rage",
+        costAmount: Int? = 1,
+        costTargetKind: LocalRowKind = LocalRowKind.RESOURCE,
+    ) = valid(
+        rows = listOf(
+            LocalRowForm(id = "rage", kind = costTargetKind, label = "Rage", total = 3),
+            LocalRowForm(
+                id = "act",
+                kind = LocalRowKind.ACTION,
+                label = "Enter Rage",
+                total = 0,
+                costRowId = costRowId,
+                costAmount = costAmount,
+            ),
+        ),
+    )
+
+    @Test
+    fun `an action costing another row is valid`() {
+        assertTrue(rageAndAction().isValid)
+    }
+
+    @Test
+    fun `an action with no cost at all is valid`() {
+        assertTrue(rageAndAction(costRowId = null, costAmount = null).isValid)
+    }
+
+    /**
+     * **Decision 2's v1 fence: a cost row cannot itself be an action.**
+     *
+     * The picker never offers one, and this is the second half of enforcing it — a picker is a
+     * suggestion and a validator is a guarantee. Without it, a chain of actions each costing the
+     * next would be storable, and `LocalActionBoard` would render costs whose "available" count
+     * was another action's remaining uses: a number that means something entirely different, with
+     * no way for a player to see why their Rage says it costs 2 Second Winds.
+     */
+    @Test
+    fun `a cost may not name another action`() {
+        val errors = rageAndAction(costTargetKind = LocalRowKind.ACTION).validate()
+
+        assertTrue(LocalCharacterFormError.RowCostInvalid(1) in errors)
+    }
+
+    /**
+     * The remaining three ways a cost is not a cost. One error covers all four — see
+     * [LocalCharacterFormError.RowCostInvalid] for why the message is not split per clause.
+     */
+    @Test
+    fun `half a cost, a zero amount and a missing target are each refused`() {
+        assertTrue(
+            "an amount with no row",
+            LocalCharacterFormError.RowCostInvalid(1) in rageAndAction(costRowId = null).validate(),
+        )
+        assertTrue(
+            "a row with no amount",
+            LocalCharacterFormError.RowCostInvalid(1) in rageAndAction(costAmount = null).validate(),
+        )
+        assertTrue(
+            "a cost of nothing is not a cost",
+            LocalCharacterFormError.RowCostInvalid(1) in rageAndAction(costAmount = 0).validate(),
+        )
+        assertTrue(
+            "a use that hands the player charges",
+            LocalCharacterFormError.RowCostInvalid(1) in rageAndAction(costAmount = -2).validate(),
+        )
+        assertTrue(
+            "a target this character does not have",
+            LocalCharacterFormError.RowCostInvalid(1) in rageAndAction(costRowId = "nope").validate(),
+        )
+    }
+
+    /**
+     * Validation reports **every** bad field, not the first — this form's own rule, extended to
+     * the new one.
+     *
+     * A player who typed one bad number and picked one impossible cost should see both, in one
+     * round trip, on a screen that highlights fields.
+     */
+    @Test
+    fun `a bad cost and a bad total are both reported`() {
+        val errors = valid(
+            rows = listOf(
+                LocalRowForm(
+                    id = "act",
+                    kind = LocalRowKind.ACTION,
+                    label = "",
+                    total = -1,
+                    costRowId = "nope",
+                    costAmount = 1,
+                ),
+            ),
+        ).validate()
+
+        assertTrue(LocalCharacterFormError.RowLabelRequired(0) in errors)
+        assertTrue(LocalCharacterFormError.RowTotalOutOfRange(0, LocalRowKind.ACTION) in errors)
+        assertTrue(LocalCharacterFormError.RowCostInvalid(0) in errors)
     }
 }

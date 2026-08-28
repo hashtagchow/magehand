@@ -13,6 +13,7 @@ import com.hashtagchow.magehand.core.model.ItemCatalog
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -1336,6 +1337,37 @@ class ContractExportTest {
         assertTrue("`inactive` skips", ContractFixtures.skillInactiveDeathSaveId in excludedIds())
         assertTrue("`removed` skips", ContractFixtures.skillRemovedId in excludedIds())
         assertTrue("a nameless roll is dropped", ContractFixtures.skillNamelessId in excludedIds())
+    }
+
+    /**
+     * M6: FR-30's own vector, run against the production engine like every other case here — see
+     * [ContractFixtures.hitDiceSheetBody] for why it stands apart from `tracker-discovery`.
+     */
+    @Test
+    fun `the hit-dice vector discovers its own kind with the die size and no reset`() {
+        val vector = discoveryVector("hit-dice-discovery")
+        val input = vector["input"]!!.jsonObject["creatureProperties"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(
+            "the fixture's one property must actually carry the discriminator, or the vector " +
+                "proves nothing about the predicate",
+            TrackerEngine.ATTR_HIT_DICE,
+            input.single().str("attributeType"),
+        )
+
+        val hitDice = vector.expected()["trackerBoard"]!!.jsonObject["hitDice"]!!.jsonArray
+            .map { it.jsonObject }
+        val row = hitDice.single()
+        assertEquals(ContractFixtures.hitDiceD8Id, row.str("propertyId"))
+        assertEquals("HIT_DICE", row.str("kind"))
+        assertEquals("d8", row.str("dieSize"))
+        // total 4, damage 1 → value 3, the same `total − damage` arithmetic every other row uses.
+        assertEquals(3, row["value"]?.jsonPrimitive()?.intOrNull)
+        assertEquals(4, row["total"]?.jsonPrimitive()?.intOrNull)
+        assertTrue(
+            "decision 17: no reset field on the discovered row, even though this rule's own " +
+                "`domain/rules.json#discovery.hitDice.noResetField` states the source carries none",
+            row["reset"] is JsonNull,
+        )
     }
 
     @Test

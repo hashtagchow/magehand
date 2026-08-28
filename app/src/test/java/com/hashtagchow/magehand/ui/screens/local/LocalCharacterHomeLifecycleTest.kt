@@ -180,6 +180,7 @@ private object EmptyLocalCharacterDao : LocalCharacterDao {
     override suspend fun maxSortIndex(characterId: String): Int? = null
 
     override suspend fun refillRows(characterId: String, rules: List<String>) = unreachable()
+    override suspend fun setCurrentHpToMax(id: String) = unreachable()
 
     private fun unreachable(): Nothing =
         throw UnsupportedOperationException("LocalCharacterHomeLifecycleTest writes nothing")

@@ -39,11 +39,13 @@ import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.core.model.ConcentrationPrompt
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.FeedEntry
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.core.model.QuestEntry
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerBoard
@@ -97,6 +99,21 @@ data class CharacterHomeUiState(
      * question from the tracker board and shares none of its override layer.
      */
     val actions: ActionsUiState = ActionsUiState(),
+    /**
+     * FR-32's quest log (docs/design/18-table-pack.md decisions 13–16).
+     *
+     * The domain list, carried through unrendered — unlike [tracker], [inventory] and [actions],
+     * each of which has a `…UiState` between the board and the screen. There is nothing for such a
+     * layer to do here: the log is read-only (decision 15), has no filter, no collapse and no
+     * per-row state the screen owns, and its **ordering is already settled** by `QuestEngine`
+     * (open above closed, sheet order within each). A pass-through type whose every field mapped
+     * one-to-one would be indirection rather than abstraction — `SpellListHeader` is carried
+     * through `ActionsUiState` the same way and for the same reason.
+     *
+     * Empty is the discovery gate decision 14 asks for: the top-bar entry appears only when this
+     * is not.
+     */
+    val quests: List<QuestEntry> = emptyList(),
 ) {
     /** The accent seeds the whole character-home subtree, both tabs (04 §Theming). */
     val accentColor: String? get() = tracker.accentColor
@@ -113,6 +130,15 @@ data class CharacterHomeUiState(
      * `resolveTab` for what keeps that from bouncing a restored Actions selection.
      */
     val hasActions: Boolean get() = actions.sections.isNotEmpty()
+
+    /**
+     * FR-32 decision 14's gate: *"present only when ≥1 quest note exists"*.
+     *
+     * A named derivation rather than `quests.isNotEmpty()` at the call site, matching
+     * [hasActions] one line up: the app bar reads one boolean, and the rule has a name a test can
+     * assert on.
+     */
+    val hasQuests: Boolean get() = quests.isNotEmpty()
 }
 
 /**
@@ -234,6 +260,29 @@ class CharacterHomeViewModel @Inject constructor(
      * explanation — the snackbar is the only thing that says why.
      */
     val failureEvents: Flow<TrackerEvent.Failed> = _failureEvents.asSharedFlow()
+
+    /**
+     * FR-31's concentration prompts (docs/design/18-table-pack.md decisions 9–12).
+     *
+     * A **pass-through** of `OpenCharacter.concentrationPrompts` rather than a third
+     * `MutableSharedFlow` fed by a collector, which is what the two streams above are. The
+     * difference is where the back-pressure question lives: those two exist because two kinds of
+     * snackbar contend for one `SnackbarHostState` that suspends its emitter for the life of each
+     * one. This does not go to the snackbar host at all — it goes to a banner the screen swaps
+     * into a slot — so nothing suspends, nothing queues, and a buffer in front of it would only be
+     * a place for a stale check to wait.
+     *
+     * `flatMapLatest` over [open] because the source belongs to the character: closing one and
+     * opening another must not carry a prompt across, and the old flow simply ends.
+     *
+     * The **pin** is one layer down and is worth repeating here, because this is where a future
+     * "why not just watch `board.hp`?" would land: the prompt fires only for damage **this client
+     * wrote**. Another client hitting a concentrating character emits nothing. See
+     * `DefaultOpenCharacter.promptConcentration` for the observer-storm measurement behind that.
+     */
+    val concentrationPrompts: Flow<ConcentrationPrompt> = open.flatMapLatest { character ->
+        character?.concentrationPrompts ?: flowOf()
+    }
 
     init {
         viewModelScope.launch {
@@ -553,14 +602,29 @@ class CharacterHomeViewModel @Inject constructor(
      * customize sheet's state changes when the sheet is open, the actions list's when the sheet
      * arrives, and nothing a player does moves both at once.
      */
+    /**
+     * Three of the five things [uiState] combines, grouped because `combine` tops out at five
+     * typed flows before it degenerates into an `Array<Any?>` with unchecked casts.
+     *
+     * FR-32's quests join this bundle rather than claiming the sixth slot, and they belong here on
+     * their own terms as well as arithmetically: like the customize sheet's state and the actions
+     * board, they are a *derivation of the same sheet* the tracker is built from, arriving on the
+     * same emission. Grouping is the same fix `Prefs` already applies one bundle over.
+     */
     private data class SheetAndActions(
         val customize: TrackerCustomizeState,
         val actions: ActionsUiState,
+        val quests: List<QuestEntry>,
     )
 
+    /** FR-32's log, straight off the character. See [CharacterHomeUiState.quests]. */
+    private val questsState: Flow<List<QuestEntry>> = open.flatMapLatest { character ->
+        character?.quests ?: flowOf(emptyList())
+    }
+
     private val customizeAndActions: Flow<SheetAndActions> =
-        combine(customizeState, actionsState) { customize, actions ->
-            SheetAndActions(customize, actions)
+        combine(customizeState, actionsState, questsState) { customize, actions, quests ->
+            SheetAndActions(customize, actions, quests)
         }
 
     val uiState: StateFlow<CharacterHomeUiState> = combine(
@@ -582,6 +646,7 @@ class CharacterHomeViewModel @Inject constructor(
             customize = sheetAndActions.customize,
             inventory = inventory,
             actions = sheetAndActions.actions,
+            quests = sheetAndActions.quests,
         )
     }.stateIn(
         viewModelScope,
@@ -976,11 +1041,38 @@ class CharacterHomeViewModel @Inject constructor(
         open.value?.moveItem(propertyId, target)
     }
 
-    /** A condition chip (or the concentration banner's ✕, which is the same write). */
+    /**
+     * A condition chip (or the concentration banner's ✕, which is the same write).
+     *
+     * M5 [architect ruling]: a [propertyId] the board no longer carries — the FR-31 prompt's
+     * source toggled off, or was removed from the sheet, before the player tapped Drop — used to
+     * return here silently. That is the same "confirmed and nothing went out" shape `use` (FR-28,
+     * M3) already has a lane for, so a stale id now surfaces through it rather than growing a
+     * second one: [TrackerWriteFailure.dropped] `true`, which `CharacterHomeScreen` already
+     * renders as the honest "couldn't do that" snackbar regardless of which write dropped. No row
+     * shakes ([propertyId] on the failure is `null`) for [TrackerEvent.Failed]'s own reason —
+     * nothing optimistic was applied for a lookup miss, so there is nothing to roll back.
+     */
     fun toggleCondition(propertyId: String) {
         val character = open.value ?: return
         val toggle = character.board.value.activeToggles.firstOrNull { it.propertyId == propertyId }
-            ?: return
+        if (toggle == null) {
+            _failureEvents.tryEmit(
+                TrackerEvent.Failed(
+                    TrackerWriteFailure(
+                        id = USE_ERROR_IDS.incrementAndGet(),
+                        kind = TrackerWriteKind.TOGGLE,
+                        propertyId = null,
+                        targetName = propertyId,
+                        reason = null,
+                        refusedOffline = false,
+                        rateLimited = false,
+                        dropped = true,
+                    ),
+                ),
+            )
+            return
+        }
         character.toggle(toggle)
     }
 
@@ -1025,7 +1117,10 @@ class CharacterHomeViewModel @Inject constructor(
     private inline fun withRow(propertyId: String, act: (OpenCharacter, TrackedResource) -> Unit) {
         val character = open.value ?: return
         val board = character.board.value
-        val row = (board.slots + board.resources + board.allItems + listOfNotNull(board.hp))
+        // FR-30: hit dice join the lookup, because decision 18 writes them through these same
+        // `spend`/`restore` intents — the row a tap names has to be findable or the tap is
+        // dropped. See `TrackerBoard.hitDice` for why they are their own list to begin with.
+        val row = (board.slots + board.resources + board.hitDice + board.allItems + listOfNotNull(board.hp))
             .firstOrNull { it.propertyId == propertyId } ?: return
         act(character, row)
     }

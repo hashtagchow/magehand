@@ -33,7 +33,16 @@ import com.hashtagchow.magehand.core.model.toTrackedResource
  *   explicit out-of-scope list keeps them out of 1.1's form.
  * - **Temp HP**. Discovered on a sheet, not offered by the form.
  * - **Concentration**. Property-driven on the server path (an enabled toggle or buff named
- *   "concentration"); with no toggles there is no source for it.
+ *   "concentration"); with no toggles there is no source for it. FR-31's damage prompt therefore
+ *   cannot fire for a local character — see `LocalOpenCharacter.concentrationPrompts`, where that
+ *   absence is stated rather than left to be inferred from this line.
+ * - **Hit dice** ([TrackerBoard.hitDice]). 18 decision 8: a local character expresses them as an
+ *   ordinary resource row ("Hit Dice d10" with a reset rule) and FR-30 adds **no** local
+ *   machinery for them — no column, no kind, no discovery. So the list is empty here not because
+ *   the feature is missing but because it is already expressible with what 09 shipped.
+ * - **Actions.** Not absent — [LocalActionBoard] builds them — but they are not on *this* board:
+ *   `LocalRowKind.ACTION` maps to no [TrackerKind], so `toTrackedResource` drops those rows and
+ *   an action can never appear among the slots, resources or items below.
  * - **Skills and saving throws.** The *rolls* list is not empty here — see [abilityChecks] —
  *   but it holds the six ability checks and nothing else, because the six scores are the only
  *   thing the form captures. A skill list would need proficiencies, which is a form field and
@@ -52,7 +61,10 @@ object LocalTrackerBoard {
     fun build(character: LocalCharacter?, rows: List<LocalTrackerRow>): TrackerBoard {
         if (character == null) return TrackerBoard.EMPTY
 
-        val resources = rows.sortedWith(ROW_ORDER).map { it.toTrackedResource() }
+        // `mapNotNull`, because FR-29's ACTION rows are not tracker rows at all and
+        // `toTrackedResource` says so by returning null for them. The filter is the type's, not
+        // this function's — see `LocalRowKind.trackerKind`.
+        val resources = rows.sortedWith(ROW_ORDER).mapNotNull { it.toTrackedResource() }
         val items = resources.filter { it.kind == TrackerKind.ITEM }
 
         return TrackerBoard(

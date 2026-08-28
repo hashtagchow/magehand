@@ -143,4 +143,23 @@ enum class CharacterHomeTab(val titleResId: Int) {
 enum class LocalCharacterHomeTab(val titleResId: Int) {
     Tracker(com.hashtagchow.magehand.R.string.tab_tracker),
     Inventory(com.hashtagchow.magehand.R.string.tab_inventory),
+
+    /**
+     * FR-29 (docs/design/18-table-pack.md decision 3), between Inventory and Sheet — except that
+     * there is no Sheet here, so it is last.
+     *
+     * ### The position is pinned, and the reason is the pane store
+     *
+     * `PaneSurface`'s ordinals and both tab enums' must be the same list for 14 decision 6's
+     * "fixed display order" to mean anything, and `PaneSelectionTest` asserts the three agree.
+     * `PaneSurface` reads TRACKER · INVENTORY · ACTIONS · SHEET, so Actions goes here and nowhere
+     * else. There is still no `Sheet` constant, which is where 09 decision 8's "the WebView is
+     * never instantiated on this screen" continues to live.
+     *
+     * **Discovery-gated**, like its DiceCloud twin and by the same rule: decision 3 says the
+     * tab/pane appears *"when ≥1 action row exists"*, which is `ActionBoard.isEmpty` inverted —
+     * so `localPaneSurfaces` became a function for exactly the reason `serverPaneSurfaces` did one
+     * release earlier.
+     */
+    Actions(com.hashtagchow.magehand.R.string.tab_actions),
 }

@@ -14,11 +14,13 @@ import androidx.room.migration.Migration
  * | 3 | FR-5 | + `local_characters`, `local_tracker_rows` |
  * | 4 | FR-8 | + coin and inventory **columns** on those two (no new table) |
  * | 5 | FR-10b | + `local_tracker_rows.category` (one column, no new table) |
+ * | 6 | FR-23 | + `local_characters.deathSuccesses` / `.deathFailures` |
+ * | 7 | FR-29 | + `local_tracker_rows.costRowId` / `.costAmount` (a local action's cost) |
  *
  * Every **shipped** version's exported JSON under `core/data/schemas/` is **immutable** —
  * each one is the input to the migration that leaves it and to
  * `MageHandDatabaseMigrationTest`. Every migration so far is additive: 1→2 and 2→3 add tables
- * and name no existing one, and 3→4 and 4→5 add columns with `ALTER TABLE` and re-create
+ * and name no existing one, and 3→4 through 6→7 add columns with `ALTER TABLE` and re-create
  * nothing. So no account or token binding can be lost on upgrade, and
  * (docs/design/09-local-characters.md decision 10) sign-out cannot reach the local tables
  * because they carry no `accountId` to key on.
@@ -36,7 +38,7 @@ import androidx.room.migration.Migration
         LocalCharacterEntity::class,
         LocalTrackerRowEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class MageHandDatabase : RoomDatabase() {
@@ -53,6 +55,13 @@ abstract class MageHandDatabase : RoomDatabase() {
 
         /** Every migration, in order. Hand this to `RoomDatabase.Builder.addMigrations`. */
         val MIGRATIONS: Array<Migration>
-            get() = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+            get() = arrayOf(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+                MIGRATION_6_7,
+            )
     }
 }

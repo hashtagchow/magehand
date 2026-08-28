@@ -102,6 +102,25 @@ class LocalCharacterEditorViewModel @Inject constructor(
     fun setRowCategory(index: Int, category: CatalogCategory) =
         editRow(index) { it.copy(category = category) }
 
+    /** FR-29 (18 decision 1). Kept on the state for every kind; dropped on save for all but an
+     * action, exactly as [setRowCategory]'s value is for all but an item. */
+    fun setRowDescription(index: Int, description: String) =
+        editRow(index) { it.copy(description = description) }
+
+    /**
+     * FR-29's cost picker (18 decision 1) — which row a use spends from, or `null` for free.
+     *
+     * The amount is **not** reset when the row changes: a player switching a cost from Rage to Ki
+     * meant to keep the number, and re-defaulting it to 1 under their finger would be the app
+     * having an opinion about a field they already filled in. Clearing the cost leaves the amount
+     * on the state too, so tapping "No cost" and changing their mind restores what they typed —
+     * [LocalRowFormState.toRowForm] is what makes that safe by dropping the amount whenever the
+     * row is null.
+     */
+    fun setRowCostRow(index: Int, rowId: String?) = editRow(index) { it.copy(costRowId = rowId) }
+
+    fun setRowCostAmount(index: Int, amount: String) = editRow(index) { it.copy(costAmount = amount) }
+
     // --- save / delete ----------------------------------------------------------
 
     /**

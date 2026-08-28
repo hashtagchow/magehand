@@ -51,7 +51,11 @@ class PaneSelectionTest {
     private val server = serverPaneSurfaces(hasActions = true)
     private val serverNoActions = serverPaneSurfaces(hasActions = false)
     private val serverTabs = serverHomeTabs(hasActions = true)
-    private val local = localPaneSurfaces
+    // FR-29 made the local side a function too, for the same reason FR-26 made the server side
+    // one: the Actions tab is discovery-gated on both screens now. `local` is a character WITH
+    // action rows, which is what every pre-FR-29 fixture below means by "a local character".
+    private val local = localPaneSurfaces(hasActions = true)
+    private val localNoActions = localPaneSurfaces(hasActions = false)
 
     /**
      * An arrangement of open surfaces, in this order — the shape every value a released build
@@ -104,14 +108,49 @@ class PaneSelectionTest {
         // 09 decision 8: the WebView is never instantiated on that screen. `localPaneSurfaces` is
         // derived from a tab enum that has no Sheet constant, so this is structural — but it is
         // the structure a future edit to `LocalCharacterHomeTab` would quietly undo.
-        assertEquals(listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY), local)
+        assertEquals(listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS), local)
         assertFalse(PaneSurface.SHEET in local)
-        // 16 decision 1: "Local characters: no Actions surface in v1 (no local model)". Same
-        // structural guarantee, one feature later — `LocalCharacterHomeTab` has no Actions
-        // constant, so this surface cannot reach the local list however `serverPaneSurfaces`
-        // is called.
-        assertFalse(PaneSurface.ACTIONS in local)
+        assertFalse(PaneSurface.SHEET in localNoActions)
         assertEquals(LocalCharacterHomeTab.entries.map { it.surface }, local)
+    }
+
+    /**
+     * FR-29 decision 3, and the retirement of 16 decision 1's local exclusion.
+     *
+     * That decision read *"Local characters: no Actions surface in v1 (**no local model**)"*, and
+     * this test used to assert the surface could not exist at all. 18 decision 1 supplies the
+     * model, so the guarantee **changes shape rather than weakening**: it is no longer "a local
+     * character never has an Actions pane", it is the same discovery gate the server side has had
+     * since FR-26 — *"the tab/pane appears when ≥1 action row exists"*.
+     *
+     * Both directions, because only one of them is the interesting one: a character with actions
+     * gets the surface, and — the half that would rot silently — one without does not, which is
+     * what keeps a blank column off the screen of every local character who never typed an action.
+     */
+    @Test
+    fun `an on-device character's Actions surface is discovery-gated in both directions`() {
+        assertTrue(PaneSurface.ACTIONS in local)
+        assertFalse(PaneSurface.ACTIONS in localNoActions)
+        assertEquals(listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY), localNoActions)
+    }
+
+    /**
+     * The tab row and the pane list agree, for both answers — `serverHomeTabs`' own pin, applied
+     * to the local screen.
+     *
+     * A tab drawn with no pane behind it, or a pane with no tab, is the bug the two-list shape
+     * would otherwise introduce; both lists are derived from the same enum, so the property that
+     * matters is that the *gate* is applied identically to each.
+     */
+    @Test
+    fun `the local tab row and the local pane list agree about Actions`() {
+        listOf(true, false).forEach { hasActions ->
+            assertEquals(
+                "tabs and panes disagree for hasActions=$hasActions",
+                localPaneSurfaces(hasActions),
+                localHomeTabs(hasActions).map { it.surface },
+            )
+        }
     }
 
     // ---- resolvePaneLayout / resolvePanes (decisions 6, 7, 8; FR-27 decisions 1 and 3) ------
@@ -189,7 +228,7 @@ class PaneSelectionTest {
         assertEquals(listOf(PaneSurface.TRACKER), resolvePanes(stored, local))
         assertEquals(
             "and it is absent from the ORDER too, so no tab is drawn for it either",
-            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY),
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS),
             resolvePaneLayout(stored, local).map { it.surface },
         )
     }
@@ -900,5 +939,63 @@ class PaneSelectionTest {
         // string, not on the ordinal, which is what made inserting the constant safe.
         assertEquals("actions", PaneSurface.ACTIONS.key)
         assertEquals(PaneSurface.ACTIONS, PaneSurface.fromKey("actions"))
+    }
+
+    // ---- 1.9.1's app-bar decrowding (HomeOverflowMenu) -----------------------
+
+    /**
+     * The operator's screenshot: the back arrow overlapping "Short" on a bar that could carry
+     * up to nine controls at once. The fix collapses the low-frequency ones behind one overflow
+     * menu (`HomeOverflowMenu` in `PaneChrome.kt`, whose KDoc carries the "six elements max"
+     * arithmetic) — pinned by reading the source, `PaneSelectionTest`'s own precedent for a
+     * shape no pure function can carry and `:app` has no Compose test harness to click through.
+     */
+    @Test
+    fun `both home screens route their low-frequency actions through one overflow menu`() {
+        listOf("CharacterHomeScreen.kt", "LocalCharacterHomeScreen.kt").forEach { name ->
+            val source = mainSourceFiles().single { it.name == name }.readText()
+
+            assertTrue("$name no longer composes HomeOverflowMenu", source.contains("HomeOverflowMenu("))
+            // The wrench/pane-order icons this screen used to draw directly for those actions —
+            // now that they live behind HomeOverflowMenu, an import of either here means a
+            // second control landed back on the bar itself.
+            listOf("Icons.Filled.Build", "Icons.Filled.Menu").forEach { icon ->
+                assertFalse("$name must not import $icon directly anymore", source.contains(icon))
+            }
+        }
+
+        // The two screens' own trailing item — Settings on the DiceCloud screen, Edit on the
+        // local one (09's "an Edit action in place of ... Settings") — for the same reason.
+        val characterHome = mainSourceFiles().single { it.name == "CharacterHomeScreen.kt" }.readText()
+        assertFalse(
+            "CharacterHomeScreen.kt must not import Icons.Filled.Settings directly anymore",
+            characterHome.contains("Icons.Filled.Settings"),
+        )
+        val localHome = mainSourceFiles().single { it.name == "LocalCharacterHomeScreen.kt" }.readText()
+        assertFalse(
+            "LocalCharacterHomeScreen.kt must not import Icons.Filled.Edit directly anymore",
+            localHome.contains("Icons.Filled.Edit"),
+        )
+    }
+
+    /**
+     * FR-29's fourth `LocalRowKind` (Action) is what tipped both of the local editor's
+     * `LocalRowKind.entries`-iterating rows over: a plain `Row` neither shrinks nor wraps its
+     * children, so the last of four unconstrained buttons/chips squeezed toward zero width and
+     * its label wrapped one character per line — the same defect class as BUG-4, on a shape no
+     * pure function can carry, hence the source read rather than a Compose harness `:app` does
+     * not have.
+     */
+    @Test
+    fun `the local editor's row-kind chips and add-row buttons wrap instead of squeezing vertical`() {
+        val source = mainSourceFiles().single { it.name == "LocalCharacterEditorScreen.kt" }.readText()
+
+        assertEquals(
+            "both the add-row footer and the row-kind chips must lay out LocalRowKind.entries " +
+                "in a FlowRow, not a plain Row, so a fourth item wraps to a new line rather " +
+                "than squeezing the others' labels vertical",
+            2,
+            Regex("FlowRow\\(").findAll(source).count(),
+        )
     }
 }

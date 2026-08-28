@@ -187,9 +187,72 @@ interface LocalCharacterDao {
     @Query("UPDATE local_tracker_rows SET current = total WHERE characterId = :characterId AND resetRule IN (:rules)")
     suspend fun refillRows(characterId: String, rules: List<String>)
 
+    /**
+     * [rest]'s long-rest half — 09 decision 7's dated correction note: `currentHp = maxHp`,
+     * one statement, called from inside the same [rest] transaction as [refillRows] so the two
+     * can never be observed half-done. Never called for a short rest; 5e leaves HP alone there.
+     */
+    @Query("UPDATE local_characters SET currentHp = maxHp WHERE id = :id")
+    suspend fun setCurrentHpToMax(id: String)
+
+    /**
+     * FR-29 decision 4's Use: **the uses decrement and the cost decrement, in ONE transaction.**
+     *
+     * > *"Use decrements uses and the cost row in ONE Room transaction"*
+     *
+     * ### Why atomicity is the requirement and not an optimisation
+     *
+     * A use that spent the Rage charge and then failed to decrement its own uses would leave the
+     * player one charge poorer with nothing to show for it, and a use that did it the other way
+     * round would leave them a free Rage. Neither is a state any tap can produce, and neither is
+     * a state the player could diagnose — the tracker would simply read wrong. `@Transaction`
+     * makes the pair all-or-nothing at the storage layer, which is the only layer that can
+     * promise it: `LocalOpenCharacter`'s mutex serialises *writers*, it does not make two
+     * statements one.
+     *
+     * ### It is also the undo
+     *
+     * [LocalOpenCharacter.undoLastWrite] calls this same method with the two **previous** values,
+     * so restoring is one transaction for the same reason spending is: putting one column back and
+     * not the other is the same broken pair, arrived at from the other direction. There is no
+     * second "restore" statement to drift from this one.
+     *
+     * @param actionCurrent the uses the action row should read afterwards, or `null` for an
+     *   unlimited action (nothing to decrement — decision 1 makes uses optional).
+     * @param costRowId the row the use spends from, or `null` for a free action.
+     * @param costCurrent what that row should read afterwards. Ignored when [costRowId] is null.
+     * @param costIsItem whether the cost row is an item, in which case quantity and total move
+     *   together ([setRowQuantity]) rather than only the remaining value ([setRowCurrent]). An
+     *   item's two fields are one number — see [setRowQuantity] — and writing only `current` would
+     *   leave a stored `total` the inventory tab renders from.
+     */
     @Transaction
-    suspend fun rest(characterId: String, rules: List<String>, at: Long) {
+    suspend fun useAction(
+        characterId: String,
+        actionRowId: String,
+        actionCurrent: Int?,
+        costRowId: String?,
+        costCurrent: Int?,
+        costIsItem: Boolean,
+        at: Long,
+    ) {
+        if (actionCurrent != null) setRowCurrent(actionRowId, actionCurrent)
+        if (costRowId != null && costCurrent != null) {
+            if (costIsItem) setRowQuantity(costRowId, costCurrent) else setRowCurrent(costRowId, costCurrent)
+        }
+        touch(characterId, at)
+    }
+
+    /**
+     * @param healToMax 09 decision 7's dated correction note: `true` for a long rest, which
+     *   heals `currentHp` to `maxHp` in this same transaction (5e long-rest semantics). `false`
+     *   — the default, so every pre-existing caller keeps meaning exactly what it always meant
+     *   — for a short rest, which 5e leaves HP untouched.
+     */
+    @Transaction
+    suspend fun rest(characterId: String, rules: List<String>, at: Long, healToMax: Boolean = false) {
         refillRows(characterId, rules)
+        if (healToMax) setCurrentHpToMax(characterId)
         touch(characterId, at)
     }
 

@@ -112,7 +112,7 @@ data class LocalCharacterEntity(
 data class LocalTrackerRowEntity(
     @PrimaryKey val id: String,
     val characterId: String,
-    /** [LocalRowKind.storedValue] — `"slot"` / `"resource"` / `"item"`. */
+    /** [LocalRowKind.storedValue] — `"slot"` / `"resource"` / `"item"` / `"action"`. */
     val kind: String,
     val label: String,
     val total: Int,
@@ -173,6 +173,41 @@ data class LocalTrackerRowEntity(
      */
     @ColumnInfo(defaultValue = "'${CATEGORY_GEAR}'")
     val category: String = CATEGORY_GEAR,
+    /**
+     * The two columns schema **version 7** adds (FR-29, docs/design/18-table-pack.md decision 1).
+     *
+     * ```
+     * local_tracker_rows += costRowId  TEXT
+     *                    += costAmount INTEGER
+     * ```
+     *
+     * ### Two columns, not three
+     *
+     * Decision 1 lists *"`costRowId TEXT NULL`, `costAmount INTEGER NULL`, `description TEXT NULL`
+     * **if absent** for ACTION rows — exact columns the wave's call"*. `description` is **not**
+     * absent: FR-8 added it in v4 for item notes and it is nullable `TEXT` already, which is
+     * exactly the column an action's description wants. Adding a second one would have given the
+     * table two text columns meaning the same thing for two kinds of row, and the repository's
+     * save path would have had to know which. So v7 is the two genuinely new columns and nothing
+     * else — the wave's call, recorded here rather than in a commit message.
+     *
+     * ### Both nullable, so neither takes a `DEFAULT`
+     *
+     * The opposite of every column added since v4, and for the reason those needed one: SQLite
+     * refuses `ADD COLUMN … NOT NULL` without a default because there would be no value for the
+     * existing rows. These are nullable, so `NULL` *is* the value, and `NULL` is also the honest
+     * reading — no row that predates v7 is an action, so none of them has a cost. Declaring a
+     * default would have been inventing one.
+     *
+     * ### Why the pair is two columns rather than one encoded string
+     *
+     * `costRowId` is a foreign-key-shaped reference the picker resolves and `costAmount` is a
+     * number the confirm dialog prints; storing `"row-1:2"` would put a parser between the
+     * database and both of them. See [LocalTrackerRow.costRowId] for why there is deliberately no
+     * actual `FOREIGN KEY` clause on it.
+     */
+    val costRowId: String? = null,
+    val costAmount: Int? = null,
 ) {
     companion object {
         const val RESET_NONE: String = "none"
@@ -261,6 +296,11 @@ fun LocalTrackerRowEntity.toDomain(): LocalTrackerRow? {
         // reads as gear. See [CatalogCategory.fromStored] for why that differs from `kind`'s
         // null-and-drop.
         category = CatalogCategory.fromStored(category),
+        // The pair moves together or not at all: a cost row with no amount, or an amount naming
+        // no row, is half a cost and there is no reading of it. Either half missing reads as "no
+        // cost", which is the state every pre-v7 row is in.
+        costRowId = costRowId?.takeIf { it.isNotBlank() && costAmount != null },
+        costAmount = costAmount?.takeIf { !costRowId.isNullOrBlank() },
     )
 }
 
@@ -278,4 +318,6 @@ fun LocalTrackerRow.toEntity(): LocalTrackerRowEntity = LocalTrackerRowEntity(
     description = description,
     equipped = equipped,
     category = category.storedValue,
+    costRowId = costRowId,
+    costAmount = costAmount,
 )

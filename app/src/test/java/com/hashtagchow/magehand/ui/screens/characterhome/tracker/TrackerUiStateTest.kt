@@ -15,6 +15,7 @@ import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DamageDefense
 import com.hashtagchow.magehand.core.model.DefenseKind
 import com.hashtagchow.magehand.core.model.ResetRule
+import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.RollAdvantage
 import com.hashtagchow.magehand.core.model.RollModifier
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -676,7 +677,10 @@ class TrackerUiStateTest {
         current = 1,
         resetRule = storedResetRule,
         sortIndex = 0,
-    ).toDomain()!!.toTrackedResource()
+        // `!!` on the mapping too, as of FR-29: `toTrackedResource` is nullable now because an
+        // ACTION row is not a tracker row. A `resource` row is one, so a null here would be a
+        // genuine failure of the mapping and this fixture should say so loudly.
+    ).toDomain()!!.toTrackedResource()!!
 
     private fun badgeOf(row: TrackedResource): String? =
         map(board = TrackerBoard(resources = listOf(row))).resources.single().resetLabel
@@ -886,5 +890,93 @@ class TrackerUiStateTest {
 
         val dead = downed.copy(deathSaves = DeathSaves("ds1", "ds2", successes = 0, failures = 3))
         assertTrue(map(board = dead).deathSaves!!.isDead)
+    }
+
+    // --- FR-30: hit dice (docs/design/18-table-pack.md decisions 17-19) --------
+
+    private fun hitDie(id: String, size: String, value: Int, total: Int) = TrackedResource(
+        propertyId = id,
+        kind = TrackerKind.HIT_DICE,
+        name = "Hit Dice",
+        value = value,
+        total = total,
+        // The fact decision 17 records: the property carries no reset field. Every assertion in
+        // this group depends on it, so the fixture states it rather than relying on the default.
+        reset = null,
+        dieSize = size,
+    )
+
+    private val multiclass = sabriel.copy(
+        hitDice = listOf(hitDie("hd8", "d8", value = 3, total = 5), hitDie("hd10", "d10", value = 1, total = 2)),
+    )
+
+    @Test
+    fun `hit-dice rows reach their own section with the die size intact`() {
+        val rows = map(board = multiclass).hitDice
+
+        assertEquals(listOf("hd8", "hd10"), rows.map { it.propertyId })
+        assertEquals(listOf("d8", "d10"), rows.map { it.dieSize })
+        assertEquals(listOf(3, 1), rows.map { it.value })
+        assertEquals("no reset field means no badge", listOf(null, null), rows.map { it.resetLabel })
+    }
+
+    /**
+     * **Decision 19's pin: hit dice must never appear in the rest dialog's restore list.**
+     *
+     * *"The SERVER restores half … the app predicts NOTHING; the rest dialog's restore list stays
+     * reset-rule-driven (hit dice have no reset rule and would be wrong in it)."*
+     *
+     * Two independent guards, and this asserts the stronger one. `rowsRestoredBy` reads
+     * `slots + resources`, so a hit-dice row is out because it is in neither list — not merely
+     * because it happens to carry no reset rule. The weaker guard is checked too, in the second
+     * assertion: even a row that somehow acquired a long-rest rule stays out, because the *list*
+     * is what excludes it.
+     *
+     * The failure this prevents is a dialog that promises a restoration and then a server that
+     * performs a different one — half the dice, highest first, scaled by
+     * `hitDiceResetMultiplier`. A player reading "Hit Dice d8 — 3 / 5" in a "restored to full"
+     * list and getting 4 back would reasonably file it as a bug in the app.
+     */
+    @Test
+    fun `a long rest's restore list never names a hit-dice row`() {
+        val state = map(board = multiclass)
+
+        val restored = state.rowsRestoredBy(RestKind.LONG).map { it.propertyId }
+        assertFalse("hd8" in restored)
+        assertFalse("hd10" in restored)
+        assertTrue("the rows the sheet DOES restore are still listed", "slot1" in restored)
+
+        // The second guard, in isolation: the list membership excludes them even if the reset
+        // rule somehow did not.
+        val misTagged = sabriel.copy(
+            hitDice = listOf(hitDie("hd8", "d8", 3, 5).copy(reset = ResetRule.LONG_REST)),
+        )
+        assertFalse("hd8" in map(board = misTagged).rowsRestoredBy(RestKind.LONG).map { it.propertyId })
+    }
+
+    /**
+     * Decision 17: *"FR-22 direct entry applies"*.
+     *
+     * The key prefix names the *shape* of the target — a counted row with a ceiling — rather than
+     * the section it was drawn in, which is why hit dice join the resource lookup instead of
+     * getting a fourth prefix. The ceiling matters: a player typing 9 into a 5-die row must be
+     * clamped, and the clamp is `max`.
+     */
+    @Test
+    fun `direct entry resolves a hit-dice row against its own ceiling`() {
+        val target = map(board = multiclass).directEntryTarget(DirectEntryKeys.resource("hd8"))!!
+
+        assertEquals(DirectEntryKind.RESOURCE, target.kind)
+        assertEquals("hd8", target.propertyId)
+        assertEquals(3, target.current)
+        assertEquals(5, target.max)
+    }
+
+    /** A character with hit dice and nothing else is not an empty board. */
+    @Test
+    fun `hit dice alone make the board non-empty`() {
+        val onlyDice = TrackerBoard(hitDice = listOf(hitDie("hd8", "d8", 3, 5)))
+
+        assertFalse(map(board = onlyDice).isEmpty)
     }
 }

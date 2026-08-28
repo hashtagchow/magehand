@@ -28,10 +28,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.password
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -64,6 +69,18 @@ fun CredentialsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var usernameOrEmail by rememberSaveable { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    /**
+     * FR-33: whether the password is currently readable.
+     *
+     * **A plain `remember`, deliberately not `rememberSaveable`** — the same rule [password]
+     * itself follows, one step further out. Saveable state is written into the saved-instance
+     * `Bundle`, which the system persists and a bug report can contain; a revealed password must
+     * not survive process death, and neither must the *fact* that it was revealed. The field is
+     * re-masked on the first configuration change along with the password being cleared, which is
+     * the safe direction: the worst case is a player re-typing, and the alternative is a screen
+     * that comes back from the background with somebody's password on it in a coffee shop.
+     */
+    var passwordVisible by remember { mutableStateOf(false) }
     var showCustomServer by rememberSaveable { mutableStateOf(false) }
     var customServer by rememberSaveable { mutableStateOf("") }
 
@@ -126,18 +143,64 @@ fun CredentialsScreen(
                 ),
             )
 
+            // Resolved out here: `semantics {}` is not a `@Composable` scope, so a
+            // `stringResource` call inside it would not compile.
+            val showPasswordLabel = stringResource(
+                if (passwordVisible) R.string.action_hide_password else R.string.action_show_password,
+            )
             OutlinedTextField(
                 value = password,
                 onValueChange = {
                     password = it
                     viewModel.dismissError()
                 },
-                modifier = Modifier.fillMaxWidth(),
+                // M7: marks the field as a password node for accessibility services and
+                // Autofill — structural (nothing on screen changes), and independent of
+                // [passwordVisible]: the semantics describe what the field IS, not whether the
+                // characters happen to be masked right now.
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics { password() },
                 singleLine = true,
                 enabled = !uiState.isSubmitting,
                 label = { Text(stringResource(R.string.credentials_password_label)) },
                 isError = uiState.error != null,
-                visualTransformation = PasswordVisualTransformation(),
+                visualTransformation = if (passwordVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                // FR-33. A text affordance and not an eye icon, and that is a dependency decision
+                // rather than a taste one: `Visibility`/`VisibilityOff` live in
+                // `material-icons-extended`, which this app deliberately does not depend on
+                // (~50 MB of vectors — see `libs.versions.toml`, where icons-core is pinned with
+                // that reason). One word in the trailing slot costs nothing and says the same
+                // thing.
+                trailingIcon = {
+                    TextButton(
+                        onClick = { passwordVisible = !passwordVisible },
+                        enabled = !uiState.isSubmitting,
+                        // The spoken label is the whole phrase where the visible one is a word —
+                        // "Show" alone tells a screen-reader user nothing about what it shows.
+                        // Set on the merged button node, where it takes precedence over the
+                        // child `Text`, so TalkBack reads the sentence and the eye reads the word.
+                        modifier = Modifier
+                            .semantics {
+                                contentDescription = showPasswordLabel
+                            }
+                            .testTag("credentials:password:visibility"),
+                    ) {
+                        Text(
+                            stringResource(
+                                if (passwordVisible) {
+                                    R.string.credentials_password_hide
+                                } else {
+                                    R.string.credentials_password_show
+                                },
+                            ),
+                        )
+                    }
+                },
                 keyboardOptions = KeyboardOptions(
                     keyboardType = KeyboardType.Password,
                     imeAction = ImeAction.Go,

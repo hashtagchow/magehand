@@ -29,6 +29,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +48,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.core.model.ConcentrationPrompt
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConcentrationPromptBanner
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 
 /**
@@ -86,6 +90,15 @@ fun DmViewScreen(
     // cold re-open of any of those characters — the ones a DM is provably about to look at —
     // starts on a spinner instead of a sheet. The character screen has had this hook since WP6;
     // the dashboard shipping without one is the omission, not the hook being redundant.
+    // FR-31 decision 9's last clause: *"the DM's own write prompts on the DM's screen."* One
+    // banner slot for six cards, so the prompt carries the creature id and the banner names them
+    // — see `DmViewViewModel.concentrationPrompts`. Plain `remember`, not `rememberSaveable`, for
+    // `CharacterHomeScreen`'s stated reason: a check belongs to the moment its damage landed.
+    var concentrationPrompt by remember { mutableStateOf<Pair<String, ConcentrationPrompt>?>(null) }
+    LaunchedEffect(viewModel) {
+        viewModel.concentrationPrompts.collect { concentrationPrompt = it }
+    }
+
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -123,6 +136,30 @@ fun DmViewScreen(
         },
     ) { innerPadding ->
         Column(Modifier.padding(innerPadding)) {
+            // Resolved against the *current* cards every recomposition rather than captured with
+            // the prompt: a card the DM removes from the dashboard while its check is up takes the
+            // banner with it, which is the same live-lookup rule the item detail sheet follows.
+            val promptCard = concentrationPrompt?.let { (creatureId, _) ->
+                uiState.cards.firstOrNull { it.creatureId == creatureId }
+            }
+            if (concentrationPrompt != null && promptCard == null) {
+                LaunchedEffect(concentrationPrompt) { concentrationPrompt = null }
+            }
+            concentrationPrompt?.let { (creatureId, prompt) ->
+                promptCard?.let { card ->
+                    ConcentrationPromptBanner(
+                        prompt = prompt,
+                        canWrite = card.writeControlsEnabled,
+                        subjectName = card.name,
+                        onDrop = { toggleId ->
+                            viewModel.toggleCondition(creatureId, toggleId)
+                            concentrationPrompt = null
+                        },
+                        onDismiss = { concentrationPrompt = null },
+                    )
+                }
+            }
+
             if (uiState.showsEditingBanner) EditingBanner()
             uiState.error?.let { ErrorBanner(message = it, onDismiss = viewModel::dismissError) }
 

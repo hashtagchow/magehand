@@ -45,7 +45,10 @@ import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
+import com.hashtagchow.magehand.core.model.UseTarget
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsUiState
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.toActionsUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryLayoutPlan
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.toInventoryUiState
@@ -77,7 +80,26 @@ data class LocalCharacterHomeUiState(
     val tracker: TrackerUiState = TrackerUiState(hasConnection = false),
     val customize: TrackerCustomizeState = TrackerCustomizeState(reorderOnly = true),
     val inventory: InventoryUiState = InventoryUiState(),
-)
+    /**
+     * FR-29's Actions surface (docs/design/18-table-pack.md decisions 1–4).
+     *
+     * The same [ActionsUiState] the DiceCloud screen renders, from a board built by
+     * `LocalActionBoard` instead of `ActionEngine` — the third surface this screen reuses rather
+     * than forks, on 09 decision 5's terms exactly. What differs is inside the state and not
+     * around it: no spells, no spell lists, no upcast picker, and `usesAreUndoable = true`.
+     */
+    val actions: ActionsUiState = ActionsUiState(),
+) {
+    /**
+     * FR-29 decision 3's discovery gate: does this character have an Actions surface at all?
+     *
+     * `CharacterHomeUiState.hasActions`'s twin, down to the recomposition argument: the chrome
+     * keys `remember(hasActions)` on this, and keying it on a list would rebuild the tab row on
+     * every Room emission. **False while loading**, which is the honest default — a tab that
+     * appeared a beat after the screen would be worse than one that appears with the data.
+     */
+    val hasActions: Boolean get() = actions.sections.isNotEmpty()
+}
 
 /**
  * A local character's home (docs/design/09-local-characters.md decisions 5–8).
@@ -387,12 +409,40 @@ class LocalCharacterHomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * FR-29's Actions surface (18 decisions 1–4).
+     *
+     * `combine` of two flows rather than four, because a local action board needs nothing the
+     * server's does: no spell slots (there are no local spells to upcast), and no in-flight set
+     * (`LocalOpenCharacter.usesInFlight` is constant empty — the mutex is the guard, see there).
+     *
+     * `usesAreUndoable = true` is the one argument this state passes that the DiceCloud screen
+     * passes false for, and it deletes a sentence rather than adding one: decision 4's *"NO
+     * no-undo line (undo exists; saying otherwise would lie)"*. See
+     * [ActionsUiState.usesAreUndoable].
+     */
+    private val actionsState: Flow<ActionsUiState> = open.flatMapLatest { local ->
+        if (local == null) {
+            flowOf(ActionsUiState(creatureId = characterId, usesAreUndoable = true))
+        } else {
+            combine(local.actions, local.canWrite) { board, canWrite ->
+                toActionsUiState(
+                    creatureId = characterId,
+                    board = board,
+                    canWrite = canWrite,
+                    usesAreUndoable = true,
+                )
+            }
+        }
+    }
+
     val uiState: StateFlow<LocalCharacterHomeUiState> = combine(
         character,
         trackerState,
         customizeState,
         inventoryState,
-    ) { character, tracker, customize, inventory ->
+        actionsState,
+    ) { character, tracker, customize, inventory, actions ->
         LocalCharacterHomeUiState(
             characterId = characterId,
             characterName = character?.name,
@@ -400,6 +450,7 @@ class LocalCharacterHomeViewModel @Inject constructor(
             tracker = tracker,
             customize = customize,
             inventory = inventory,
+            actions = actions,
         )
     }.stateIn(
         viewModelScope,
@@ -467,6 +518,35 @@ class LocalCharacterHomeViewModel @Inject constructor(
     /** 09 decision 7. The confirm dialog is the screen's job and has already been answered. */
     fun rest(kind: RestKind) {
         open.value?.rest(kind)
+    }
+
+    /**
+     * FR-29 decision 4: a local action was used, after the confirm dialog.
+     *
+     * `CharacterHomeViewModel.use`'s twin, and deliberately the thinner of the two. There is no
+     * slot to pass (a local character has no spells), no ritual box, and no error watch: the
+     * server path spends a second or two afterwards reading the activity feed for a `doAction`
+     * failure it can report, because `doAction` returns null for every outcome (probe U1). Here
+     * the write is a Room transaction that either commits or does not, and it is journalled with
+     * an inverse — so the receipt is the undo snackbar the tracker already shows, and there is
+     * nothing to watch for.
+     *
+     * Takes the [UseTarget] rather than a property id, matching the interface's shape: a target
+     * cannot be constructed for a row the app has decided is unusable, so the gate is the
+     * parameter type. `LocalOpenCharacter.useAction` re-checks against the committed rows anyway
+     * — 17 decision 6's two gates, both of them still here.
+     */
+    fun use(target: UseTarget, slotId: String?, ritual: Boolean) {
+        val character = open.value ?: return
+        when (target) {
+            is UseTarget.Action -> character.useAction(target.propertyId)
+            // Unreachable: `LocalActionBoard` emits no spells, so no `ActionRow.Spell` exists to
+            // open a detail sheet on and no `UseTarget.Spell` can be built. Branch named rather
+            // than swept into an `else`, matching this screen's posture towards `PaneSurface.SHEET`
+            // — a total `when` is how a future local spell model becomes a compile error here
+            // instead of a silently dropped tap.
+            is UseTarget.Spell -> Unit
+        }
     }
 
     // --- inventory tab: the same four intents, against the same interface ------------

@@ -71,6 +71,28 @@ data class ActionsUiState(
     val usesInFlight: Set<String> = emptySet(),
     /** Whether a tap could reach the server at all. Dims Use rather than swallowing the tap. */
     val canWrite: Boolean = false,
+    /**
+     * Whether a Use on this character can be **undone** — false for a DiceCloud character, true
+     * for an on-device one (FR-29, docs/design/18-table-pack.md decision 4).
+     *
+     * ### One flag, and it exists to delete a sentence rather than to add one
+     *
+     * The server's confirm dialog ends with *"Can't be undone. Logged to the party's activity feed
+     * and any connected integrations."* — probe U4's finding, and the single most important line in
+     * that dialog. Decision 4 makes the local dialog *"lighter than the server's — cost +
+     * uses-after, **NO no-undo line** (undo exists; saying otherwise would lie)"*.
+     *
+     * A screen-level flag rather than something read off the [UseTarget], for
+     * `InventoryRowState.isLocal`'s reason exactly: reversibility is a property of the *storage
+     * behind the character*, not of the row, and every row on one screen has the same answer.
+     * `LocalOpenCharacter.useAction` is where the undo actually lives, and its KDoc carries the
+     * asymmetry in full.
+     *
+     * False by default, which is the safe direction: a screen that forgot to set it shows the
+     * warning on a use that could have been undone — a needlessly cautious dialog — rather than
+     * omitting it from one that could not.
+     */
+    val usesAreUndoable: Boolean = false,
 ) {
     /** How many rows match right now — the live region reads this (decision 6 / FR-24). */
     val matchCount: Int get() = sections.sumOf { it.rows.size }
@@ -277,6 +299,16 @@ data class UseAffordance(
     val inFlight: Boolean = false,
     val slots: List<SpellSlotOption> = emptyList(),
     val canWrite: Boolean = true,
+    /**
+     * Whether this use can be reversed — [ActionsUiState.usesAreUndoable], carried down so the
+     * confirm dialog can read it without the screen threading a second parameter through.
+     *
+     * Drives exactly one thing: whether `action_use_no_undo` is drawn (18 decision 4). It does
+     * **not** touch [enabled] — a use is confirmed before it happens on both paths, because a
+     * dialog that appeared only for the irreversible case would teach the player that no dialog
+     * means no consequences.
+     */
+    val undoable: Boolean = false,
 ) {
     /** Whether the button takes a tap right now. See [inFlight] and [canWrite]. */
     val enabled: Boolean get() = canWrite && !inFlight
@@ -348,6 +380,7 @@ fun ActionsUiState.detailFor(propertyId: String?): ActionDetailState? {
                     emptyList()
                 },
                 canWrite = canWrite,
+                undoable = usesAreUndoable,
             )
         },
     )
@@ -384,6 +417,8 @@ fun toActionsUiState(
     /** FR-28 decision 5, mirrored from `OpenCharacter.usesInFlight`. */
     usesInFlight: Set<String> = emptySet(),
     canWrite: Boolean = false,
+    /** FR-29 decision 4 — see [ActionsUiState.usesAreUndoable]. */
+    usesAreUndoable: Boolean = false,
 ): ActionsUiState {
     val spellSections = board.spells
         // `groupBy` preserves first-encounter order, and the board arrives level-sorted, so the
@@ -422,6 +457,7 @@ fun toActionsUiState(
         spellSlots = spellSlots,
         usesInFlight = usesInFlight,
         canWrite = canWrite,
+        usesAreUndoable = usesAreUndoable,
     ).withView(query = query, collapsedKeys = collapsedKeys)
 }
 

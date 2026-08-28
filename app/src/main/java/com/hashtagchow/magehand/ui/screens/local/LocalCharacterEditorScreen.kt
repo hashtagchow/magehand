@@ -1,8 +1,10 @@
 package com.hashtagchow.magehand.ui.screens.local
 
 import androidx.annotation.StringRes
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -42,6 +44,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -249,16 +252,28 @@ fun LocalCharacterEditorScreen(
                     row = row,
                     labelErrorRes = uiState.rowLabelErrorRes(index),
                     totalErrorRes = uiState.rowTotalErrorRes(index),
+                    costErrorRes = uiState.rowCostErrorRes(index),
+                    costOptions = uiState.costOptions(index),
                     onKind = { viewModel.setRowKind(index, it) },
                     onLabel = { viewModel.setRowLabel(index, it) },
                     onTotal = { viewModel.setRowTotal(index, it) },
                     onReset = { viewModel.setRowReset(index, it) },
                     onCategory = { viewModel.setRowCategory(index, it) },
+                    onDescription = { viewModel.setRowDescription(index, it) },
+                    onCostRow = { viewModel.setRowCostRow(index, it) },
+                    onCostAmount = { viewModel.setRowCostAmount(index, it) },
                     onRemove = { viewModel.removeRow(index) },
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            // FR-29's fourth kind (Action) is what tipped this row: three `TextButton`s fit an
+            // unconstrained `Row` on every phone this app supports, four does not, and a plain
+            // `Row` neither shrinks nor wraps its children — it squeezes the last one toward
+            // zero width instead, and an unconstrained `Text` inside that box wraps character
+            // by character (`DmCard.kt`'s `FlowRow` precedent for the same shape: buttons that
+            // do not know each other's count in advance). `FlowRow` keeps every button at its
+            // own natural size and drops the ones that do not fit to a second line instead.
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 LocalRowKind.entries.forEach { kind ->
                     TextButton(
                         onClick = { viewModel.addRow(kind) },
@@ -309,12 +324,17 @@ fun LocalCharacterEditorScreen(
 }
 
 /**
- * One tracker row's editor (09 decision 4's three kinds).
+ * One row's editor — 09 decision 4's three kinds, plus FR-29's fourth (18 decisions 1 and 2).
  *
  * The kind chips are first because they change what the rest of the card means: a slot has a
- * total, an item has a quantity, only a resource has a reset rule, and only an item has a
- * category. Rendering either of the last two for the wrong kind would be offering a control
- * whose value is discarded on save (see [LocalRowFormState.toRowForm]).
+ * total, an item has a quantity, an action has *uses*, only a resource has a reset rule, only an
+ * item has a category, and only an action has a description and a cost. Rendering any of those for
+ * the wrong kind would be offering a control whose value is discarded on save (see
+ * [LocalRowFormState.toRowForm]).
+ *
+ * @param costOptions the rows this one's cost may name, already filtered by
+ *   [LocalCharacterFormState.costOptions] — decision 2's chaining fence lives there, so this
+ *   function draws a list rather than deciding one.
  */
 @Composable
 private fun RowEditor(
@@ -322,11 +342,16 @@ private fun RowEditor(
     row: LocalRowFormState,
     @StringRes labelErrorRes: Int?,
     @StringRes totalErrorRes: Int?,
+    @StringRes costErrorRes: Int?,
+    costOptions: List<LocalRowFormState>,
     onKind: (LocalRowKind) -> Unit,
     onLabel: (String) -> Unit,
     onTotal: (String) -> Unit,
     onReset: (ResetRule?) -> Unit,
     onCategory: (CatalogCategory) -> Unit,
+    onDescription: (String) -> Unit,
+    onCostRow: (String?) -> Unit,
+    onCostAmount: (String) -> Unit,
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -339,7 +364,11 @@ private fun RowEditor(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
+                // Same shape as the add-row footer below, and the same fix: FR-29's fourth
+                // kind chip is what a plain `Row` cannot fit beside the Remove button it shares
+                // this row with — `FlowRow` wraps the chip to a second line instead of
+                // squeezing its label vertical.
+                FlowRow(
                     modifier = Modifier.weight(1f),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
@@ -375,17 +404,21 @@ private fun RowEditor(
             NumberField(
                 value = row.total,
                 onValueChange = onTotal,
-                labelRes = if (row.kind == LocalRowKind.ITEM) {
-                    R.string.local_field_quantity
-                } else {
-                    R.string.local_field_total
+                labelRes = when (row.kind) {
+                    LocalRowKind.ITEM -> R.string.local_field_quantity
+                    // FR-29: the same column, a third meaning. The label says "Uses (0 for
+                    // unlimited)" because zero is a *choice* here rather than an error — see
+                    // `LocalTrackerRow.total` — and a field whose valid range starts at a value
+                    // that means something else entirely has to say so where it is typed.
+                    LocalRowKind.ACTION -> R.string.local_field_uses
+                    LocalRowKind.SLOT, LocalRowKind.RESOURCE -> R.string.local_field_total
                 },
                 errorRes = totalErrorRes,
                 maxDigits = row.totalRange.last.toString().length,
                 testTag = "local:row:$index:total",
             )
 
-            if (row.kind == LocalRowKind.RESOURCE) {
+            if (row.kind == LocalRowKind.RESOURCE || row.kind == LocalRowKind.ACTION) {
                 Text(
                     text = stringResource(R.string.local_field_reset),
                     style = MaterialTheme.typography.labelMedium,
@@ -418,6 +451,82 @@ private fun RowEditor(
                     onCategory = onCategory,
                     testTagPrefix = "local:row:$index:category",
                 )
+            }
+
+            // FR-29 (18 decisions 1 and 2). Actions only, for the reset chips' reason exactly.
+            if (row.kind == LocalRowKind.ACTION) {
+                OutlinedTextField(
+                    value = row.description,
+                    onValueChange = onDescription,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("local:row:$index:description"),
+                    // Not `singleLine`, unlike every other field on this screen: this is the one
+                    // place a player writes prose rather than a name or a number, and a rules
+                    // description that scrolls sideways in a one-line box is a box nobody uses.
+                    // Capped so it cannot grow to fill the form — see `maxLines`.
+                    singleLine = false,
+                    maxLines = 4,
+                    label = { Text(stringResource(R.string.local_field_description)) },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                )
+
+                Text(
+                    text = stringResource(R.string.local_field_cost),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    // "No cost" first: it is the default and the most common answer, and it is one
+                    // of the choices rather than the absence of the others — the same shape the
+                    // reset chips give `null`.
+                    FilterChip(
+                        selected = row.costRowId == null,
+                        onClick = { onCostRow(null) },
+                        label = { Text(stringResource(R.string.local_cost_none)) },
+                        modifier = Modifier.testTag("local:row:$index:cost:none"),
+                    )
+                    costOptions.forEach { option ->
+                        FilterChip(
+                            selected = row.costRowId == option.id,
+                            onClick = { onCostRow(option.id) },
+                            label = {
+                                Text(
+                                    // A row the player has not named yet still gets a chip — see
+                                    // `costOptions` — and it says so rather than showing a blank.
+                                    text = option.label.ifBlank {
+                                        stringResource(R.string.local_cost_unnamed_row)
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                            modifier = Modifier.testTag("local:row:$index:cost:${option.id}"),
+                        )
+                    }
+                }
+                // The amount only exists once there is something to spend. Absent rather than
+                // disabled: a number field for a cost that does not exist is a control with no
+                // subject, and 18 decision 1 makes the whole cost optional.
+                if (row.costRowId != null) {
+                    NumberField(
+                        value = row.costAmount,
+                        onValueChange = onCostAmount,
+                        labelRes = R.string.local_field_cost_amount,
+                        errorRes = costErrorRes,
+                        maxDigits = LocalCharacterForm.COST_AMOUNT_RANGE.last.toString().length,
+                        testTag = "local:row:$index:cost:amount",
+                    )
+                } else {
+                    // The picker itself can be wrong — a cost naming a row that has since been
+                    // deleted — and with no amount field on screen the message would have nowhere
+                    // to land. Always rendered, empty when there is nothing to say, for
+                    // `FieldError`'s own stated reason about layouts that move.
+                    FieldError(costErrorRes)
+                }
             }
         }
     }
@@ -533,6 +642,7 @@ private val LocalRowKind.labelRes: Int
         LocalRowKind.SLOT -> R.string.local_kind_slot
         LocalRowKind.RESOURCE -> R.string.local_kind_resource
         LocalRowKind.ITEM -> R.string.local_kind_item
+        LocalRowKind.ACTION -> R.string.local_kind_action
     }
 
 /** The "add a row of this kind" buttons. */
@@ -541,6 +651,7 @@ private val LocalRowKind.addLabelRes: Int
         LocalRowKind.SLOT -> R.string.local_add_slot
         LocalRowKind.RESOURCE -> R.string.local_add_resource
         LocalRowKind.ITEM -> R.string.local_add_item
+        LocalRowKind.ACTION -> R.string.local_add_action
     }
 
 /** `null` is "none" — 09 decision 4's third reset option, named rather than implied. */

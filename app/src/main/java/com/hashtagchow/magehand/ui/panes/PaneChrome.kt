@@ -6,7 +6,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MultiChoiceSegmentedButtonRow
 import androidx.compose.material3.PrimaryTabRow
@@ -16,7 +22,11 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -238,6 +248,102 @@ fun PaneRow(
                     pane(surface)
                 }
             }
+        }
+    }
+}
+
+/**
+ * One low-frequency item folded into [HomeOverflowMenu] — a tab's own customize wrench, whose
+ * label and target differ per screen and per which tab is showing.
+ */
+data class HomeOverflowCustomize(val labelRes: Int, val testTag: String, val onClick: () -> Unit)
+
+/**
+ * 1.9.1's app-bar decrowding: the character-home overflow menu, shared by both home screens for
+ * [HomeTabRow]'s reason — a rule that has to hold on two screens holds on one composable or it
+ * holds on neither.
+ *
+ * ### What moved in, and what did not
+ *
+ * The operator's screenshot showed the back arrow overlapping the Short-rest button on a bar
+ * that could carry up to nine controls at once (two wrenches, quests, pane-order and settings,
+ * on top of Short/Long/history) — FR-32's quests icon was what tipped DEFAULT scale over, and
+ * the 1.9.1 spot-check flagged the same crowding again at 150 %. Short, Long and history stay on
+ * the bar: they are what a player reaches for on every turn. Customize, quests, pane-order and
+ * whatever the trailing item is (Settings on the DiceCloud screen, Edit on the local one) are
+ * reached rarely enough that hiding them behind one tap costs little and buys back the room the
+ * bar needs.
+ *
+ * ### The arithmetic behind "six elements is the cap"
+ *
+ * With this menu the bar carries at most six fixed elements: back, title, Short, Long, history,
+ * overflow. [ProvideUiScale] scales `density` (`UiScaleProvider`'s "both components are scaled"),
+ * so at [com.hashtagchow.magehand.core.data.settings.UiScale.LARGE_150] (1.5×) the *physical*
+ * screen does not grow — a 360 dp phone (`WindowSizeGateTest`: "the width every layout in this
+ * app was designed against") offers only 360 / 1.5 ≈ 240 dp of bar width in the units these
+ * controls are declared in. The five non-title elements' *minimum* declared widths — back
+ * (`IconButtonDefaults`, 48 dp), Short and Long (`ButtonDefaults.MinWidth`, 58 dp each), history
+ * and this button (48 dp each) — already sum to 260 dp, about 20 dp (~8 %) over that budget, next
+ * to the ~230 dp (nearly double the budget) the nine-element bar demanded. `AppBarKt`'s title is
+ * measured last against whatever is left and floored at zero rather than negative, so the
+ * remaining margin is spent on the title vanishing at the single most extreme combination
+ * (150 % on the narrowest phone), not on repeating the reported back-arrow collision: Short and
+ * Long cannot shrink below their own touch-target floor without failing accessibility, and
+ * removing history or a rest button is exactly what the ruling protects against.
+ *
+ * @param customize the visible tab's own wrench, or `null` when neither tab's customize sheet
+ *   applies right now (the Sheet or Actions tab is showing).
+ * @param quests the quest log action, or `null` when there is nothing to open it for — a local
+ *   character has no quest log at all (09 decision 8's structural absence), and a DiceCloud
+ *   character with zero notes is gated the same way the standalone icon was (`hasQuests`).
+ * @param settingsLabel the trailing item's own label, so one composable serves both screens'
+ *   different last item.
+ */
+@Composable
+fun HomeOverflowMenu(
+    onPaneOrder: () -> Unit,
+    settingsLabel: String,
+    onSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+    customize: HomeOverflowCustomize? = null,
+    quests: HomeOverflowCustomize? = null,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier) {
+        IconButton(
+            onClick = { expanded = true },
+            modifier = Modifier.testTag("home:overflow:open"),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.MoreVert,
+                contentDescription = stringResource(R.string.action_more_options),
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            customize?.let { item ->
+                DropdownMenuItem(
+                    text = { Text(stringResource(item.labelRes)) },
+                    onClick = { expanded = false; item.onClick() },
+                    modifier = Modifier.testTag(item.testTag),
+                )
+            }
+            quests?.let { item ->
+                DropdownMenuItem(
+                    text = { Text(stringResource(item.labelRes)) },
+                    onClick = { expanded = false; item.onClick() },
+                    modifier = Modifier.testTag(item.testTag),
+                )
+            }
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.panes_order_title)) },
+                onClick = { expanded = false; onPaneOrder() },
+                modifier = Modifier.testTag("panes:order:open"),
+            )
+            DropdownMenuItem(
+                text = { Text(settingsLabel) },
+                onClick = { expanded = false; onSettings() },
+                modifier = Modifier.testTag("home:overflow:settings"),
+            )
         }
     }
 }

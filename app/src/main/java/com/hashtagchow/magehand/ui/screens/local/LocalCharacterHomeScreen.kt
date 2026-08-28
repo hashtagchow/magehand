@@ -12,9 +12,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -50,16 +47,20 @@ import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.ui.navigation.LocalCharacterHomeTab
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.ui.panes.CharacterHomeChrome
+import com.hashtagchow.magehand.ui.panes.HomeOverflowCustomize
+import com.hashtagchow.magehand.ui.panes.HomeOverflowMenu
 import com.hashtagchow.magehand.ui.panes.HomeTabRow
 import com.hashtagchow.magehand.ui.panes.PaneOrderSheet
 import com.hashtagchow.magehand.ui.panes.PanePicker
 import com.hashtagchow.magehand.ui.panes.PaneRow
 import com.hashtagchow.magehand.ui.panes.characterHomeChrome
+import com.hashtagchow.magehand.ui.panes.localHomeTabs
 import com.hashtagchow.magehand.ui.panes.localPaneSurfaces
 import com.hashtagchow.magehand.ui.panes.resolvePaneLayout
 import com.hashtagchow.magehand.ui.panes.surface
 import com.hashtagchow.magehand.ui.window.LocalExpandedWidth
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsScreen
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryActions
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryCustomizeSheet
@@ -146,20 +147,25 @@ fun LocalCharacterHomeScreen(
     var detailItemId by rememberSaveable { mutableStateOf<String?>(null) }
     var restToConfirm by rememberSaveable { mutableStateOf<RestKind?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
-    val tabs = remember { LocalCharacterHomeTab.entries }
+    // FR-29 decision 3's one-tab-drop, the DiceCloud screen's rule arriving here: the Actions tab
+    // exists only for a character with at least one action row. `remember(hasActions)` and not a
+    // bare `remember`, because this now depends on data that arrives after the first composition
+    // — the old `remember { entries }` would have frozen the pre-discovery answer forever.
+    val hasActions = uiState.hasActions
+    val tabs = remember(hasActions) { localHomeTabs(hasActions) }
+    val availablePanes = remember(hasActions) { localPaneSurfaces(hasActions) }
     // 14 decisions 5 + 10, exactly as on the DiceCloud screen: both halves of the state are read
     // and one is rendered, so crossing the width gate loses neither.
     val panes by viewModel.panes.collectAsStateWithLifecycle()
     // FR-27: resolved once and handed to the chrome, the picker's toggle and the order sheet —
     // the DiceCloud screen's shape, over the smaller surface list (decision 4).
-    val layout = remember(panes) { resolvePaneLayout(panes, localPaneSurfaces) }
+    val layout = remember(panes, availablePanes) { resolvePaneLayout(panes, availablePanes) }
     val chrome = characterHomeChrome(
         expandedWidth = LocalExpandedWidth.current,
         selectedTab = selectedTab,
         layout = layout,
-        // Every tab this screen has, always: nothing on the local path is discovery-gated. The
-        // parameter exists for FR-26's Actions tab on the server screen, and passing the whole
-        // list here keeps `resolveTab` a no-op rather than a branch.
+        // The gated tab list. The tab branch also needs it to resolve a saved `Actions` selection
+        // on a character whose action rows have since been deleted — see `resolveTab`.
         availableTabs = tabs,
         surfaceOf = { it.surface },
     )
@@ -239,12 +245,6 @@ fun LocalCharacterHomeScreen(
                                 contentDescription = stringResource(R.string.tracker_history_title),
                             )
                         }
-                        IconButton(onClick = { customizeOpen = true }) {
-                            Icon(
-                                imageVector = Icons.Filled.Build,
-                                contentDescription = stringResource(R.string.customize_title),
-                            )
-                        }
                     }
                     if (LocalCharacterHomeTab.Inventory.isShowing(chrome)) {
                         IconButton(
@@ -257,42 +257,30 @@ fun LocalCharacterHomeScreen(
                                 contentDescription = stringResource(R.string.inventory_add),
                             )
                         }
-                        // 12 decision 6: a local character gets the same surface. Same icon,
-                        // same place, same sheet — over a smaller set of sections, which is the
-                        // board's doing and not this screen's.
-                        IconButton(
-                            onClick = { inventoryCustomizeOpen = true },
-                            modifier = Modifier.testTag("inventory:customize:open"),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Build,
-                                contentDescription = stringResource(
-                                    R.string.inventory_customize_title,
-                                ),
+                    }
+                    // 1.9.1: the wrench(es), pane-order and Edit — every low-frequency action
+                    // this bar carries — collapse into one overflow menu, the DiceCloud
+                    // screen's fix applied here (this screen has no quests entry — 09
+                    // decision 8's structural absence). See `HomeOverflowMenu`'s KDoc for the
+                    // "six elements max" arithmetic both screens now respect.
+                    HomeOverflowMenu(
+                        onPaneOrder = { paneOrderOpen = true },
+                        settingsLabel = stringResource(R.string.action_edit_character),
+                        onSettings = { onEdit(uiState.characterId) },
+                        customize = when {
+                            LocalCharacterHomeTab.Tracker.isShowing(chrome) -> HomeOverflowCustomize(
+                                labelRes = R.string.customize_title,
+                                testTag = "tracker:customize:open",
+                                onClick = { customizeOpen = true },
                             )
-                        }
-                    }
-                    // FR-27 decision 2's wrench → sheet — the DiceCloud bar's, unchanged, and
-                    // in the same place relative to the screen-level action beside it. See
-                    // that screen for why the glyph is `Menu` and not a third `Build`.
-                    IconButton(
-                        onClick = { paneOrderOpen = true },
-                        modifier = Modifier.testTag("panes:order:open"),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Menu,
-                            contentDescription = stringResource(R.string.panes_order_title),
-                        )
-                    }
-                    IconButton(
-                        onClick = { onEdit(uiState.characterId) },
-                        modifier = Modifier.testTag("local:edit"),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Edit,
-                            contentDescription = stringResource(R.string.action_edit_character),
-                        )
-                    }
+                            LocalCharacterHomeTab.Inventory.isShowing(chrome) -> HomeOverflowCustomize(
+                                labelRes = R.string.inventory_customize_title,
+                                testTag = "inventory:customize:open",
+                                onClick = { inventoryCustomizeOpen = true },
+                            )
+                            else -> null
+                        },
+                    )
                 },
             )
         },
@@ -354,6 +342,17 @@ fun LocalCharacterHomeScreen(
                 )
             }
 
+            // FR-26 + FR-29. One callback, taking a `UseTarget` rather than a property id — see
+            // `ActionsScreen`'s KDoc for why that difference is the gate rather than a style
+            // choice. The slot and ritual arguments arrive from the shared confirm dialog and are
+            // ignored by the local view model: a local character has no spells to cast.
+            val actions = @Composable {
+                ActionsScreen(
+                    state = uiState.actions,
+                    onUse = viewModel::use,
+                )
+            }
+
             when (chrome) {
                 is CharacterHomeChrome.Tabs -> {
                     // `chrome.tabs`, not `tabs`: FR-27 puts the row in the player's order and the
@@ -371,6 +370,7 @@ fun LocalCharacterHomeScreen(
                     when (chrome.selected) {
                         LocalCharacterHomeTab.Tracker -> tracker()
                         LocalCharacterHomeTab.Inventory -> inventory()
+                        LocalCharacterHomeTab.Actions -> actions()
                     }
                 }
 
@@ -392,13 +392,11 @@ fun LocalCharacterHomeScreen(
                             // `TrackerEvent.Failed`.
                             PaneSurface.SHEET -> Unit
 
-                            // Unreachable for the same structural reason, one feature later:
-                            // 16 decision 1 gives an on-device character no Actions surface in
-                            // v1 (there is no local spell or action model), so
-                            // `LocalCharacterHomeTab` has no `Actions` constant and this surface
-                            // cannot reach `localPaneSurfaces`. `LocalOpenCharacter.actions` is
-                            // a constant empty board for the same reason.
-                            PaneSurface.ACTIONS -> Unit
+                            // FR-29 decision 3: 16 decision 1's "no local model" exclusion is
+                            // retired, so this surface is reachable now — gated on discovery
+                            // rather than on the tab enum, exactly as it is on the DiceCloud
+                            // screen. `LocalActionBoard` is the model that was missing.
+                            PaneSurface.ACTIONS -> actions()
                         }
                     }
                 }

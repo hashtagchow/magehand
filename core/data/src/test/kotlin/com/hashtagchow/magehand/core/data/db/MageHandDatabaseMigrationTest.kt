@@ -4,6 +4,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.hashtagchow.magehand.core.data.local.LocalActionBoard
 import com.hashtagchow.magehand.core.data.local.LocalInventoryBoard
 import com.hashtagchow.magehand.core.data.local.LocalTrackerBoard
 import com.hashtagchow.magehand.core.model.CatalogCategory
@@ -949,6 +950,284 @@ class MageHandDatabaseMigrationTest {
         assertTrue("rows outlived their character", dao.getRows("local-1").isEmpty())
     }
 
+    // --- v6 → v7 (FR-29) ----------------------------------------------------
+
+    /**
+     * The upgrade every 1.10.x install will take — and the first since v4→v5 to **alter
+     * `local_tracker_rows` while it holds player data**.
+     *
+     * Both local tables are populated first for [MIGRATION_3_4]'s reason, unchanged: "additive" is
+     * a claim about what did **not** happen, and the only way to test it is to have a character and
+     * their rows sitting there that could have been lost. Every earlier local column is populated
+     * too — the coins, the death saves, the four FR-8 item columns and the v5 category — because
+     * those are exactly what a careless `ALTER` on these two tables would take with it, and because
+     * a migration that added its two columns correctly while dropping a purse would pass a
+     * narrower test.
+     */
+    @Test
+    fun `migrating v6 to v7 preserves every local character, row and earlier column`() = runTest {
+        createDatabaseAtVersion(6).use { v6 ->
+            v6.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "deathSuccesses, deathFailures, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', 3, 8, 14, 12, 16, 10, 13, 22, 17, 15, " +
+                    "1, 109, 57, 351, 1, 2, 100, 200)",
+            )
+            v6.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category) " +
+                    "VALUES ('row-1', 'local-1', 'resource', 'Rage', 3, 2, 'longRest', 0, " +
+                    "null, null, null, 0, 'gear')",
+            )
+            v6.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category) " +
+                    "VALUES ('row-2', 'local-1', 'item', 'Quarterstaff', 1, 1, 'none', 1, " +
+                    "4.0, 0.2, 'A simple melee weapon.', 1, 'weapon')",
+            )
+        }
+
+        val db = openCurrent()
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
+
+        val dao = db.localCharacterDao()
+        with(dao.find("local-1")!!) {
+            assertEquals("Brambles", name)
+            assertEquals(3, level)
+            // Play state, money and marks: an upgrade that healed the character, emptied their
+            // purse or cleared their death saves would be a data loss nobody reports as one.
+            assertEquals(17, currentHp)
+            assertEquals(109, gp)
+            assertEquals(351, cp)
+            assertEquals(1, deathSuccesses)
+            assertEquals(2, deathFailures)
+            assertEquals(100L, createdAt)
+        }
+
+        val rows = dao.getRows("local-1")
+        assertEquals(listOf("row-1", "row-2"), rows.map { it.id })
+        assertEquals("one charge already spent — still spent", 2, rows.first().current)
+        with(rows.last()) {
+            assertEquals(4.0, weight)
+            assertEquals(0.2, value)
+            assertEquals("A simple melee weapon.", description)
+            assertEquals(true, equipped)
+            // The v5 column, untouched by a migration that only adds two beside it.
+            assertEquals("weapon", category)
+        }
+    }
+
+    /**
+     * The two new columns are `NULL` on every row that already existed — and this is the **first**
+     * migration in this file whose columns take no `DEFAULT`.
+     *
+     * Every column added since v4 has carried one because SQLite refuses `ADD COLUMN … NOT NULL`
+     * without it on a populated table. These are nullable, so the refusal does not apply and
+     * `NULL` is both what SQLite writes and the only honest reading: no row predating v7 is an
+     * action row — the kind did not exist — so none of them has a cost to preserve or to guess at.
+     * There is no *choice* here of the kind v5's `'gear'` had to make.
+     *
+     * Asserted on the domain object as well as on the row, because `toDomain` is where a
+     * mis-mapped column would surface — and because it normalises a half-filled pair away, which
+     * this row is the trivial case of.
+     */
+    @Test
+    fun `the new v7 cost columns are null on rows that predate them`() = runTest {
+        createDatabaseAtVersion(6).use { v6 ->
+            v6.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "deathSuccesses, deathFailures, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 10, 10, " +
+                    "0, 0, 0, 0, 0, 0, 1, 1)",
+            )
+            v6.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category) " +
+                    "VALUES ('row-1', 'local-1', 'resource', 'Rage', 3, 3, 'longRest', 0, " +
+                    "null, null, null, 0, 'gear')",
+            )
+        }
+
+        val row = openCurrent().localCharacterDao().getRows("local-1").single()
+
+        assertNull("no row predating FR-29 is an action, so none has a cost", row.costRowId)
+        assertNull(row.costAmount)
+        with(row.toDomain()!!) {
+            assertNull(costRowId)
+            assertNull(costAmount)
+        }
+    }
+
+    /**
+     * **The migration, then the feature it exists for**, end to end — v5→v6's board assertion, one
+     * release on.
+     *
+     * A column that migrated correctly and mapped wrongly would still leave the Actions surface
+     * empty on a character who has an action row, which is the one thing FR-29 exists to render.
+     * So this stores a real action with a real cost through the DAO on a **migrated** database and
+     * reads it back through `LocalActionBoard` — the board the screen actually draws — checking
+     * the three things 18 decision 1 names: the label, the uses, and the cost line joined against
+     * the row it points at.
+     */
+    @Test
+    fun `the migrated database stores a local action and it reaches the actions board`() = runTest {
+        createDatabaseAtVersion(6).close()
+        val dao = openCurrent().localCharacterDao()
+
+        dao.save(
+            LocalCharacterEntity(
+                id = "local-1",
+                name = "Brambles",
+                level = 3,
+                strength = 16,
+                dexterity = 12,
+                constitution = 14,
+                intelligence = 8,
+                wisdom = 10,
+                charisma = 10,
+                maxHp = 30,
+                currentHp = 30,
+                armorClass = 15,
+                createdAt = 100,
+                updatedAt = 100,
+            ),
+            listOf(
+                LocalTrackerRowEntity(
+                    id = "rage",
+                    characterId = "local-1",
+                    kind = "resource",
+                    label = "Rage",
+                    total = 3,
+                    current = 2,
+                    resetRule = "longRest",
+                    sortIndex = 0,
+                ),
+                LocalTrackerRowEntity(
+                    id = "act",
+                    characterId = "local-1",
+                    kind = "action",
+                    label = "Enter Rage",
+                    total = 0,
+                    current = 0,
+                    resetRule = LocalTrackerRowEntity.RESET_NONE,
+                    sortIndex = 1,
+                    description = "Advantage on Strength checks; resistance to physical damage.",
+                    costRowId = "rage",
+                    costAmount = 1,
+                ),
+            ),
+        )
+
+        val rows = dao.getRows("local-1").mapNotNull { it.toDomain() }
+        val board = LocalActionBoard.build(rows)
+
+        val action = board.actions.single()
+        assertEquals("Enter Rage", action.name)
+        // `total == 0` is unlimited, which is a null `uses` and NOT an exhausted row — the
+        // difference between an action you can always take and one you can never take again.
+        assertNull(action.uses)
+        with(action.cost.lines.single()) {
+            assertEquals("Rage", name)
+            assertEquals(1, amount)
+            assertEquals("joined against the cost row's live remaining count", 2, available)
+        }
+        assertTrue("two charges left funds a cost of one", action.isUsable)
+
+        // And the action row is NOT on the tracker: `LocalRowKind.ACTION` maps to no
+        // `TrackerKind`, so `toTrackedResource` drops it — the structural half of decision 1.
+        val tracker = LocalTrackerBoard.build(dao.find("local-1")!!.toDomain(), rows)
+        assertEquals(listOf("rage"), tracker.resources.map { it.propertyId })
+        assertTrue(tracker.allItems.isEmpty())
+        assertTrue(tracker.slots.isEmpty())
+    }
+
+    /**
+     * The foreign key must survive this `ALTER TABLE` too — the assertion v4 and v5 each got, made
+     * again against the table as v7 leaves it.
+     *
+     * It matters slightly more here than it did there, and the reason is what v7 added: `costRowId`
+     * is a **soft** reference from one row of this table to another, with deliberately no
+     * `FOREIGN KEY` clause of its own (see [MIGRATION_6_7]). So the only referential guarantee
+     * `local_tracker_rows` has is still the one to `local_characters`, and it has to keep working.
+     */
+    @Test
+    fun `the cascade still works after the v7 cost columns are added`() = runTest {
+        createDatabaseAtVersion(6).use { v6 ->
+            v6.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "deathSuccesses, deathFailures, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 10, 10, " +
+                    "0, 0, 0, 0, 0, 0, 1, 1)",
+            )
+            v6.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category) " +
+                    "VALUES ('row-1', 'local-1', 'resource', 'Rage', 3, 3, 'longRest', 0, " +
+                    "null, null, null, 0, 'gear')",
+            )
+        }
+
+        val dao = openCurrent().localCharacterDao()
+        assertEquals(1, dao.getRows("local-1").size)
+
+        dao.delete("local-1")
+
+        assertNull(dao.find("local-1"))
+        assertTrue("rows outlived their character", dao.getRows("local-1").isEmpty())
+    }
+
+    /**
+     * **The chained path, with data at the bottom of it.**
+     *
+     * `migrating from v1 crosses every migration and keeps the account` already proves the chain
+     * runs and the validator accepts the result. This proves the other half, which no single-step
+     * test can: a character created on **1.2.x** (schema v3, before the coin columns, the
+     * category, the death saves and now the cost pair) crosses *four* `ALTER TABLE` migrations in
+     * one open and comes out with every value it started with, plus correct defaults for each
+     * column it never had.
+     *
+     * That is the upgrade a player who installed the app once and did not open it for a year
+     * actually takes, and it is the one shape the per-step tests cannot cover between them.
+     */
+    @Test
+    fun `a v3 character survives the whole chain to v7 with correct defaults`() = runTest {
+        createDatabaseAtVersion(3).use { v3 ->
+            v3.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', 3, 8, 14, 12, 16, 10, 13, 22, 17, 15, 100, 200)",
+            )
+            v3.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, resetRule, sortIndex) " +
+                    "VALUES ('row-1', 'local-1', 'slot', '1st Level', 4, 2, 'longRest', 0)",
+            )
+        }
+
+        val db = openCurrent()
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
+        val dao = db.localCharacterDao()
+
+        with(dao.find("local-1")!!) {
+            assertEquals("Brambles", name)
+            assertEquals(17, currentHp) // v3's play state, four migrations later
+            assertEquals(100L, createdAt)
+            assertEquals("v4's coins default to broke", 0, gp)
+            assertEquals("v6's marks default to none", 0, deathSuccesses)
+            assertEquals(0, deathFailures)
+        }
+        with(dao.getRows("local-1").single()) {
+            assertEquals(2, current) // two slots spent in 1.2.x — still spent
+            assertNull("v4's nullable columns stay absent", weight)
+            assertEquals("v5's category reads as gear", LocalTrackerRowEntity.CATEGORY_GEAR, category)
+            assertEquals(false, equipped)
+            assertNull("v7's cost is absent, because no v3 row could be an action", costRowId)
+            assertNull(costAmount)
+        }
+    }
+
     // --- fresh install / re-open --------------------------------------------
 
     @Test
@@ -1001,6 +1280,6 @@ class MageHandDatabaseMigrationTest {
 
     private companion object {
         /** Keep in step with `@Database(version = …)`. */
-        const val CURRENT_VERSION = 6
+        const val CURRENT_VERSION = 7
     }
 }

@@ -91,6 +91,16 @@ class LocalCharacterRepository(
                     // so re-saving an untouched form is a no-op for the category rather than a
                     // silent reset to gear.
                     category = row.category,
+                    // FR-29. Same argument as `category`, three fields along: the form is
+                    // authoritative for an action's description and cost, so it has to open on
+                    // what the row already says or re-saving an untouched action would blank the
+                    // description and drop the cost. Loaded for **every** kind rather than only
+                    // for actions — the kind fork belongs on the way *out* ([save] and
+                    // `LocalRowFormState.toRowForm`, which both have it), and a third copy of it
+                    // here would be a third place for it to drift.
+                    description = row.description,
+                    costRowId = row.costRowId,
+                    costAmount = row.costAmount,
                 )
             },
         )
@@ -125,9 +135,15 @@ class LocalCharacterRepository(
      *   edit here is not a *form* field — it is state this screen has no business rewriting.
      *   Pinned by `LocalCharacterRepositoryTest`.
      *
+     * - **An action row's `description`, `costRowId` and `costAmount`** — FR-29's fields, which
+     *   the form *does* carry. They survive because they round-trip through it, not because they
+     *   are read back off the stored row: [formFor] loads them and [save] writes what the form
+     *   holds. `description` is therefore the one column with two owners depending on the row's
+     *   kind, and [save]'s `when` is where that fork is written.
+     *
      * ### …and what does not survive **changing a row's kind**
      *
-     * All four of them, plus `category`. Carrying them across was right for the case they were
+     * All four of them, plus `category`, plus FR-29's cost pair. Carrying them across was right for the case they were
      * written for — the same item row, saved again after an unrelated edit — and wrong for the
      * case where the player retyped a row from an item into a resource or a slot: a spell-slot
      * row does not weigh 3 lb, is not priced at 15 gp, does not describe itself as a sword, and
@@ -195,6 +211,7 @@ class LocalCharacterRepository(
             // still an item? A row whose kind changed keeps its id and its `current`, and loses
             // everything that was a claim about an object.
             val isItem = row.kind == LocalRowKind.ITEM
+            val isAction = row.kind == LocalRowKind.ACTION
             val current = when {
                 // An item's quantity *is* what the form typed — there is no separate
                 // "remaining" for it, so an edit sets it outright.
@@ -221,13 +238,30 @@ class LocalCharacterRepository(
                 // 3 lb, cost 15 gp, describe itself as one, or be *worn*.
                 weight = previous?.weight?.takeIf { isItem },
                 value = previous?.value?.takeIf { isItem },
-                description = previous?.description?.takeIf { isItem },
+                // **Two owners, one column** (FR-29). For an item this is a note the form has
+                // never had a field for, so it survives an edit by being carried from the stored
+                // row — the "what survives an edit" rule above, unchanged. For an action it *is*
+                // a form field (18 decision 1), so the form is authoritative and carrying the
+                // stored value instead would make the description un-editable. Every other kind
+                // drops it, exactly as it drops `weight` and `equipped`: a spell-slot row does
+                // not describe itself.
+                description = when {
+                    isAction -> row.description?.trim()?.takeIf { it.isNotBlank() }
+                    isItem -> previous?.description
+                    else -> null
+                },
                 equipped = isItem && (previous?.equipped ?: false),
                 // The one inventory column the form *does* carry (13 decision 9), so the form
                 // is authoritative for it — and forced back to gear off an item row, matching
                 // how `reset` is dropped off a resource. A slot that once was an item must not
                 // keep claiming to be a sword.
                 category = (if (isItem) row.category else CatalogCategory.GEAR).storedValue,
+                // FR-29's pair, actions only, and dropped together off any other kind for
+                // `category`'s reason: a resource that once was an action must not keep claiming
+                // to spend something. `validate` has already refused a half-filled pair, so this
+                // is the kind fence rather than a second consistency check.
+                costRowId = row.costRowId?.takeIf { isAction && row.costAmount != null },
+                costAmount = row.costAmount?.takeIf { isAction && row.costRowId != null },
             )
         }
 

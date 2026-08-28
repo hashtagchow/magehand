@@ -538,6 +538,46 @@ class ActionsUiStateTest {
         assertNull("blank is absent, never an empty paragraph", state.detailFor("a3")!!.body)
     }
 
+    // -----------------------------------------------------------------------
+    // FR-29 decision 4 — the confirm dialog's one difference between the two paths
+    // -----------------------------------------------------------------------
+
+    /**
+     * *"Confirm dialog: lighter than the server's — cost + uses-after, **NO no-undo line** (undo
+     * exists; saying otherwise would lie)."*
+     *
+     * The flag reaches the affordance, which is where `ActionDetailSheet` reads it to decide
+     * whether to draw `action_use_no_undo`. Both directions, because the default is the one that
+     * ships to a DiceCloud character and getting it backwards would either warn falsely on a local
+     * use or — far worse — omit the warning from a `doAction` that posts to a party feed and a
+     * Discord webhook with no inverse of any kind (probe U4).
+     *
+     * It deliberately does **not** touch `enabled`: a use is confirmed before it happens on both
+     * paths, because a dialog that appeared only for the irreversible case would teach the player
+     * that no dialog means no consequences.
+     */
+    @Test
+    fun `a local character's use is marked undoable and a DiceCloud one is not`() {
+        val entry = ActionEntry("a1", "Enter Rage", ActionType.ACTION)
+        val actions = ActionBoard(actions = listOf(entry))
+
+        val server = toActionsUiState("c1", actions, canWrite = true).detailFor("a1")!!.use!!
+        assertFalse("the server path warns, and must keep warning", server.undoable)
+        assertTrue(server.enabled)
+
+        val local = toActionsUiState("c1", actions, canWrite = true, usesAreUndoable = true)
+            .detailFor("a1")!!.use!!
+        assertTrue(local.undoable)
+        assertTrue("the flag is about the warning line, not about the button", local.enabled)
+    }
+
+    /** The default is the cautious direction — a screen that forgets the flag over-warns. */
+    @Test
+    fun `undoable defaults to false`() {
+        assertFalse(ActionsUiState().usesAreUndoable)
+        assertFalse(UseAffordance(target = UseTarget.Action("a", "A", ActionCost.FREE, null)).undoable)
+    }
+
     /** A slot row as the tracker board hands one up. See `spellSlotOptions`. */
     private fun slotRow(id: String, level: Int, remaining: Int, total: Int = 4) = TrackedResource(
         propertyId = id,

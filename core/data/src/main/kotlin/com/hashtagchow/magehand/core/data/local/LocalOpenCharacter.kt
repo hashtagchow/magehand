@@ -28,6 +28,7 @@ import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.core.model.ConcentrationPrompt
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DeathSaves
@@ -37,6 +38,7 @@ import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.core.model.QuestEntry
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -406,15 +408,20 @@ class LocalOpenCharacter(
      * that death saves clear at a different moment on one of them. The rule is the rule.
      *
      * Decision 13's own words are *"Local rest clears them on any heal above 0 (5e semantics)"*.
-     * A local `rest` does not touch `currentHp` at all (09 decision 7), so the sentence resolves
-     * to what is written here: whatever takes HP from 0 to positive is the heal that clears them,
-     * whether that is the stepper, the number pad or FR-22's direct entry. Stabilising and
-     * recovering are the 5e semantics, and neither of them happens without hit points.
+     * **Corrected 2026-08-28** (09 decision 7's dated note): a local *long* `rest` now heals to
+     * `maxHp`, which is a heal by this method's own definition, so [rest] calls this directly
+     * with `after = maxHp` rather than leaving the marks to whichever other write happens next.
+     * A *short* `rest` still never reaches here — 5e leaves HP untouched there — and the
+     * stepper, the number pad and FR-22's direct entry keep reaching it exactly as before.
+     * Stabilising and recovering are the 5e semantics, and neither of them happens without hit
+     * points.
      *
      * No journal entry and no undo of its own: the clear is part of the heal, so undoing the
      * heal is what should put the marks back. That is why it runs **inside** the heal's critical
      * section, before its [journal] call — see [Undoable.HitPoints] for what the entry restores,
-     * and the KDoc there for the one thing this deliberately does not undo.
+     * and the KDoc there for the one thing this deliberately does not undo. [rest] itself files
+     * no [Undoable] at all — a rest is non-undoable outright — so there this call's write simply
+     * stands, with nothing for [journal] to attach an inverse to.
      *
      * @param before the character as it was read at the top of the write's critical section.
      * @param after the hit points just written.
@@ -430,55 +437,197 @@ class LocalOpenCharacter(
             .stateIn(scope, SharingStarted.Eagerly, InventoryBoard.EMPTY)
 
     /**
-     * **Always empty** — an on-device character has no Actions surface in v1
-     * (docs/design/16-actions-and-feed.md decision 1: *"Local characters: no Actions surface in
-     * v1 (no local model)"*).
+     * FR-29's Actions surface for an on-device character
+     * (docs/design/18-table-pack.md decisions 1–4).
      *
-     * A constant rather than a derivation, because there is nothing to derive from: the local
-     * schema has hit points, resources, conditions and gear, and no concept of a spell or an
-     * action at all. Inventing one would mean designing a local action model, which is a feature
-     * this wave does not have and the design does not ask for.
+     * ### 16 decision 1's exclusion is retired, and this is where it stops being true
      *
-     * This is deliberately the *weaker* of the two guarantees the app uses for a server-only
-     * surface, and it is not the one that matters. The real guarantee is structural and lives
-     * three layers up: `LocalCharacterHomeTab` has no `Actions` constant, so `localPaneSurfaces`
-     * cannot contain [PaneSurface.ACTIONS][com.hashtagchow.magehand.core.data.settings.PaneSurface]
-     * and `resolvePanes` drops a stored `actions` token — the same shape 09 decision 8 uses to
-     * keep the Sheet's WebView off this screen. This value exists only because the interface is
-     * shared; nothing on the local path reads it.
+     * This used to be a constant [ActionBoard.EMPTY], on 16 decision 1's grounds — *"Local
+     * characters: no Actions surface in v1 (**no local model**)"*. The parenthesis was the whole
+     * argument, and 18 decision 1 supplies the missing model: an `ACTION` row kind with a label,
+     * an optional description, optional uses and an optional cost. So the exclusion has nothing
+     * left to rest on, and 18 decision 3 retires it in as many words.
+     *
+     * Derived from the same `rowsFlow` [board] is built from, so the two surfaces cannot disagree
+     * about what the character has — a Use spends a row the tracker is drawing, and both re-emit
+     * off the one Room invalidation.
+     *
+     * The gate is the shared one: `ActionBoard.isEmpty` decides whether the tab and pane exist at
+     * all, exactly as it does for a DiceCloud character (`localPaneSurfaces(hasActions)`). A local
+     * character with no action rows therefore has no Actions surface, which is the same answer the
+     * old constant gave — reached by discovery rather than by decree.
      */
-    override val actions: StateFlow<ActionBoard> = MutableStateFlow(ActionBoard.EMPTY)
+    override val actions: StateFlow<ActionBoard> = rowsFlow
+        .map { rows -> LocalActionBoard.build(rows) }
+        .stateIn(scope, SharingStarted.Eagerly, ActionBoard.EMPTY)
 
     /**
-     * FR-28 decision 10: *"Local characters: unchanged (no action model)."*
+     * **Always empty**, and for a reason that survives [actions] gaining content.
      *
-     * The empty set is not a placeholder waiting to be filled in — it is the only value this flow
-     * can ever hold, and it is *entailed* by [actions] above rather than asserted beside it. A
-     * local character's board is [ActionBoard.EMPTY], so no row exists to name a use, so no use
-     * can be in flight. The two flows cannot drift apart because one of them is constant.
+     * 17 decision 5's single-flight latch exists because `doAction` is a *network* call: it is in
+     * flight for hundreds of milliseconds, during which a second tap would spend a second charge
+     * against a sheet that has not moved yet (probe U3's burst). There is no in-flight window
+     * here. [useAction] takes [writeLock], reads the committed rows, writes both columns in one
+     * Room transaction and returns; a second tap queues behind the mutex and reads the *result* of
+     * the first, so it either finds a charge or it does not. The condition the latch prevents
+     * cannot arise.
+     *
+     * Empty rather than a latch that would always be empty, because a latch here would be a
+     * control with nothing to control: the Use button's `inFlight` state would flicker on a
+     * transition too short to render, and the guard it stands in for is already the mutex.
      */
     override val usesInFlight: StateFlow<Set<String>> = MutableStateFlow(emptySet())
 
     /**
-     * No-ops, per decision 10, and no-ops for a stronger reason than "the feature is server-only".
+     * FR-29 decision 4's **Use**: uses and cost, one Room transaction, fully undoable.
      *
-     * [useAction] and [castSpell] ask DiceCloud to run an effect tree. A local character has no
-     * effect trees — it is a Room row with a name, some numbers and a list of items (09) — so
-     * there is nothing here that could be run, correctly or otherwise. This is not the local path
-     * *declining* a capability it could have implemented (contrast [setEquipped], which genuinely
-     * knows more than the server path and offers more): it is a call that has no meaning against
-     * this storage.
+     * > *"Use decrements uses and the cost row in ONE Room transaction; fully UNDOABLE (the local
+     * > journal keeps the inverse — unlike the server path, no external side effects; KDoc the
+     * > asymmetry)."*
      *
-     * Silent rather than throwing, matching [toggle] and [moveItem] below: the surface that would
-     * call this does not exist on a local character (there is no Actions tab — see [actions]), so
-     * a reachable exception here would be dead code with a crash in it.
+     * ### The asymmetry with `DefaultOpenCharacter.useAction`, stated
+     *
+     * The server's Use is `creatureProperties.doAction`, which runs a property's whole effect tree
+     * — spending attributes and items, incrementing `usesUsed`, **appending to the party's
+     * activity log and posting to any configured Discord webhook** (probe U4). DiceCloud offers no
+     * method that reverses any of that, so the write is confirmed rather than undone, and
+     * `TrackerWriteKind.USE_ACTION` is documented there as having no inverse of any kind.
+     *
+     * None of that is true here. A local use is two `UPDATE`s against two columns of a table this
+     * app owns outright. There is no log, no webhook and no second client; putting the two
+     * previous values back is a *complete* reversal of everything that happened, not a partial one
+     * dressed up as a whole. So this path offers the UNDO the other one honestly cannot — the same
+     * shape [setHitPoints] and [setEquipped] already have, and for the same reason: the local path
+     * genuinely knows more, so it offers more. The confirm dialog is lighter to match; decision 4
+     * forbids the server dialog's "can't be undone" line here, because it would be a lie.
+     *
+     * ### Two gates, and both re-read the committed rows
+     *
+     * `:app` cannot reach this with an id for a row the app has decided is unusable — `UseTarget`
+     * cannot be constructed for one (see that type) — and this re-checks anyway, against Room
+     * rather than against the board it was built from. That is the same two-gate arrangement 17
+     * decision 6 specifies for the server path, with the second gate strengthened: there the
+     * re-check is against a live board, here it is against the storage itself, inside the write's
+     * own critical section. A tap that raced an edit therefore refuses rather than spending a
+     * charge that is not there or costing a row that has been deleted.
+     *
+     * @return always `true`, and the divergence from `DefaultOpenCharacter.useAction` — which
+     *   returns `false` for a dropped call — is a property of *when* the gates can run rather than
+     *   of how strict they are. There, the board is in memory and the checks are synchronous, so
+     *   the answer is known before the method returns. Here every gate needs a **Room read inside
+     *   the write's critical section**, and a composable's `onClick` cannot block on one. So the
+     *   value means "accepted for dispatch", the gates run a moment later, and a refusal is a
+     *   silent no-op — which is the right behaviour for the only case that can reach them: a row
+     *   that stopped existing under the player's finger. The refusals a *user* could provoke are
+     *   already unreachable, because `UseTarget` cannot be constructed for an unusable row. See
+     *   the two-gate paragraph above.
      */
-    // `true`: this is a silent SUCCESS, not a drop — see the KDoc above. Returning `false`
-    // would tell a caller the call was refused, which would route it into the M3/M4 failure
-    // lane for a surface that (per the KDoc) can never reach this call in the first place.
-    override fun useAction(actionId: String) = true
+    override fun useAction(actionId: String): Boolean {
+        dispatch {
+            val stored = dao.findRow(actionId) ?: return@dispatch
+            // L-batch [architect ruling]: `findRow` is keyed on the row id alone (see the DAO's
+            // own KDoc) — every OTHER intent in this file inherits that unscoped lookup's
+            // correctness from `UseTarget`/`TrackedResource` only ever naming a row `board`
+            // exposed, and `board` is `dao.observeRows(creatureId)` — scoped by construction.
+            // `useAction` is the one path with a Room transaction expensive enough (two column
+            // writes, a journal entry) to be worth the extra strictness explicitly, rather than
+            // leaning on the same inherited argument as everything else: a row id that somehow
+            // named a DIFFERENT local character's row must refuse exactly as a missing one does.
+            if (stored.characterId != creatureId) return@dispatch
+            if (LocalRowKind.fromStored(stored.kind) != LocalRowKind.ACTION) return@dispatch
 
+            // `total == 0` is an unlimited action (see `LocalTrackerRow.total`), which spends no
+            // uses and can never be exhausted. Anything else must have a charge left.
+            val limited = stored.total > 0
+            if (limited && stored.current <= 0) return@dispatch
+            val nextUses = if (limited) stored.current - 1 else null
+
+            val costRow = stored.costRowId
+                ?.takeIf { stored.costAmount != null }
+                ?.let { dao.findRow(it) }
+            val costAmount = stored.costAmount ?: 0
+            // A cost naming a row that no longer exists is **permitted**, not refused —
+            // `CostLine.satisfied`'s asymmetry, which `LocalActionBoard` renders from and this
+            // has to agree with or the button and the write would disagree about the same row.
+            if (costRow != null && costRow.current < costAmount) return@dispatch
+            val nextCost = costRow?.let { it.current - costAmount }
+
+            dao.useAction(
+                characterId = creatureId,
+                actionRowId = stored.id,
+                actionCurrent = nextUses,
+                costRowId = costRow?.id,
+                costCurrent = nextCost,
+                costIsItem = LocalRowKind.fromStored(costRow?.kind) == LocalRowKind.ITEM,
+                at = now(),
+            )
+            journal(
+                kind = TrackerWriteKind.USE_ACTION,
+                targetName = stored.label,
+                amount = 1,
+                undo = Undoable.Use(
+                    actionRowId = stored.id,
+                    previousUses = if (limited) stored.current else null,
+                    costRowId = costRow?.id,
+                    previousCost = costRow?.current,
+                ),
+            )
+        }
+        // Optimistic, exactly as the interface's contract asks: the return value says "this call
+        // was accepted for dispatch", not "the row was usable". The gates above run inside the
+        // write's critical section — they cannot be evaluated here without blocking a composable's
+        // `onClick` on a Room read — and a refusal there is a silent no-op, which is what a tap on
+        // a row that stopped existing under the player's finger should be. The *reachable* refusal
+        // (an unusable row) is already impossible: `UseTarget` cannot be built for one.
+        return true
+    }
+
+    /**
+     * No-op returning success, per FR-28 decision 10 — and unlike [useAction], this one stays a
+     * no-op.
+     *
+     * `castSpell` asks DiceCloud to spend a slot and run a spell's effect tree. 18 decision 1 gives
+     * local characters actions and deliberately **not** spells: there is no local spell, no level,
+     * no preparation and no spell list, so [LocalActionBoard] emits no [ActionBoard.spells] and
+     * `ActionsUiState` therefore has no spell row to open a detail sheet on. Nothing can reach
+     * this.
+     *
+     * Silent rather than throwing, matching [toggle] and [moveItem] below: an exception on a path
+     * the surface cannot construct would be dead code with a crash in it. `true` for [useAction]'s
+     * stated reason — this is a silent success, not a refusal to be routed into the failure lane.
+     */
     override fun castSpell(spellId: String, slotId: String?, ritual: Boolean) = true
+
+    /**
+     * **Never emits.** FR-31's prompt has no source on an on-device character.
+     *
+     * The banner it hangs off is property-driven — an enabled `toggle` or `buff` whose name or
+     * tags mention concentration (`TrackerEngine.concentrationSource`) — and a local character has
+     * no toggles at all (09 decision 4: the form offers no field for one), so
+     * [LocalTrackerBoard] leaves `concentratingOn` null for every local character that can exist.
+     * 18 decision 9's trigger is *"a damage write this client performs against a character whose
+     * concentration banner is active"*, and the second half is unsatisfiable here.
+     *
+     * Stated as its own constant rather than left to fall out of the condition, for
+     * `TrackerUiState.hasConnection`'s reason: a guarantee that holds only because some other
+     * value happens to be null today is a guarantee that evaporates the first time that value can
+     * be something else. If local toggles ever ship, this is the one place that has to be
+     * revisited, and it says so.
+     */
+    override val concentrationPrompts: Flow<ConcentrationPrompt> = emptyFlow()
+
+    /**
+     * **Always empty.** FR-32's quest log is discovered from `type:'note'` properties carrying a
+     * `quest` tag (18 decision 13), and a local character has no properties — it is a row in
+     * `local_characters` plus a list of rows in `local_tracker_rows` (09).
+     *
+     * A constant for the same reason [castSpell] is a no-op: the model expresses nothing this
+     * could be derived from, and inventing a local note kind would be designing a feature 18's
+     * out-of-scope list does not ask for. The surface is discovery-gated on emptiness, so the
+     * top-bar entry simply never appears — the same shape the Actions surface used to have, and
+     * the same one it stopped having when a model arrived for it.
+     */
+    override val quests: StateFlow<List<QuestEntry>> = MutableStateFlow(emptyList())
 
     /**
      * Local equip: a **plain flag** (10 decision 10).
@@ -721,14 +870,28 @@ class LocalOpenCharacter(
      * server's own behaviour is described by, so short-resets-short and long-resets-both is
      * written once for both kinds of character.
      *
+     * **Corrected 2026-08-28** (09 decision 7's dated note): a long rest also heals `currentHp`
+     * to `maxHp`, inside the same [LocalCharacterDao.rest] transaction as the row refill — 5e
+     * long-rest semantics, which a server character already gets for free from the server's own
+     * `rest`. A short rest leaves `currentHp` exactly where it was; 5e does not heal one. A
+     * character at 0 HP with death-save marks who takes a long rest is healed to max and has
+     * those marks cleared by [clearDeathSavesForHeal] — the existing clear-on-heal path, called
+     * directly here because filling HP to max is a heal by that method's own definition.
+     *
      * Not undoable, matching the server path: a rest touches every qualifying row at once and
-     * reversing it would need per-row memory the confirm dialog already makes unnecessary.
+     * reversing it would need per-row memory the confirm dialog already makes unnecessary. The
+     * HP restore rides that same non-undoable write rather than opening a second, undoable one.
      * A rest also invalidates the entries above it, for the reason [TrackerWrite.undoable]
      * gives — undoing a spend after a rest would apply damage to a row already refilled.
      */
     override fun rest(kind: RestKind) {
         dispatch {
-            dao.rest(creatureId, kind.storedResetRules(), now())
+            val isLongRest = kind == RestKind.LONG
+            // Read before the write only to feed clearDeathSavesForHeal — dao.rest below is the
+            // one statement of record for the row refill and the HP restore alike.
+            val character = if (isLongRest) dao.find(creatureId) else null
+            dao.rest(creatureId, kind.storedResetRules(), now(), healToMax = isLongRest)
+            if (character != null) clearDeathSavesForHeal(character, character.maxHp)
             val restKind =
                 if (kind == RestKind.SHORT) TrackerWriteKind.SHORT_REST else TrackerWriteKind.LONG_REST
             invalidateUndoStack()
@@ -794,6 +957,46 @@ class LocalOpenCharacter(
                 entry.previousFailures.coerceIn(0, DeathSaves.MAX),
                 now(),
             )
+            // FR-29 decision 4: **both halves, one transaction** — the same [LocalCharacterDao.
+            // useAction] the write used, called with the previous values. Restoring one column and
+            // not the other is the identical broken pair the write's atomicity exists to prevent,
+            // arrived at from the other direction, so it gets the identical guarantee rather than
+            // two `UPDATE`s that happen to run next to each other.
+            //
+            // Clamped per column and per kind, exactly as the branches above are: the uses row
+            // against its (possibly edited-down) total like [Undoable.Row], and the cost row
+            // floored-only when it is an item like [Undoable.Item], because an item has no ceiling.
+            // Both are re-read inside this lock rather than clamped against a remembered total,
+            // for [spend]'s reason.
+            is Undoable.Use -> {
+                val actionRow = entry.previousUses?.let { dao.findRow(entry.actionRowId) }
+                val costRow = entry.costRowId?.let { dao.findRow(it) }
+                // L-batch [architect ruling]: RE-RESOLVED from the row just re-read, not replayed
+                // from `entry.costIsItem`. The form is the editor (09 decision 4) and a cost row's
+                // KIND is one of the things it can change — the same edit-between-spend-and-undo
+                // window this whole `undoLastWrite` override exists for, one field over. A captured
+                // `costIsItem` that disagreed with the row's current kind would pick the wrong
+                // branch below: floor a resource that no longer has one, or ceiling-clamp an item
+                // that never had a `total` worth clamping to.
+                val costIsItem = LocalRowKind.fromStored(costRow?.kind) == LocalRowKind.ITEM
+                dao.useAction(
+                    characterId = creatureId,
+                    actionRowId = entry.actionRowId,
+                    actionCurrent = entry.previousUses
+                        ?.takeIf { actionRow != null }
+                        ?.coerceIn(0, actionRow?.total ?: 0),
+                    costRowId = costRow?.id,
+                    costCurrent = entry.previousCost?.let { previous ->
+                        if (costIsItem) {
+                            previous.coerceAtLeast(0)
+                        } else {
+                            previous.coerceIn(0, costRow?.total ?: 0)
+                        }
+                    },
+                    costIsItem = costIsItem,
+                    at = now(),
+                )
+            }
         }
         dao.touch(creatureId, now())
         updateUndoStack { it.drop(1) }
@@ -1009,6 +1212,44 @@ class LocalOpenCharacter(
         data class DeathSaves(
             val previousSuccesses: Int,
             val previousFailures: Int,
+            override val writeId: Long = 0,
+        ) : Undoable, Pending {
+            override fun withWriteId(id: Long) = copy(writeId = id)
+        }
+
+        /**
+         * Both rows a Use touched, before it touched them (FR-29 decision 4).
+         *
+         * A **triple-shaped** entry for [DeathSaves]' reason, one step further: a use is one
+         * transaction over two rows, and an undo that put back only the charge or only the cost
+         * would leave a state no tap could have produced — an action with its use back and its
+         * Rage still spent, or the reverse. Both, or neither.
+         *
+         * @param previousUses the action row's remaining uses, or `null` for an unlimited action —
+         *   which spends nothing, so there is nothing of its own to restore. The cost half can
+         *   still be present: an unlimited action with a cost is a perfectly ordinary row.
+         * @param costRowId `null` for a free action, or for one whose cost named a row that was
+         *   already gone at write time (see `LocalActionBoard.costFrom` for why that is permitted
+         *   rather than refused). Either way there is no cost to put back.
+         * No `costIsItem` field — L-batch [architect ruling], overturning this class's earlier
+         * argument (second audit's finding). It used to be carried from write time, on the same
+         * reasoning [WriteOp.Equip.previousEquipped] uses for *its* boolean. The cases are not
+         * the same shape: `previousEquipped` is the value a column is set BACK to, so replaying
+         * exactly what was captured is the whole point. `costIsItem` instead SELECTS one of two
+         * write shapes (`setRowQuantity`'s quantity-and-total pair vs. `setRowCurrent`'s single
+         * column) — and if the cost row's *kind* changed between the use and the undo (09
+         * decision 4's form is the editor, same window this whole `undoLastWrite` override
+         * exists for), the captured shape is the WRONG one for the row `undoLastWrite` just
+         * re-read: a resource-turned-item undone with `setRowCurrent` leaves `total` stale, and
+         * an item-turned-resource undone with `setRowQuantity` invents a ceiling the row never
+         * had. `undoLastWrite` re-derives it from the row it re-reads instead, matching
+         * [useAction]'s own write-time derivation rather than replaying a stale snapshot of it.
+         */
+        data class Use(
+            val actionRowId: String,
+            val previousUses: Int?,
+            val costRowId: String?,
+            val previousCost: Int?,
             override val writeId: Long = 0,
         ) : Undoable, Pending {
             override fun withWriteId(id: Long) = copy(writeId = id)

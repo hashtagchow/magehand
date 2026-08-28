@@ -140,8 +140,24 @@ object ContractExport {
      * **honour-system**, and `usesLeft`/`insufficientResources` **lag 4–10 s**. Each of those is a
      * bug a second client ships before it learns — the way MageHand learned `description` must be
      * an object — and three of them are silent. See `#use` in `ddp/method-vectors.json`.
+     *
+     * **7** — FR-30's hit dice (`domain/rules.json#discovery.hitDice`, and `HIT_DICE` in
+     * `#trackerKinds`). A bump for 4/5/6's reason rather than 1–3's: the discovery rules already
+     * exported are now **insufficient**, not merely incomplete. A consumer implementing them
+     * literally matches `attributeType ∈ {spellSlot, resource}` and finds no hit-dice row on any
+     * sheet — and the failure is the `tempHitPoints` shape a third time, which is why it is worth
+     * a bump rather than a quiet addition: no row, no error, no way to tell "this character has no
+     * hit dice" from "my discovery is one predicate short". MageHand shipped exactly that bug for
+     * six releases; probe H4 found the documents had been in the mirror the whole time, filtered
+     * out at discovery.
+     *
+     * The rule carries the two facts that are *not* guessable from the match: hit-dice properties
+     * carry **no `reset` field** (the server's rest machinery bypasses it), and the server
+     * **restores half of them itself on a long rest** and logs it. A client that added a reset
+     * rule to make them "work like resources" would then double-restore, or predict a restoration
+     * the server has already performed differently.
      */
-    const val SCHEMA_VERSION: Int = 6
+    const val SCHEMA_VERSION: Int = 7
 
     /** Where the export lives, relative to the repository root. */
     const val DIRECTORY: String = "contract-export"
@@ -1058,6 +1074,11 @@ object ContractExport {
         CreatureSheet.fromSnapshotJson(ContractFixtures.rollsSheetBody(), ContractFixtures.creatureId)
     }
 
+    /** M6: FR-30's own fixture. See [ContractFixtures.hitDiceSheetBody]. */
+    private val hitDiceSheet: CreatureSheet by lazy {
+        CreatureSheet.fromSnapshotJson(ContractFixtures.hitDiceSheetBody(), ContractFixtures.creatureId)
+    }
+
     // -----------------------------------------------------------------------
     // FR-23 death saves
     // -----------------------------------------------------------------------
@@ -1955,6 +1976,55 @@ object ContractExport {
             },
         )
         put(
+            "hitDice",
+            buildJsonObject {
+                put(
+                    "match",
+                    "type == 'attribute' && attributeType == '${TrackerEngine.ATTR_HIT_DICE}'",
+                )
+                put("include", "total > 0 || value > 0")
+                put(
+                    "shape",
+                    "One property per die size. `value = total − damage` like every other " +
+                        "countable row, and `hitDiceSize` names the die — `\"d8\"` on the live " +
+                        "sheet, though a bare number and a `_calculation` wrapper are both " +
+                        "tolerated by MageHand's reader.",
+                )
+                put(
+                    "noResetField",
+                    "**These properties carry no `reset` field, and that is by design rather " +
+                        "than an omission**: the server's own rest machinery restores hit dice " +
+                        "directly and does not consult `reset`. Do NOT synthesise one to make " +
+                        "them behave like resources — see longRest below for what that would " +
+                        "collide with.",
+                )
+                put(
+                    "longRest",
+                    "`creature.methods.rest` with a long rest **restores half the dice itself** " +
+                        "— highest sizes first, scaled by the creature's own " +
+                        "`hitDiceResetMultiplier`, floor 1 — and writes a log entry for it " +
+                        "(probe H3, live-verified). A client must therefore predict NOTHING " +
+                        "about the outcome: render what comes back. A short rest touches them " +
+                        "neither server-side nor client-side.",
+                )
+                put(
+                    "spend",
+                    "`creatureProperties.damage {operation:'increment', value:+1}` — the same " +
+                        "call a spell-slot spend makes, in the same fast rate class. The server " +
+                        "neither rolls the die nor applies healing (probe H2); a spend is a " +
+                        "decrement and nothing else.",
+                )
+                put(
+                    "discoveryTrap",
+                    "The documents are published like any other property — nothing about the " +
+                        "transport hides them. MageHand missed them for six releases purely " +
+                        "because its discovery matched `spellSlot` and `resource` and nothing " +
+                        "else, which drops them with no row and no error. If your tracker shows " +
+                        "no hit dice, check your predicate before you check the wire.",
+                )
+            },
+        )
+        put(
             "hitPoints",
             buildJsonObject {
                 put(
@@ -2526,6 +2596,27 @@ object ContractExport {
                 )
                 add(
                     discoveryVector(
+                        name = "hit-dice-discovery",
+                        purpose = "M6: FR-30's own discovery rule (docs/design/18-table-pack.md " +
+                            "decision 17, domain/rules.json#discovery.hitDice) run against a " +
+                            "synthetic sheet and stood on its own — probe H4's finding was that " +
+                            "these rows were filtered out by every predicate `tracker-discovery` " +
+                            "already exercises, so a vector proving they now survive earns its " +
+                            "own case rather than riding in on that one.",
+                        exercises = listOf(
+                            "attributeType == 'hitDice' discovery, distinct from spellSlot and resource",
+                            "value = total − damage, the same arithmetic every other countable row uses",
+                            "hitDiceSize carried onto the row verbatim (\"d8\")",
+                            "no reset field on the discovered row — the server's own rest machinery, not ours",
+                        ),
+                        input = ContractFixtures.hitDiceSheetBody(),
+                        expected = buildJsonObject {
+                            put("trackerBoard", TrackerEngine.build(hitDiceSheet).toJson())
+                        },
+                    ),
+                )
+                add(
+                    discoveryVector(
                         name = "inventory-discovery",
                         purpose = "The inventory board, plus the TRACKER board over the same " +
                             "input. Both engines on one sheet is what makes the missing-quantity " +
@@ -2767,6 +2858,10 @@ object ContractExport {
         put("tempHp", tempHp?.toJson() ?: JsonNull)
         put("slots", JsonArray(slots.map { it.toJson() }))
         put("resources", JsonArray(resources.map { it.toJson() }))
+        // M6: FR-30's own list — omitted here would mean the export's own `TrackerBoard.toJson`
+        // carried the same drop `OptimisticOverlay.applyTo` was fixed for (H1), just on the
+        // contract-export side of the app instead of the tracker's.
+        put("hitDice", JsonArray(hitDice.map { it.toJson() }))
         put("allItems", JsonArray(allItems.map { it.toJson() }))
         put("pinnedItems", JsonArray(pinnedItems.map { it.toJson() }))
         put("activeToggles", JsonArray(activeToggles.map { it.toJson() }))
@@ -2805,6 +2900,9 @@ object ContractExport {
         put("total", total)
         put("reset", reset?.wireValue?.let { JsonPrimitive(it) } ?: JsonNull)
         put("spellSlotLevel", spellSlotLevel?.let { JsonPrimitive(it) } ?: JsonNull)
+        // M6: FR-30's die, `[TrackerKind.HIT_DICE]` only — `null` everywhere else, same as
+        // `spellSlotLevel` above.
+        put("dieSize", dieSize?.let { JsonPrimitive(it) } ?: JsonNull)
         put("sortOrder", sortOrder)
         put("pinned", pinned)
     }

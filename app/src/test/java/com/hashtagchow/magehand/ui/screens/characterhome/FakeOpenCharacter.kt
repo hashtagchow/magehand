@@ -6,12 +6,14 @@ import kotlinx.coroutines.flow.StateFlow
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.model.ActionBoard
+import com.hashtagchow.magehand.core.model.ConcentrationPrompt
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.core.model.QuestEntry
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.WalletRow
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -40,6 +42,19 @@ class FakeOpenCharacter(
     override val isShowingSnapshot = MutableStateFlow(false)
     override val overrides = MutableStateFlow<List<TrackerOverride>>(emptyList())
     override val accentColor = MutableStateFlow<String?>(null)
+
+    /** FR-32's log. Drivable, so a test can put a quest on the character and read the gate. */
+    override val quests = MutableStateFlow<List<QuestEntry>>(emptyList())
+
+    /**
+     * FR-31's prompts, as a hand-driven stream.
+     *
+     * A `MutableSharedFlow` and not a `StateFlow`, matching the interface: a prompt is a thing
+     * that happened, so two identical ones must be two emissions. Nothing in this fake connects
+     * it to [changeHitPoints] — deliberately, because the *attachment* is the production class's
+     * decision and a fake that reproduced it would be asserting its own copy of the rule.
+     */
+    override val concentrationPrompts = MutableSharedFlow<ConcentrationPrompt>(extraBufferCapacity = 8)
 
     override val canWrite = MutableStateFlow(false)
     override val writeHistory = MutableStateFlow<List<TrackerWrite>>(emptyList())

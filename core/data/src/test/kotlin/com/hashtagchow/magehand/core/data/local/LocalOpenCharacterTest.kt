@@ -9,6 +9,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -486,8 +487,10 @@ class LocalOpenCharacterTest {
     /**
      * **Decision 20 locally**: the clear rides on a heal that takes hit points off zero.
      *
-     * Decision 13's *"local rest clears them on any heal above 0"* resolves to this — a local
-     * `rest` does not touch `currentHp` at all (09 decision 7), so whatever heals is what clears.
+     * Decision 13's *"local rest clears them on any heal above 0"* resolves to this — whatever
+     * takes HP off zero is the heal that clears them, whether that is the stepper, the number
+     * pad, FR-22's direct entry, or (09 decision 7's dated correction) a long rest healing to
+     * max — see `a long rest from 0 HP heals to max and clears death save marks` below.
      */
     @Test
     fun `healing off zero clears both death save columns`() = runTest {
@@ -568,16 +571,82 @@ class LocalOpenCharacterTest {
         assertEquals(TrackerWriteKind.LONG_REST, character.writeHistory.value.first().kind)
     }
 
-    /** A rest does not touch hit points — 09 says nothing about it, so nothing invents it. */
+    /**
+     * H2 [architect ruling]: 18 decision 1's reused reset vocabulary means an ACTION row's uses
+     * refill exactly like a RESOURCE's — `refillRows` filters on `resetRule` alone, with no kind
+     * clause to have excluded them. A 3-use action spent to 0 comes back at 3 on a long rest, a
+     * short-rest action respects its own rule, and a `"none"` action stays dead through either —
+     * the same three claims [restRows] already pins for resources, on the kind FR-29 added.
+     */
     @Test
-    fun `a rest leaves hit points where they were`() = runTest {
+    fun `an action's uses refill on rest exactly like a resource's`() = runTest {
+        seed(
+            rows = listOf(
+                rowEntity("act-short", kind = LocalRowKind.ACTION, total = 2, current = 0, reset = ResetRule.SHORT_REST),
+                rowEntity("act-long", kind = LocalRowKind.ACTION, total = 3, current = 0, reset = ResetRule.LONG_REST),
+                rowEntity("act-none", kind = LocalRowKind.ACTION, total = 1, current = 0, reset = null),
+            ),
+        )
+        val character = open()
+
+        character.rest(RestKind.SHORT)
+        character.awaitIdle()
+        assertEquals("short-rest action refills on a short rest", 2, dao.findRow("act-short")?.current)
+        assertEquals("long-rest action untouched by a short rest", 0, dao.findRow("act-long")?.current)
+        assertEquals("a no-reset action survives a short rest", 0, dao.findRow("act-none")?.current)
+
+        character.rest(RestKind.LONG)
+        character.awaitIdle()
+        assertEquals("a 3-use action spent to 0 is 3 again after a long rest", 3, dao.findRow("act-long")?.current)
+        assertEquals("a no-reset action survives a long rest too", 0, dao.findRow("act-none")?.current)
+    }
+
+    /** 5e leaves HP untouched on a short rest — 09 decision 7's original, unamended half. */
+    @Test
+    fun `a short rest leaves hit points where they were`() = runTest {
+        seed(maxHp = 20, currentHp = 4, rows = restRows())
+        val character = open()
+
+        character.rest(RestKind.SHORT)
+        character.awaitIdle()
+
+        assertEquals(4, dao.find(characterId)?.currentHp)
+    }
+
+    /**
+     * 09 decision 7's dated correction: a long rest heals to max in the same write as the row
+     * refill, from a partial HP total.
+     */
+    @Test
+    fun `a long rest heals hit points to max alongside the row refill`() = runTest {
         seed(maxHp = 20, currentHp = 4, rows = restRows())
         val character = open()
 
         character.rest(RestKind.LONG)
         character.awaitIdle()
 
-        assertEquals(4, dao.find(characterId)?.currentHp)
+        assertEquals(20, dao.find(characterId)?.currentHp)
+        assertEquals("the row refill still happens", 4, dao.findRow("short-1")?.current)
+        assertEquals(3, dao.findRow("long-1")?.current)
+    }
+
+    /**
+     * The bug as reported: a character at 0 HP takes a long rest and comes back at full,
+     * marks and all.
+     */
+    @Test
+    fun `a long rest from 0 HP heals to max and clears death save marks`() = runTest {
+        seed(maxHp = 20, currentHp = 0, deathSuccesses = 2, deathFailures = 1, rows = restRows())
+        val character = open()
+
+        character.rest(RestKind.LONG)
+        character.awaitIdle()
+
+        with(dao.find(characterId)!!) {
+            assertEquals(20, currentHp)
+            assertEquals("healing off zero clears the marks, same as any other heal", 0, deathSuccesses)
+            assertEquals(0, deathFailures)
+        }
     }
 
     // --- undo (09 decision 5) -----------------------------------------------
@@ -802,6 +871,329 @@ class LocalOpenCharacterTest {
         character.setOverride(TrackerOverride("r-1", pinned = true))
 
         assertEquals(7, dao.findRow("r-1")?.sortIndex)
+    }
+
+    // --- FR-29: local actions (18 decisions 1-4) -----------------------------
+
+    /**
+     * An action row and the resource it spends, as the editor would have saved them.
+     *
+     * `total = 0` on an action is **unlimited** unless a test says otherwise; `total > 0` is a
+     * use-limited one. See `LocalTrackerRow.total` for why zero carries that meaning.
+     */
+    private fun actionRow(
+        id: String = "act",
+        uses: Int = 0,
+        usesLeft: Int = uses,
+        costRowId: String? = null,
+        costAmount: Int? = null,
+        sortIndex: Int = 9,
+    ) = LocalTrackerRowEntity(
+        id = id,
+        characterId = characterId,
+        kind = LocalRowKind.ACTION.storedValue,
+        label = "Enter Rage",
+        total = uses,
+        current = usesLeft,
+        resetRule = LocalTrackerRowEntity.RESET_NONE,
+        sortIndex = sortIndex,
+        description = "Advantage on Strength checks.",
+        costRowId = costRowId,
+        costAmount = costAmount,
+    )
+
+    /**
+     * Decision 3: 16 decision 1's *"no local model"* exclusion is retired, and the surface is
+     * gated on discovery instead.
+     *
+     * Both directions, because only the second one rots quietly: a character with an action row
+     * gets a board, and one without gets `ActionBoard.EMPTY` — which is the value the tab and the
+     * pane read to decide whether to exist at all.
+     */
+    @Test
+    fun `the actions board is derived from the rows, not a constant`() = runTest {
+        seed(rows = listOf(rowEntity("rage", total = 3, current = 2)))
+        val plain = open()
+        plain.board.first { it.resources.isNotEmpty() }
+        assertTrue("no action rows, no surface", plain.actions.value.isEmpty)
+
+        seed(rows = listOf(rowEntity("rage", total = 3, current = 2), actionRow(costRowId = "rage", costAmount = 1)))
+        val withAction = open()
+        val board = withAction.actions.first { !it.isEmpty }
+
+        assertEquals(listOf("Enter Rage"), board.actions.map { it.name })
+        // `rowEntity` labels its rows "row-<id>" — the cost line prints the row's own label,
+        // which is the whole point of joining against it rather than printing the id.
+        assertEquals("row-rage", board.actions.single().cost.lines.single().name)
+        assertEquals(2, board.actions.single().cost.lines.single().available)
+    }
+
+    /**
+     * **Decision 4's Use: uses and cost, in ONE Room transaction.**
+     *
+     * The two columns move together, which is the property `LocalCharacterDao.useAction`'s
+     * `@Transaction` buys and the reason it is one method rather than two statements next to each
+     * other: a use that spent the Rage charge and failed to decrement its own uses would leave the
+     * player a charge poorer with nothing to show for it, and the reverse would give them a free
+     * Rage. Neither is a state any tap can produce.
+     */
+    @Test
+    fun `a use decrements the action's uses and its cost row together`() = runTest {
+        seed(
+            rows = listOf(
+                rowEntity("rage", total = 3, current = 3),
+                actionRow(uses = 2, costRowId = "rage", costAmount = 1),
+            ),
+        )
+        val character = open()
+
+        character.useAction("act")
+        character.awaitIdle()
+
+        assertEquals("one use spent", 1, dao.findRow("act")?.current)
+        assertEquals("one charge spent", 2, dao.findRow("rage")?.current)
+    }
+
+    /**
+     * **Decision 4: fully UNDOABLE**, and completely — both halves, in one transaction.
+     *
+     * This is the asymmetry with the server path, which decision 4 asks to be KDoc'd and which is
+     * worth a test as well: `doAction` appends to the party log and posts to a Discord webhook
+     * (probe U4), so there is nothing DiceCloud can undo. A local use is two SQLite columns, and
+     * putting both back is a complete reversal of everything that happened — so the history entry
+     * offers the UNDO the other path honestly cannot.
+     */
+    @Test
+    fun `undoing a use puts both the uses and the cost back`() = runTest {
+        seed(
+            rows = listOf(
+                rowEntity("arrows", kind = LocalRowKind.ITEM, total = 12, current = 12),
+                actionRow(uses = 2, costRowId = "arrows", costAmount = 3),
+            ),
+        )
+        val character = open()
+
+        character.useAction("act")
+        character.awaitIdle()
+        assertEquals(1, dao.findRow("act")?.current)
+        assertEquals(9, dao.findRow("arrows")?.current)
+
+        assertTrue(character.undoLastWrite())
+
+        assertEquals(2, dao.findRow("act")?.current)
+        assertEquals(12, dao.findRow("arrows")?.current)
+        // An item's quantity and total are one number, so the undo has to move both — which is
+        // why `undoLastWrite` re-derives the cost row's item-ness from the row it re-reads.
+        assertEquals(12, dao.findRow("arrows")?.total)
+    }
+
+    /**
+     * L-batch [architect ruling]: the second audit's finding, pinned. A cost row that was a
+     * RESOURCE at spend time and gets edited to an ITEM before the undo must be undone as the
+     * item it is NOW — `current` and `total` moved together — not as the resource it WAS,
+     * which would leave `total` at the edited value while `current` alone snapped back.
+     */
+    @Test
+    fun `undoing a use re-resolves the cost row's kind if it was edited to an item`() = runTest {
+        seed(
+            rows = listOf(
+                rowEntity("cost1", kind = LocalRowKind.RESOURCE, total = 5, current = 5),
+                actionRow(uses = 1, costRowId = "cost1", costAmount = 2),
+            ),
+        )
+        val character = open()
+
+        character.useAction("act")
+        character.awaitIdle()
+        assertEquals("the spend, against the resource it was", 3, dao.findRow("cost1")?.current)
+
+        // The row form's edit (09 decision 4) turns the cost row into an item and renumbers its
+        // total — the exact edit-between-spend-and-undo window `undoLastWrite`'s own KDoc is about.
+        dao.upsertRows(listOf(rowEntity("cost1", kind = LocalRowKind.ITEM, total = 99, current = 3)))
+
+        assertTrue(character.undoLastWrite())
+
+        val undone = dao.findRow("cost1")
+        assertEquals("an item's quantity is restored", 5, undone?.current)
+        assertEquals(
+            "an item's total moves WITH its quantity — the stale resource-shaped undo would " +
+                "have left this at 99",
+            5,
+            undone?.total,
+        )
+    }
+
+    /** The history entry says what happened and offers the undo — decision 4's receipt. */
+    @Test
+    fun `a use files an undoable history entry naming the action`() = runTest {
+        seed(rows = listOf(rowEntity("rage", total = 3), actionRow(uses = 1, costRowId = "rage", costAmount = 1)))
+        val character = open()
+
+        character.useAction("act")
+        character.awaitIdle()
+
+        val entry = character.writeHistory.value.single()
+        assertEquals(TrackerWriteKind.USE_ACTION, entry.kind)
+        assertEquals("Enter Rage", entry.targetName)
+        assertTrue("unlike the server path, this one really can be reversed", entry.undoable)
+        assertTrue(character.canUndo.value)
+    }
+
+    /**
+     * An unlimited action spends its cost and nothing of its own.
+     *
+     * The `null` half of `Undoable.Use.previousUses` — and the undo still restores the cost, which
+     * is the half that moved.
+     */
+    @Test
+    fun `an unlimited action spends only its cost, and the undo restores it`() = runTest {
+        seed(rows = listOf(rowEntity("rage", total = 3, current = 3), actionRow(uses = 0, costRowId = "rage", costAmount = 2)))
+        val character = open()
+
+        character.useAction("act")
+        character.awaitIdle()
+
+        assertEquals("nothing of its own to spend", 0, dao.findRow("act")?.current)
+        assertEquals(1, dao.findRow("rage")?.current)
+
+        assertTrue(character.undoLastWrite())
+        assertEquals(3, dao.findRow("rage")?.current)
+    }
+
+    /**
+     * The **second gate**, against committed rows rather than against the board the tap was built
+     * from — 17 decision 6's arrangement, with the re-check strengthened to read storage.
+     *
+     * Three refusals, all silent no-ops: an exhausted action, an underfunded cost, and an id that
+     * names something that is not an action. The third is the one with teeth: `findRow` is keyed
+     * on the id alone and every local board shares an id space, so without the kind check a caller
+     * handing over a tracker id would have decremented a spell-slot row.
+     */
+    @Test
+    fun `a use is refused when the row is exhausted, underfunded, or not an action`() = runTest {
+        seed(
+            rows = listOf(
+                rowEntity("rage", total = 3, current = 0),
+                rowEntity("slot", kind = LocalRowKind.SLOT, total = 4, current = 4, sortIndex = 1),
+                actionRow(id = "spent", uses = 1, usesLeft = 0, sortIndex = 2),
+                actionRow(id = "broke", uses = 0, costRowId = "rage", costAmount = 1, sortIndex = 3),
+            ),
+        )
+        val character = open()
+
+        character.useAction("spent")
+        character.useAction("broke")
+        character.useAction("slot")
+        character.useAction("no-such-row")
+        character.awaitIdle()
+
+        assertTrue("nothing happened, so nothing is journalled", character.writeHistory.value.isEmpty())
+        assertEquals(0, dao.findRow("spent")?.current)
+        assertEquals("the underfunded action kept its (unlimited) counter", 0, dao.findRow("broke")?.current)
+        assertEquals("a slot row is not an action and must not be decremented", 4, dao.findRow("slot")?.current)
+    }
+
+    /**
+     * L-batch [architect ruling]: `dao.findRow` is keyed on the row id alone (by design — see
+     * the DAO's own KDoc), so `useAction` adds the check explicitly rather than leaning on the
+     * board's own scoping, which nothing routes an id through here. A row that belongs to a
+     * DIFFERENT local character must refuse exactly like a missing one, not decrement it.
+     */
+    @Test
+    fun `a use is refused when the row belongs to a different local character`() = runTest {
+        seed(rows = emptyList())
+        // A second local character, for the row's `characterId` foreign key — a row cannot exist
+        // without one, on this schema or on the live sheet's own.
+        dao.upsert(
+            LocalCharacterEntity(
+                id = "some-other-character",
+                name = "Someone Else",
+                level = 1,
+                strength = 10, dexterity = 10, constitution = 10,
+                intelligence = 10, wisdom = 10, charisma = 10,
+                maxHp = 10, currentHp = 10, armorClass = 10,
+                createdAt = 1, updatedAt = 1,
+            ),
+        )
+        dao.upsertRows(listOf(actionRow(id = "foreign-act", uses = 3).copy(characterId = "some-other-character")))
+        val character = open()
+
+        character.useAction("foreign-act")
+        character.awaitIdle()
+
+        assertTrue("nothing happened, so nothing is journalled", character.writeHistory.value.isEmpty())
+        assertEquals(
+            "the foreign character's row must be untouched",
+            3,
+            dao.findRow("foreign-act")?.current,
+        )
+    }
+
+    /**
+     * A cost naming a row that has since been **deleted** does not block the use.
+     *
+     * `CostLine.satisfied`'s asymmetry, enforced at the write so the button and the write agree:
+     * an unresolvable cost is one the app could not evaluate, not one it evaluated as zero. The
+     * action still spends its own use, which is the part it can be sure about.
+     */
+    @Test
+    fun `a use whose cost row is gone still spends the action's own uses`() = runTest {
+        seed(rows = listOf(actionRow(uses = 2, costRowId = "deleted", costAmount = 1)))
+        val character = open()
+
+        character.useAction("act")
+        character.awaitIdle()
+
+        assertEquals(1, dao.findRow("act")?.current)
+        assertTrue(character.writeHistory.value.single().undoable)
+    }
+
+    /**
+     * A **spell** cast has no meaning here and stays the no-op FR-28 decision 10 made it.
+     *
+     * `LocalActionBoard` emits no spells, so nothing can reach it — this pins that FR-29 gave the
+     * local path an action model and deliberately not a spell one (18 decision 1's scope).
+     */
+    @Test
+    fun `castSpell is still a silent no-op with no action model behind it`() = runTest {
+        seed(rows = listOf(rowEntity("rage", total = 3)))
+        val character = open()
+
+        assertTrue(character.castSpell("anything", null, false))
+        character.awaitIdle()
+
+        assertTrue(character.writeHistory.value.isEmpty())
+    }
+
+    /**
+     * FR-31's prompt has no source on a local character, and this states it rather than deriving
+     * it from `concentratingOn` happening to be null today.
+     *
+     * A local board carries no toggles at all (09 decision 4), so decision 9's trigger — *"a
+     * character whose concentration banner is active"* — is unsatisfiable. If local toggles ever
+     * ship, `LocalOpenCharacter.concentrationPrompts` is the one place that has to be revisited,
+     * and its KDoc says so.
+     */
+    @Test
+    fun `damaging a local character never prompts a concentration check`() = runTest {
+        seed(maxHp = 40, currentHp = 40)
+        val character = open()
+        val prompts = mutableListOf<Any>()
+        val collector = scope.launch { character.concentrationPrompts.collect { prompts += it } }
+
+        character.changeHitPoints(-30)
+        character.awaitIdle()
+        collector.cancel()
+
+        assertTrue(prompts.isEmpty())
+        assertNull(character.board.value.concentratingOn)
+    }
+
+    /** FR-32's log has no source here either — a local character has no `note` properties. */
+    @Test
+    fun `a local character has no quests`() = runTest {
+        seed()
+        assertTrue(open().quests.value.isEmpty())
     }
 
     // --- factory ------------------------------------------------------------

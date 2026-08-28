@@ -5,13 +5,18 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -40,6 +45,7 @@ import com.hashtagchow.magehand.core.data.write.WriteQueue
 import com.hashtagchow.magehand.core.ddp.DdpError
 import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CoinKind
+import com.hashtagchow.magehand.core.model.ConcentrationPrompt
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DeathSaves
@@ -49,6 +55,7 @@ import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryItem
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.core.model.QuestEntry
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.WalletRow
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -58,6 +65,7 @@ import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
 import com.hashtagchow.magehand.core.model.TrackerWriteKind
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * One opened character, as the **UI layer** sees it.
@@ -115,6 +123,49 @@ interface OpenCharacter {
      * also still holds: [ActionBoard] is `:core:model`, like every other type on this interface.
      */
     val actions: StateFlow<ActionBoard>
+
+    /**
+     * FR-32's quest log (docs/design/18-table-pack.md decisions 13–16).
+     *
+     * A read `val` costing `WritePostureTest` nothing, for [actions]' stated reason exactly: it
+     * compiles to `getQuests()`, which both of that test's positive assertions filter out before
+     * they run, and [QuestEntry] is a `:core:model` type so the no-DDP-types assertion is
+     * untouched as well. Decision 15 makes the log read-only in v1, so there is no companion
+     * intent to add and none was added.
+     *
+     * Empty means *"this character has no quest notes"*, which is the discovery gate decision 14
+     * asks for: the top-bar entry is *"present only when ≥1 quest note exists"*. It is also the
+     * value for the frame before the sheet arrives, and for every local character.
+     */
+    val quests: StateFlow<List<QuestEntry>>
+
+    /**
+     * FR-31's concentration prompts — *"you just took damage while concentrating"*
+     * (docs/design/18-table-pack.md decisions 9–12).
+     *
+     * ### A `Flow` and not a `StateFlow`, and that is the whole contract
+     *
+     * Every other read on this interface answers *"what is true now"* and is therefore a
+     * `StateFlow` a late subscriber can ask. This one answers *"what just happened"*, and a
+     * replaying state field would re-prompt on every rotation and every tab switch for a hit taken
+     * ten minutes ago. Two identical hits are two prompts — [ConcentrationPrompt.id] is what makes
+     * them distinguishable — which is exactly the argument `TrackerEvent` makes one layer up for
+     * the write snackbar.
+     *
+     * ### It emits only for damage **this client wrote**
+     *
+     * Decision 9, and it is the pin: *"Never reactive to observed damage (the observer-storm
+     * rule)"*. Another client damaging a concentrating character produces **nothing** here, on any
+     * number of screens watching that sheet. The emission is attached to [changeHitPoints] and
+     * [setHitPoints] inside the implementation — FR-23 decision 20's clear-on-heal attachment,
+     * reused deliberately and for the identical measured reason: N observers of one sheet each
+     * seeing the same transition would each act on it, and the DM dashboard watches six.
+     *
+     * A read `val` again, so `WritePostureTest`'s catalog is untouched — this feature adds **zero**
+     * new intents. Its one action, "Drop concentration", is the existing [toggle] intent against
+     * the property the prompt names ([ConcentrationPrompt.toggleId]).
+     */
+    val concentrationPrompts: Flow<ConcentrationPrompt>
 
     /** 06's four-state model, including `OFFLINE`. Drives the status strip. */
     val connectionState: StateFlow<ConnectionState>
@@ -868,10 +919,23 @@ internal class DefaultOpenCharacter(
         session.writeQueue.submit(WriteOp.restore(row, amount.coerceAtMost(room)))
     }
 
+    /**
+     * L-batch [architect ruling]: **both** HP paths prompt concentration on the UNCLAMPED
+     * damage amount — 5e RAW is "the total damage dealt to you", which the Sage Advice
+     * clarification on this rule counts inclusive of anything temporary hit points absorbed. A
+     * client that fed the check the amount left over *after* a clamp — the amount that actually
+     * moved the `hp` stat — would understate a DC exactly when a hit does the most to concentration:
+     * a big one. [changeHitPoints] already had this right ([-delta] is the raw tap/pad amount, sent
+     * to the server before any floor applies); [setHitPoints] used to compute it from the
+     * post-clamp `desired` value instead, which is *this* comment's fix. See [promptConcentration].
+     */
     override fun changeHitPoints(delta: Int) {
         val hp = session.board.value.hp ?: return
         when {
-            delta < 0 -> session.writeQueue.submit(WriteOp.takeDamage(hp, -delta))
+            delta < 0 -> {
+                session.writeQueue.submit(WriteOp.takeDamage(hp, -delta))
+                promptConcentration(-delta)
+            }
             delta > 0 -> {
                 session.writeQueue.submit(WriteOp.heal(hp, delta))
                 clearDeathSavesForHeal(from = hp.value, to = (hp.value + delta).coerceAtMost(hp.total))
@@ -879,11 +943,19 @@ internal class DefaultOpenCharacter(
         }
     }
 
+    /** See [changeHitPoints]'s KDoc for the ruling this and that method are pinned to agree on. */
     override fun setHitPoints(value: Int) {
         val hp = session.board.value.hp ?: return
         val desired = value.coerceIn(0, hp.total)
         session.writeQueue.submit(WriteOp.setValue(hp, desired))
         clearDeathSavesForHeal(from = hp.value, to = desired)
+        // FR-22's direct entry is the *exact* path decision 11 calls out: one op, one known drop.
+        // A `set` that raises the number is a heal and prompts nothing. `hp.value - value` — the
+        // UNCLAMPED entry, not `desired` — matches `changeHitPoints`'s own input and the RAW
+        // ruling above: a Set typed above `hp.total` is still a heal (negative, dropped by
+        // `promptConcentration`'s own guard) and one typed below the pad's floor, were a future
+        // surface ever to allow it, would still report the true hit rather than the clamped one.
+        promptConcentration(hp.value - value)
     }
 
     /**
@@ -1321,6 +1393,132 @@ internal class DefaultOpenCharacter(
         } finally {
             if (!slotReleased) synchronized(quantityLock) { quantityFlushes.remove(item.propertyId) }
         }
+    }
+
+    override val quests: StateFlow<List<QuestEntry>> get() = session.quests
+
+    /**
+     * FR-31's prompt stream (docs/design/18-table-pack.md decisions 9–12).
+     *
+     * A conflating-free `SharedFlow` with a small buffer and drop-oldest, matching
+     * `CharacterHomeViewModel.failureEvents`' posture rather than `writeEvents`' one-deep
+     * conflation: two hits in a settle window are already merged by [promptConcentration] itself,
+     * so anything that reaches this flow is a genuinely separate prompt and losing the older one
+     * would lose a check the player owes. `tryEmit` never suspends, which matters because the
+     * emitter runs inside the write path.
+     */
+    private val _concentrationPrompts = MutableSharedFlow<ConcentrationPrompt>(
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    override val concentrationPrompts: Flow<ConcentrationPrompt> = _concentrationPrompts.asSharedFlow()
+
+    private val promptIds = AtomicLong(0)
+
+    /** Guards [pendingPromptDamage] and [pendingPromptJob] together — see [promptConcentration]. */
+    private val promptLock = Any()
+
+    /** Guarded by [promptLock]. The largest single op in the open settle window. */
+    private var pendingPromptDamage = 0
+
+    /** Guarded by [promptLock]. Non-null while a settle window is open. */
+    private var pendingPromptJob: Job? = null
+
+    /**
+     * FR-31 decisions 9 and 11: **this client just damaged a character who is concentrating.**
+     *
+     * ### Attached to the write, never to the state — FR-23 decision 20's twin
+     *
+     * `clearDeathSavesForHeal` sits ten lines below this one and carries the full argument; it is
+     * the same argument, and decision 9 makes the same call in the same capitals: *"Never reactive
+     * to observed damage (the observer-storm rule); the DM's own write prompts on the DM's
+     * screen."*
+     *
+     * The tempting implementation is a collector on `board.hp` that fires when the number falls.
+     * It is wrong for the measured reason that made the death-save clear a write-path concern:
+     * **N clients observing one sheet would each see the same drop.** A party of six with the DM
+     * dashboard open is six screens, five of which belong to people who pressed nothing, all six
+     * demanding a concentration check for one hit. Worse, a collector cannot tell damage from a
+     * *resync* — a reconnect that replays the sheet, or a snapshot giving way to the live mirror,
+     * moves `hp` without anything having hit anybody.
+     *
+     * Attaching it to the write means exactly one client can ever fire it: the one whose user
+     * tapped. **Another client's damage on a concentrating character prompts nothing here**, and
+     * that is the pin, not a limitation to be worked around later.
+     *
+     * ### The settle window, and how it reconciles decision 11's two sentences
+     *
+     * Decision 11: *"the prompt fires on the COALESCED damage amount (one op = one prompt)"* and
+     * *"Largest-single-op DC when multiple ops land in one settle window"*.
+     *
+     * The window opens on the first damaging intent and stays open for
+     * [CONCENTRATION_SETTLE_MILLIS] — it is **not** restarted by later ones, or a press-and-hold
+     * would postpone the prompt indefinitely. Each intent inside it raises the running maximum,
+     * and one prompt is emitted at the end carrying that maximum. So:
+     *
+     *  - **one op** (the direct-entry path, which decision 11 calls *exact*) → one prompt at that
+     *    op's own amount, which is the "one op = one prompt" clause exactly;
+     *  - **several ops** → one prompt at the largest, which is the second clause exactly.
+     *
+     * ### What this deliberately does NOT do, recorded
+     *
+     * It does not reach into [WriteQueue]'s coalescer to read the amount that actually went over
+     * the wire. It could — the queue merges rapid `damage` increments on one property — and two
+     * things argue against it: the queue would have to grow a concentration-shaped observation
+     * hook in the one component whose job is to know nothing about features, and decision 11 has
+     * already settled what to do when several ops land together (take the largest, not the sum),
+     * so the queue's answer is not the one being asked for. Decision 11 also states the residual
+     * honestly and this wave inherits it unchanged: *"per-hit granularity under stepper spam is
+     * unknowable client-side and the design accepts it"*. In practice the two readings agree for
+     * every burst below 21 points a tap at a time, because `max(10, d/2)` is 10 either way.
+     *
+     * ### The gate is read at the tap, and re-read at the emit
+     *
+     * `concentratingOn` is checked here so a character who is not concentrating never opens a
+     * window at all, and again in [emitConcentrationPrompt] because the player may have dropped
+     * concentration during it — in which case there is nothing left to check and no prompt is
+     * emitted. Neither read is a subscription; both are one look at this session's own board.
+     *
+     * @param damage what this op took off, already positive. Zero or less returns: a heal is not a
+     *   hit, and a `set` that raises the number is a heal.
+     */
+    private fun promptConcentration(damage: Int) {
+        if (damage <= 0) return
+        if (session.board.value.concentratingOn == null) return
+        synchronized(promptLock) {
+            pendingPromptDamage = maxOf(pendingPromptDamage, damage)
+            if (pendingPromptJob?.isActive == true) return
+            pendingPromptJob = scope.launch {
+                delay(CONCENTRATION_SETTLE_MILLIS)
+                emitConcentrationPrompt()
+            }
+        }
+    }
+
+    /** Closes the settle window and emits at most one prompt. See [promptConcentration]. */
+    private fun emitConcentrationPrompt() {
+        val damage = synchronized(promptLock) {
+            pendingPromptJob = null
+            pendingPromptDamage.also { pendingPromptDamage = 0 }
+        }
+        if (damage <= 0) return
+        val board = session.board.value
+        // Dropped, ended or lapsed while the window was open: there is no check to make, and a
+        // prompt naming a spell the character is no longer concentrating on would be worse than
+        // silence.
+        val source = board.concentratingOn ?: return
+        _concentrationPrompts.tryEmit(
+            ConcentrationPrompt(
+                id = promptIds.incrementAndGet(),
+                sourceName = source,
+                damage = damage,
+                // Decision 10's one action, resolved by the *board*'s own rule so the prompt's
+                // Drop and the tracker banner's ✕ can never disagree — see
+                // `TrackerBoard.concentrationToggle`. `null` leaves the prompt informational.
+                toggleId = board.concentrationToggle?.propertyId,
+            ),
+        )
     }
 
     override val inventory: StateFlow<InventoryBoard> get() = session.inventory
@@ -2028,3 +2226,35 @@ private const val USE_SETTLE_MILLIS: Long = 2_000
  */
 private const val DEATH_SAVE_SUCCESS_NAME = "Death save successes"
 private const val DEATH_SAVE_FAILURE_NAME = "Death save failures"
+
+/**
+ * FR-31 decision 11's **settle window**: how long a concentration prompt waits before it fires, so
+ * that a burst of damage taps produces one prompt rather than one per tap
+ * (docs/design/18-table-pack.md).
+ *
+ * ### Why there is a wait at all
+ *
+ * Decision 11 is *"one op = one prompt"*, and the tracker's damage stepper is a control a player
+ * holds down. Without a window, a press-and-hold to 12 damage would put twelve prompts on screen —
+ * each one correct about its own tap and none of them the check the table is about to roll. The
+ * window is what turns a gesture back into an event.
+ *
+ * ### 500 ms, and what it is measured against
+ *
+ * Not a network number — nothing here waits on the server, and the prompt is a statement about
+ * what the player just did rather than about what the sheet says. It is measured against the two
+ * gestures it has to survive:
+ *
+ *  - a **double tap** on the stepper, which lands well inside 300 ms;
+ *  - a **press-and-hold**, whose repeat is faster still.
+ *
+ * 500 ms clears both with margin. It is deliberately *shorter* than the write queue's own 1 s slow
+ * lane, because this is not waiting for a write to land: the two are independent, and a prompt
+ * that waited for the wire would arrive after the player had already moved on. Longer would start
+ * to read as lag on the single-op path — FR-22's direct entry, which decision 11 calls *exact* —
+ * where the window's only job is to be short.
+ *
+ * The window is **not** restarted by later taps inside it; see
+ * `DefaultOpenCharacter.promptConcentration` for why a restarting window never fires under a hold.
+ */
+private const val CONCENTRATION_SETTLE_MILLIS: Long = 500

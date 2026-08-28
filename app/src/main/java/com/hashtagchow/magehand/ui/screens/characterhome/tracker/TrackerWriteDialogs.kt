@@ -281,11 +281,15 @@ fun TrackerUiState.rowsRestoredBy(kind: RestKind): List<PipRowState> =
  * probe's bare test dummy had its slots and Rage restored and its hit points left alone,
  * because it has no hit dice to spend.
  *
- * But every word of that is about **the server**. A local character has none, and
- * `LocalOpenCharacter.rest` is `current = total` on the qualifying rows and nothing else — it
- * does not touch `currentHp` at all (09 decision 7). Shown unconditionally, the note promised
- * hit points back to the one flow that cannot deliver them, on the *primary* local surface, in
- * a dialog whose entire job is to say truthfully what the button is about to do.
+ * But every word of that is about **the server**, whose per-character variance is exactly what
+ * the hedge exists for. A local character has none, and its HP story is not hedged at all:
+ * **corrected 2026-08-28** (09 decision 7's dated note) — a local long rest heals `currentHp`
+ * to `maxHp` unconditionally, every time, in the same write as the row refill (a local short
+ * rest still leaves it untouched). That is *more* certain than the server's "varies by
+ * character", not less, so the hedge this note exists to voice has nothing to say locally: the
+ * rows listed above it plus a full heal is the whole, exact truth, and a note that only ever
+ * repeated "hit points too" would be noise on the *primary* local surface, in a dialog whose
+ * entire job is to say truthfully what the button is about to do.
  *
  * `hasConnection` and not `canWrite`: it is the same "is there a server behind this at all"
  * question 09 decision 8 answers for the connection dot, and it is already false for every
