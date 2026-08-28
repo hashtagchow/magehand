@@ -85,7 +85,10 @@ data class WriteQueueConfig(
  * (02 §Known server quirks). A write that failed because the socket died is **not**
  * replayed — we never saw its result, and replaying an `increment` whose outcome is
  * unknown is precisely the silent slot corruption WP2 refused to risk
- * (docs/verification/WP2.md deviation #3).
+ * (docs/verification/WP2.md deviation #3). FR-28 adds a second exemption from the other
+ * direction: an op declaring [WriteOp.isReplayable] `false` never retries **even on a
+ * rate limit**, because a second `doAction` spends the resources twice — see
+ * [callWithRateLimitRetry].
  *
  * Plain constructor by design; the sibling work package owns the Hilt wiring.
  */
@@ -437,6 +440,22 @@ class WriteQueue(
      *
      * Every other failure — including a socket death mid-method — is final. See the
      * class KDoc for why an unacknowledged `increment` must never be replayed.
+     *
+     * ### The one op that gets no retry either (FR-28)
+     *
+     * `!op.isReplayable` short-circuits the retry, and this line is the *whole* of decision 5's
+     * "a Use is never replayed". It is worth being precise about why one line is enough: this is
+     * the queue's only replay. A socket death already returns immediately above; a reconnect
+     * replays subscriptions, never in-flight methods (`ddp/handshake.json#reconnect`); and
+     * coalescing merges ops rather than re-sending them. So `too-many-requests` is the single
+     * path by which a call this app made once could reach the server twice, and a non-idempotent
+     * op declining it is complete rather than partial coverage.
+     *
+     * The refusal is returned as the failure it is, so a rate-limited use surfaces on
+     * [failures] and the player is told the tap did not land — which is the correct outcome. The
+     * alternative a retry offers is *maybe it landed twice*, and for a call that spends
+     * resources, logs to the party feed and posts to Discord (probe U4), "did not happen" beats
+     * "happened, possibly twice" every time.
      */
     private suspend fun callWithRateLimitRetry(op: WriteOp): Throwable? {
         repeat(2) { attempt ->
@@ -451,6 +470,10 @@ class WriteQueue(
                 return e
             }
 
+            if (!op.isReplayable) {
+                config.logger("write: ${op.description} failed and is never replayed")
+                return error
+            }
             if (!error.isRateLimit || attempt == 1) return error
             config.logger("write: rate limited, retrying ${op.description} once")
             delay(config.rateLimitBackoffMillis)

@@ -41,12 +41,19 @@ import com.hashtagchow.magehand.core.model.FeedEntry
  *
  * ### What it shows, and the sentence that says so
  *
- * A *DiceCloud activity* feed — rests, casts, checks and rolls made in DiceCloud's own UI.
- * **MageHand's own writes produce no entries** (probe L3: `damage` and `adjustQuantity` never log
- * server-side), so the empty state names DiceCloud rather than saying "no activity yet" full
- * stop. Decision 9 calls that the honest empty state and it is doing real work: a DM who has
- * been watching players tap this app for an hour and then opens a panel claiming nothing has
- * happened would reasonably conclude the panel is broken. See `dm_feed_empty_hint`.
+ * A *DiceCloud activity* feed — rests, casts, checks and rolls the **server** logged. The empty
+ * state names DiceCloud rather than saying "no activity yet" full stop, which decision 9 calls the
+ * honest empty state and which is doing real work: a DM who has been watching players tap this app
+ * for an hour and then opens a panel claiming nothing has happened would reasonably conclude the
+ * panel is broken. See `dm_feed_empty_hint`.
+ *
+ * **Corrected by FR-28** (docs/design/17-use-action.md decision 8). Decision 9's wording was
+ * *"MageHand's own writes produce no entries"* — true of everything this app could write in
+ * 1.9.x (probe L3: `damage` and `adjustQuantity` never log server-side) and **not** true of a
+ * Use. `doAction`/`doCastSpell` run the server's own machinery, so the server writes the log
+ * entry and this panel carries it with no code here at all. Nothing in this file changed for
+ * that; the empty state's second sentence did, because it had become a claim the app disproves
+ * the first time anybody presses Use.
  *
  * ### Default collapsed, and collapse is not persisted
  *

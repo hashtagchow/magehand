@@ -319,6 +319,11 @@ class ContractExportTest {
             "creatureProperties.softRemove",
             "creatureProperties.restore",
             "organize.organizeDoc",
+            // FR-28 (docs/design/17-use-action.md decision 7). Not in design 02's original table
+            // — this wave adds them — and catalogued here for the same reason everything else is:
+            // so that a method reaching the app without reaching the export fails HERE.
+            "creatureProperties.doAction",
+            "creatureProperties.doCastSpell",
             "creatures.insertCreature",
             "creatures.update",
         )
@@ -327,6 +332,88 @@ class ContractExportTest {
             emptySet<String>(),
             catalog - exported - uncalled - handshake,
         )
+
+        // …and the other direction, which this assertion did not cover and needed to.
+        //
+        // The set difference above answers "is every catalogued method accounted for", and a
+        // NEW method added to the app and exported as a vector satisfies it without ever being
+        // catalogued — the catalog is a hand-written list, and nothing was checking that the
+        // list had heard of what the export contains. FR-28 is exactly that case: two new
+        // methods, two new vectors, and the assertion above would have stayed green with the
+        // catalog untouched. A drift defence that only fires in the direction somebody
+        // remembered is the one that was already there.
+        assertEquals(
+            "a method is exported as a vector but is not in design 02's catalog above. Add it " +
+                "there (and to WritePostureTest's mutationMethods) rather than deleting this.",
+            emptySet<String>(),
+            exported + uncalled - catalog,
+        )
+    }
+
+    /**
+     * Every vector's `rateClass` label names a class that actually enforces its spacing.
+     *
+     * The companion to `the rate table's stated limits agree with the production spacings`, which
+     * checks each class internally (`spacing × calls == window`) and cannot see a **vector**
+     * filed under the wrong class. That was a latent bug (never shipped) until schema 6: `vectorDocument` derived
+     * the label from a two-way test — damage, else default — so FR-28's 500 ms ops were labelled
+     * `default`, a class the same document states as 1000 ms. Both halves regenerated together
+     * and agreed with the code, so the golden pin was perfectly happy.
+     *
+     * `ContractExport.rateClassNameFor` is the fix; this is what stops the next person
+     * reintroducing it as an `else` branch.
+     */
+    @Test
+    fun `every vector is filed under a class that enforces its own spacing`() {
+        val classes = documentAt("ddp/rate-limits.json")["classes"]!!.jsonArray
+            .map { it.jsonObject }
+            .associate { it.str("name") to it["minSpacingMillis"]!!.jsonPrimitive().longOrNull!! }
+
+        for (vector in documentAt("ddp/method-vectors.json")["vectors"]!!.jsonArray.map { it.jsonObject }) {
+            val name = vector.str("rateClass")
+            val spacing = vector["minSpacingMillis"]!!.jsonPrimitive().longOrNull!!
+            assertEquals(
+                "vector ${vector.str("name")} is filed under rate class `$name`, which does not " +
+                    "enforce its ${spacing}ms spacing",
+                classes[name],
+                spacing,
+            )
+        }
+    }
+
+    /**
+     * FR-28 decision 5, held down from both sides: the export SAYS a use is never replayed, and
+     * the production op it describes actually declines the retry.
+     *
+     * A `quirk` string is prose and a golden pin certifies prose exactly as happily as it
+     * certifies a bug. This is the semantic half — the export's claim tied to the flag the queue
+     * reads — so that deleting `isReplayable` fails this suite rather than leaving a contract
+     * document telling WebHand something MageHand stopped doing.
+     */
+    @Test
+    fun `the use vectors are the only ops that refuse the rate-limit retry`() {
+        val neverReplayed = ContractExport.VECTORS.filterNot { it.op.isReplayable }.map { it.op.method }.toSet()
+        assertEquals(
+            "exactly the two Use methods may decline the queue's single retry",
+            setOf(WriteOp.METHOD_DO_ACTION, WriteOp.METHOD_DO_CAST_SPELL),
+            neverReplayed,
+        )
+
+        val use = documentAt("ddp/method-vectors.json")["use"]!!.jsonObject
+        assertTrue(
+            "ddp/method-vectors.json#use must state that a use is never replayed",
+            use.str("neverReplay").orEmpty().contains("NEVER REPLAYED"),
+        )
+        // The four traps decision 9 names, by key. A quirk that quietly stopped being exported
+        // is a fact WebHand re-learns live, which is the whole thing this file exists to prevent.
+        for (key in listOf(
+            "trap.nullReturnRefusals",
+            "trap.preparedUnchecked",
+            "trap.honorSystemResources",
+            "trap.usesLeftLag",
+        )) {
+            assertNotNull("ddp/method-vectors.json#use is missing `$key`", use[key])
+        }
     }
 
     // =======================================================================

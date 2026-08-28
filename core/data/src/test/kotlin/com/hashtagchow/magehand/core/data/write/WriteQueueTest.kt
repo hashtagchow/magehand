@@ -290,6 +290,31 @@ class WriteQueueTest {
         assertEquals(2, h.caller.timesFor("creature.methods.rest").size)
     }
 
+    /**
+     * m1: `isBarrier`'s BEHAVIOURAL half, at the queue — not just the contract golden's claim
+     * that the flag is `true` (see `WriteOp.DoAction`'s KDoc for why: a Use rewrites an
+     * unknown part of the sheet, so letting the scan see past it would reorder a slot spend
+     * around a call that itself moves resources). Same shape as the rapid-taps test above —
+     * every submit lands before the worker's first turn — because that ordering is exactly
+     * when `takeCoalescedHead`'s scan runs across all three queued entries at once.
+     */
+    @Test
+    fun `a Use op between two coalescable damage ops breaks their merge`() = queueTest {
+        val h = harness()
+        h.queue.submit(WriteOp.spend(slot))
+        h.queue.submit(WriteOp.useAction("a1"))
+        h.queue.submit(WriteOp.spend(slot))
+        advanceUntilIdle()
+
+        assertEquals(
+            "the barrier must stop the two spends either side of it from merging",
+            3,
+            h.caller.calls.size,
+        )
+        val damage = h.caller.calls.filter { it.method == "creatureProperties.damage" }
+        assertEquals(listOf(1, 1), damage.map { it.int("value") })
+    }
+
     // -----------------------------------------------------------------------
     // Optimistic overlay + rollback (06 §Reconciliation)
     // -----------------------------------------------------------------------
@@ -579,6 +604,92 @@ class WriteQueueTest {
 
         assertEquals(2, h.caller.calls.size)
         assertTrue(runCatching { ticket.await() }.exceptionOrNull() is DdpError)
+        assertFalse(h.queue.canUndo.value)
+    }
+
+    /**
+     * FR-28 decision 5's trap, pinned at the queue seam: **a Use is never replayed.**
+     *
+     * The comparison is what makes it a pin rather than a coincidence. The two ops go through the
+     * identical failure — the same `too-many-requests`, the same config, the same harness — and
+     * come out with different call counts, so the only thing that can be producing the difference
+     * is `WriteOp.isReplayable`. Deleting that check from `callWithRateLimitRetry` makes the use
+     * retry and this fails with **two** calls where it wants one, which is the mutation the
+     * design asks to be caught.
+     *
+     * Why it matters more than the socket-death case above it: a replayed `increment` corrupts a
+     * number the player can see and fix. A replayed `doAction` spends the resources a second
+     * time, appends a second entry to the party's activity log, and posts a second time to any
+     * Discord webhook the sheet is wired to (probe U4) — two of which are outside the sheet
+     * entirely and cannot be fixed from this app at all.
+     */
+    @Test
+    fun `a rate-limited use is never retried, where a rate-limited spend is`() = queueTest {
+        val h = harness(config = WriteQueueConfig(rateLimitBackoffMillis = 5_000))
+        h.caller.failWith = { DdpError("too-many-requests", "slow down") }
+
+        val used = h.queue.submit(WriteOp.useAction("action-rage", targetName = "Rage"))
+        advanceUntilIdle()
+
+        assertEquals(
+            "a use must reach the wire exactly once; a retry double-spends",
+            listOf(WriteOp.METHOD_DO_ACTION),
+            h.caller.methods(),
+        )
+        assertTrue("the refusal still reaches the caller", runCatching { used.await() }.exceptionOrNull() is DdpError)
+        assertTrue("and still surfaces as a failure", h.failures.single().isRateLimit)
+
+        // The control: same failure, an ordinary op, two calls. Without this the assertion above
+        // would pass just as happily against a queue that had stopped retrying anything at all.
+        h.caller.reset()
+        h.queue.submit(WriteOp.spend(slot))
+        advanceUntilIdle()
+        assertEquals("an ordinary write still gets its one retry", 2, h.caller.calls.size)
+    }
+
+    /**
+     * The other half of decision 5: a cast is not replayed either, and neither is coalesced.
+     *
+     * Coalescing is the second way one tap could become two spends — or two taps one — and both
+     * ops decline it by carrying no `coalesceKey`. Two uses of the *same* property submitted back
+     * to back therefore produce two calls rather than one merged call, which is correct: there is
+     * no arithmetic in which using a feature twice is using it once with a bigger number.
+     */
+    @Test
+    fun `two uses of one property are two calls, never merged`() = queueTest {
+        val h = harness()
+        h.caller.latencyMillis = 10
+
+        h.queue.submit(WriteOp.useAction("action-rage"))
+        h.queue.submit(WriteOp.useAction("action-rage"))
+        advanceUntilIdle()
+
+        assertEquals(2, h.caller.calls.size)
+        assertEquals(
+            "the action rate class spaces at 500 ms, not the 1 s default",
+            WriteOp.ACTION_SPACING_MILLIS,
+            h.caller.calls[1].atMillis - h.caller.calls[0].atMillis,
+        )
+    }
+
+    /**
+     * FR-28 decision 8: a use files a history row and puts **nothing** on the undo stack.
+     *
+     * Both halves asserted, because only the pair says what decision 8 says. A write with no
+     * history row would be a use the player has no record of; a write with an undo entry would be
+     * an UNDO button for a call that has no inverse (probe U4) and side effects outside the sheet.
+     */
+    @Test
+    fun `a use is recorded in history and is not undoable`() = queueTest {
+        val h = harness()
+
+        h.queue.submit(WriteOp.castSpell("spell-fireball", slotId = "slot-2", targetName = "Fireball"))
+        advanceUntilIdle()
+
+        val entry = h.queue.history.value.single()
+        assertEquals(TrackerWriteKind.CAST_SPELL, entry.kind)
+        assertEquals("Fireball", entry.targetName)
+        assertFalse("a use offers no UNDO — there is no inverse to offer", entry.undoable)
         assertFalse(h.queue.canUndo.value)
     }
 

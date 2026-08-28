@@ -588,6 +588,246 @@ class ActionEngineTest {
         assertTrue(row.insufficientResources)
     }
 
+    // -----------------------------------------------------------------------
+    // FR-28 — COST AND USES (docs/design/17-use-action.md decision 1)
+    // -----------------------------------------------------------------------
+
+    /**
+     * The cost lines are joined against the **live properties**, not against the entry's own
+     * `available` rollup.
+     *
+     * The fixture makes the difference visible on purpose: the entry claims `available: 9` and
+     * the attribute the sheet actually carries reads `2`. Probe U5 says the rollup is the one on
+     * the 4–10 s debounce, so the engine takes the property's own `value` and the assertion is
+     * `2`. An implementation that read the convenient field sitting inside the entry would return
+     * 9 and this test names why that is wrong.
+     */
+    @Test
+    fun `an attribute cost is joined to the sheet's own value, not the entry's available`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("attr", "attribute") {
+                    put("name", "Rage")
+                    put("variableName", "rage")
+                    put("value", 2)
+                },
+                prop("a", "action") {
+                    put("name", "Rage"); put("actionType", "bonus")
+                    put(
+                        "resources",
+                        buildJsonObject {
+                            put(
+                                "attributesConsumed",
+                                buildJsonArray {
+                                    add(
+                                        buildJsonObject {
+                                            put("variableName", "rage")
+                                            put("statName", "rage")
+                                            calc("quantity", "1", 1)
+                                            // The stale rollup. Deliberately wrong.
+                                            put("available", 9)
+                                        },
+                                    )
+                                },
+                            )
+                        },
+                    )
+                },
+            ),
+        )
+
+        val line = board.actions.single().cost.attributes.single()
+        assertEquals("the attribute's display name, never its variableName", "Rage", line.name)
+        assertEquals(1, line.amount)
+        assertEquals("the sheet's own value, not the entry's `available`", 2, line.available)
+        assertTrue(line.satisfied)
+    }
+
+    /** An item cost joins by `itemId` against the item's own `quantity`, the same way. */
+    @Test
+    fun `an item cost is joined to the item's own quantity`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("arrows", "item") { put("name", "Arrows"); put("quantity", 2) },
+                prop("a", "action") {
+                    put("name", "Volley"); put("actionType", "action")
+                    put(
+                        "resources",
+                        buildJsonObject {
+                            put(
+                                "itemsConsumed",
+                                buildJsonArray {
+                                    add(
+                                        buildJsonObject {
+                                            put("itemId", "arrows")
+                                            calc("quantity", "3", 3)
+                                        },
+                                    )
+                                },
+                            )
+                        },
+                    )
+                },
+            ),
+        )
+
+        val line = board.actions.single().cost.items.single()
+        assertEquals("Arrows", line.name)
+        assertEquals(3, line.amount)
+        assertEquals(2, line.available)
+        assertFalse("two arrows do not cover a cost of three", line.satisfied)
+        assertFalse(board.actions.single().isUsable)
+    }
+
+    /**
+     * A consumed item the sheet has not been told the identity of.
+     *
+     * The entry exists with a `tag` and no `itemId` until the player picks one, which is a real
+     * shape and not a malformed document. There is no property to join to, so `available` is
+     * `null` and the line is *satisfied* — see `CostLine.satisfied` for why unresolvable is not
+     * refused. The name falls back to the tag rather than the line being dropped, because a tag
+     * is at least something a player can recognise.
+     */
+    @Test
+    fun `an unbound item cost names its tag and does not block the use`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") {
+                    put("name", "Component"); put("actionType", "action")
+                    put(
+                        "resources",
+                        buildJsonObject {
+                            put(
+                                "itemsConsumed",
+                                buildJsonArray {
+                                    add(buildJsonObject { put("tag", "arrow"); calc("quantity", "1", 1) })
+                                },
+                            )
+                        },
+                    )
+                },
+            ),
+        )
+
+        val line = board.actions.single().cost.items.single()
+        assertEquals("arrow", line.name)
+        assertNull(line.available)
+        assertTrue(line.satisfied)
+        assertTrue(board.actions.single().isUsable)
+    }
+
+    /** No `resources` block at all is [ActionCost.FREE] — the detail sheet's "Free". */
+    @Test
+    fun `an action with no resources block costs nothing`() {
+        val board = ActionEngine.build(
+            sheetOf(prop("a", "action") { put("name", "Dash"); put("actionType", "action") }),
+        )
+        assertTrue(board.actions.single().cost.isFree)
+    }
+
+    /**
+     * THE USES TRAP, at the parse boundary: `usesUsed` is read and `usesLeft` is not.
+     *
+     * The fixture states them in contradiction — `usesLeft: 3` beside `uses: 3, usesUsed: 3` —
+     * because that contradiction is what a real sheet publishes for the 4–10 s after a use.
+     * `ActionEntry.usesLeft` keeps the rollup, because 16 decision 4 puts it on the list row and
+     * a number that is right within ten seconds is fine for a row being scrolled past.
+     * `ActionEntry.uses` carries the pair, and it is the pair the gate reads.
+     */
+    @Test
+    fun `uses are derived from usesUsed while usesLeft keeps the server's rollup`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") {
+                    put("name", "Second Wind"); put("actionType", "bonus")
+                    calc("uses", "3", 3)
+                    put("usesUsed", 3)
+                    // The lagging rollup, still claiming three are left.
+                    put("usesLeft", 3)
+                },
+            ),
+        )
+
+        val row = board.actions.single()
+        assertEquals("the row still shows what the server published", 3, row.usesLeft)
+        assertEquals(0, row.uses?.remaining)
+        assertFalse("the gate reads the pair, not the rollup", row.isUsable)
+        assertNull(row.useTarget)
+    }
+
+    /** A limited row nobody has used yet carries no `usesUsed`, which reads as zero. */
+    @Test
+    fun `an absent usesUsed reads as none used`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") {
+                    put("name", "Fresh"); put("actionType", "action"); calc("uses", "2", 2)
+                },
+            ),
+        )
+        assertEquals(2, board.actions.single().uses?.remaining)
+        assertEquals(2, board.actions.single().uses?.max)
+    }
+
+    /** No `uses` field at all means unlimited, not a zero-use row that can never be pressed. */
+    @Test
+    fun `an action with no uses field is unlimited`() {
+        val board = ActionEngine.build(
+            sheetOf(prop("a", "action") { put("name", "Attack"); put("actionType", "attack") }),
+        )
+        assertNull(board.actions.single().uses)
+        assertTrue(board.actions.single().isUsable)
+    }
+
+    /** Spells carry cost and uses on the same terms — the two row types must not drift. */
+    @Test
+    fun `a spell carries cost and uses too`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("attr", "attribute") { put("name", "Ki"); put("variableName", "ki"); put("value", 4) },
+                prop("s", "spell") {
+                    put("name", "Guidance"); put("level", 0); put("prepared", true)
+                    calc("uses", "2", 2); put("usesUsed", 1)
+                    put(
+                        "resources",
+                        buildJsonObject {
+                            put(
+                                "attributesConsumed",
+                                buildJsonArray {
+                                    add(buildJsonObject { put("variableName", "ki"); calc("quantity", "2", 2) })
+                                },
+                            )
+                        },
+                    )
+                },
+            ),
+        )
+
+        val spell = board.spells.single()
+        assertEquals(1, spell.uses?.remaining)
+        assertEquals("Ki", spell.cost.attributes.single().name)
+        assertEquals(4, spell.cost.attributes.single().available)
+        assertTrue(spell.isUsable)
+    }
+
+    /**
+     * Decision 2 at the engine boundary: a spell the sheet has switched off yields no use target,
+     * whatever its cost and charges say.
+     *
+     * Pinned here as well as in `UseTargetTest` because this is the path a real sheet takes, and
+     * the two could only agree by accident if the engine ever started computing usability itself.
+     */
+    @Test
+    fun `an unprepared spell built from a sheet offers no use`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("s", "spell") { put("name", "Bless"); put("level", 1); put("prepared", false) },
+                prop("t", "spell") { put("name", "Shield"); put("level", 1); put("prepared", true); put("inactive", true) },
+            ),
+        )
+        assertTrue("neither row offers a use", board.spells.all { it.useTarget == null })
+    }
+
     /** Scalars and wrapper objects both read; a blank field is absent, not an empty string. */
     @Test
     fun `plain strings and text wrappers both resolve and blank reads as absent`() {

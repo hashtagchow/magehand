@@ -31,6 +31,7 @@ import com.hashtagchow.magehand.core.data.db.ThemePrefEntity
 import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
 import com.hashtagchow.magehand.core.data.db.toEntity
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
+import com.hashtagchow.magehand.core.data.tracker.ActionEngine
 import com.hashtagchow.magehand.core.data.tracker.InventoryEngine
 import com.hashtagchow.magehand.core.data.write.WriteFailure
 import com.hashtagchow.magehand.core.data.write.WriteOp
@@ -445,6 +446,98 @@ interface OpenCharacter {
      * write to and decision 18 has already established that such sheets are ordinary.
      */
     fun setDeathSaves(successes: Int, failures: Int)
+
+    /**
+     * Which rows have a Use on the wire right now — decision 5's single-flight, as state the
+     * button can read (FR-28, docs/design/17-use-action.md decision 5).
+     *
+     * A read `val`, so `WritePostureTest`'s getter filter drops it and the catalog is untouched
+     * by it — the same property `actions` relies on, for the same reason.
+     *
+     * ### The guard is here, not in the composable
+     *
+     * Decision 5: *"the Use button disables on tap until the call completes AND the client-derived
+     * state reflects the spend"*. A `remember { mutableStateOf(false) }` in the sheet would
+     * disable the button and would not be a guard: a second tap landing in the same frame as the
+     * first, a rotation, a sheet re-composed from a new board — each gets a fresh `false`, and
+     * probe U3's burst is exactly the gesture that produces them. The latch behind this flow is
+     * in `:core:data`, below every UI lifetime, and it drops the second call rather than
+     * disabling a button that has already been pressed.
+     *
+     * The set is keyed by **property id**, not held globally: two different features being used
+     * in quick succession is an ordinary thing to do at a table, and a global latch would make
+     * the second one a dropped tap.
+     */
+    val usesInFlight: StateFlow<Set<String>>
+
+    /**
+     * Use an action — `creatureProperties.doAction` (FR-28,
+     * docs/design/17-use-action.md decisions 3, 5 and 6).
+     *
+     * ### A new intent, authorized in writing
+     *
+     * 16 decision 7 was *"zero new writes … If the wave believes otherwise it stops."* 17 decision
+     * 7 supersedes it for this feature and says so: *"new OpenCharacter intents `useAction` and
+     * `castSpell` — WritePostureTest's name AND signature catalogs deliberately extended"*. The
+     * allow-list edit repeats the reasoning, because that is the file a reader will be looking at
+     * when they wonder why the catalog grew — the shape [setDeathSaves] established.
+     *
+     * It is composable from nothing that was already here. Every other intent on this interface
+     * writes **a number to a property this app can name**; a use asks the server to run an effect
+     * tree whose contents this app deliberately does not know. There is no `spend` that could
+     * express it, because working out what to spend is the thing being delegated.
+     *
+     * ### Three gates, and what each one is for
+     *
+     * 1. **The id must name a live, usable action.** Implementations resolve it against the
+     *    `actions` board and drop the call otherwise. Decision 6 asks for id validation because a
+     *    bogus id is an opaque 500 (probe U3); the *usability* half of the same lookup is
+     *    decision 2's prepared/inactive gate, enforced a second time below the UI so that a stale
+     *    frame cannot get a switched-off row through. `UseTarget` is the first gate; this is the
+     *    second, the way `removeItem` has two.
+     * 2. **Single-flight.** A row already in [usesInFlight] drops the call. Probe U3's rapid
+     *    double-tap put three uses of a one-use ability on the wire, and the server's honour-system
+     *    checking accepted all three.
+     * 3. **The queue's LIVE check**, as for every other intent.
+     *
+     * ### It is not undoable and it is confirmed instead
+     *
+     * Decision 4 requires a confirm dialog before **every** use, and this call assumes the user has
+     * seen it — [rest]'s contract exactly, for the same reason and one step stronger: a rest has no
+     * inverse, and a use has no inverse *and* two side effects outside the sheet (the party log,
+     * and a Discord post where the sheet is wired to one — probe U4). The history entry says what
+     * happened and points at the activity feed; it offers no UNDO because there is none to offer.
+     *
+     * @return `true` when the wire call was actually dispatched; `false` when either gate above
+     *   dropped it. [M3/M4, architect ruling] a caller uses this to tell a genuinely dropped tap
+     *   from a dispatched one — the two need different UI: a snackbar for the drop (nothing is
+     *   pending), and the settle-window watch only for the dispatch (nothing is pending to watch
+     *   for otherwise).
+     */
+    fun useAction(actionId: String): Boolean
+
+    /**
+     * Cast a spell — `creatureProperties.doCastSpell` (FR-28, 17 decisions 3, 5 and 6).
+     *
+     * [useAction]'s twin: the same three gates, the same no-undo, the same confirm-first
+     * contract. Two differences.
+     *
+     * **The slot is the caller's choice.** [slotId] is a spell-slot property id the player picked
+     * out of `spellSlotOptions` — slots of a high enough level with charges left, derived from the
+     * live tracker rows. `null` means "no slot": a cantrip, or a ritual cast. Implementations do
+     * **not** second-guess it against the board; a slot that emptied between the picker rendering
+     * and the tap is the one case `doCastSpell` refuses cleanly and verbatim, which is a better
+     * answer than a silently dropped tap.
+     *
+     * **Refusals arrive as errors.** Unlike `doAction`, `doCastSpell` raises an atomic
+     * `Meteor.Error` before writing anything (probe U2), so a refusal reaches [writeFailures] with
+     * the server's own `reason` on it. Nothing here has to interpret it.
+     *
+     * @param ritual the honest checkbox of decision 3 — `true` casts without consuming a slot.
+     *   Passed to the server as its own flag; this app does not decide what a ritual costs.
+     * @return see [useAction]'s.
+     */
+    fun castSpell(spellId: String, slotId: String?, ritual: Boolean): Boolean
 
     /** Flip a condition toggle (a chip tapped). */
     fun toggle(condition: ConditionToggle)
@@ -1679,6 +1772,129 @@ internal class DefaultOpenCharacter(
             session.inventory.map { it.wallet.row(coin) }.first { !it.isAbsent }
         }
 
+    // --- FR-28: Use (docs/design/17-use-action.md) --------------------------------
+
+    private val _usesInFlight = MutableStateFlow<Set<String>>(emptySet())
+
+    override val usesInFlight: StateFlow<Set<String>> = _usesInFlight.asStateFlow()
+
+    /**
+     * Decision 5's single-flight latch — the actual guard, and the one probe U3 measured the
+     * need for.
+     *
+     * Guarded by [quantityLock]'s sibling rather than by [_usesInFlight]'s own atomicity,
+     * because "is it already there, and if not put it there" has to be **one** step: a
+     * `StateFlow` read followed by a write is two, and two taps a frame apart both read `false`.
+     * That is precisely the burst the probe produced, so the check-and-set is synchronized and
+     * the flow is a *publication* of the latch rather than the latch itself.
+     */
+    private val useLock = Any()
+
+    /** `true` when this call claimed the row; `false` when a use was already outstanding. */
+    private fun claimUse(propertyId: String): Boolean = synchronized(useLock) {
+        if (propertyId in _usesInFlight.value) return@synchronized false
+        _usesInFlight.value = _usesInFlight.value + propertyId
+        true
+    }
+
+    private fun releaseUse(propertyId: String) = synchronized(useLock) {
+        _usesInFlight.value = _usesInFlight.value - propertyId
+    }
+
+    /**
+     * Holds the latch until the call has resolved **and** the sheet has moved (decision 5:
+     * *"until the call completes AND the client-derived state reflects the spend"*).
+     *
+     * The settle half is a bounded wait on the `actions` board changing at all — not on a
+     * particular field, because a use may spend an attribute, an item, a charge, or several,
+     * and enumerating which would be the client-side model of the effect tree this whole feature
+     * exists to avoid. Any change to the board is evidence the fast-path write landed; the
+     * timeout is what stops a use with no visible effect (a free action that logs and nothing
+     * else — probe U4 says those exist) from wedging the button forever.
+     *
+     * The latch is released in a `finally` under [NonCancellable]: a screen popped mid-use must
+     * not leave a row permanently unusable for the *other* holder of this shared session, which
+     * on a DM's tablet is a real second screen and not a hypothetical.
+     *
+     * ### It reads the flow, where the gate builds the board
+     *
+     * The asymmetry is deliberate and both halves are right. A gate is a **question asked at an
+     * instant** and cannot depend on somebody else collecting — see [usableActionName]. A settle
+     * is a **wait for a change**, which is what a flow is for; and collecting `session.actions`
+     * for the settle window is exactly what its `WhileSubscribed` posture is built to serve.
+     * Polling `currentSheet` on a timer to avoid one subscription would be the worse shape.
+     */
+    private suspend fun settleUse(propertyId: String, call: Deferred<Unit>) {
+        try {
+            runCatching { call.await() }
+            val before = ActionEngine.build(session.currentSheet)
+            withTimeoutOrNull(USE_SETTLE_MILLIS) {
+                session.actions.first { it != before }
+            }
+        } finally {
+            withContext(NonCancellable) { releaseUse(propertyId) }
+        }
+    }
+
+    /**
+     * Gate 1 of decision 6's *"validate ids against the live board before calling"*, plus
+     * decision 2's prepared/inactive gate enforced below the UI.
+     *
+     * Returns the row's name for the history entry, or `null` when the id names nothing usable.
+     * Dropping rather than sending is the whole point: a bogus id is an opaque 500 the player
+     * cannot act on (probe U3), and an unprepared spell is a slot the server would burn.
+     *
+     * ### It builds the board rather than reading [CreatureSession.actions], and it must
+     *
+     * `session.actions` is `stateIn(WhileSubscribed)` — deliberately, because nothing derives it
+     * unless an Actions surface is on screen (see its KDoc). Its `.value` is therefore
+     * `ActionBoard.EMPTY` whenever nobody is collecting, and a gate reading it would drop **every
+     * use** in exactly that state. In production the Actions pane usually *is* collecting when
+     * the button is pressed, which is what makes this the worst kind of bug: it works on the
+     * happy path and fails on a shared session whose other holder — a DM card — is the only
+     * subscriber. `DefaultOpenCharacterWriteTest` found it by having no subscriber at all.
+     *
+     * So the gate builds from [CreatureSession.currentSheet], which is `Eagerly` shared and
+     * exists for precisely this class of read: *the writes that have to read the sheet before
+     * they can be built*. It runs the engine once per **tap**, not once per mirror frame, which
+     * is the cost the flow's laziness was protecting against and is not this.
+     */
+    private fun usableActionName(actionId: String): String? =
+        ActionEngine.build(session.currentSheet).actions
+            .firstOrNull { it.propertyId == actionId }
+            ?.takeIf { it.isUsable }
+            ?.name
+
+    private fun usableSpellName(spellId: String): String? =
+        ActionEngine.build(session.currentSheet).spells
+            .firstOrNull { it.propertyId == spellId }
+            ?.takeIf { it.isUsable }
+            ?.name
+
+    override fun useAction(actionId: String): Boolean {
+        val name = usableActionName(actionId) ?: return false
+        if (!claimUse(actionId)) return false
+        val call = session.writeQueue.submit(WriteOp.useAction(actionId, targetName = name))
+        scope.launch { settleUse(actionId, call) }
+        return true
+    }
+
+    /**
+     * The spell half.
+     *
+     * [slotId] is passed through unexamined — see [OpenCharacter.castSpell] for why a slot that
+     * emptied under the picker is better refused verbatim by the server than dropped here.
+     */
+    override fun castSpell(spellId: String, slotId: String?, ritual: Boolean): Boolean {
+        val name = usableSpellName(spellId) ?: return false
+        if (!claimUse(spellId)) return false
+        val call = session.writeQueue.submit(
+            WriteOp.castSpell(spellId = spellId, slotId = slotId, ritual = ritual, targetName = name),
+        )
+        scope.launch { settleUse(spellId, call) }
+        return true
+    }
+
     override fun toggle(condition: ConditionToggle) {
         session.writeQueue.submit(WriteOp.flip(condition))
     }
@@ -1781,6 +1997,24 @@ private val FAILURE_IDS = java.util.concurrent.atomic.AtomicLong(0)
  * denomination for the rest of the session.
  */
 private const val COIN_INSERT_SETTLE_MILLIS: Long = 2_000
+
+/**
+ * How long the single-flight latch waits, **after** a Use has been acknowledged, for the sheet to
+ * show the spend (FR-28, docs/design/17-use-action.md decision 5).
+ *
+ * Two seconds, chosen the same way [COIN_INSERT_SETTLE_MILLIS] was and not by the same
+ * measurement. Probe U3 timed the fast-path fields at 0.1–0.35 s from acknowledgement, so this is
+ * roughly six times the observed worst case — long enough that it never fires on a working
+ * connection, short enough that the one case where the wait *cannot* succeed releases the button
+ * inside a turn at the table.
+ *
+ * That case is real and is why this is a timeout rather than a wait: a use whose effect tree
+ * changes nothing this app renders — probe U4 found free actions that only log — will never move
+ * the `actions` board, so there is no state change to observe and the latch would otherwise hold
+ * for the life of the session. Erring toward releasing early is right here: the latch's job is to
+ * stop a double-tap burst, which happens inside a second, not to enforce a cooldown.
+ */
+private const val USE_SETTLE_MILLIS: Long = 2_000
 
 /**
  * What a death-save write calls itself in the history sheet and the undo snackbar.

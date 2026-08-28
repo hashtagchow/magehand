@@ -30,6 +30,9 @@ import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
 import com.hashtagchow.magehand.core.data.characters.CharacterListState
 import com.hashtagchow.magehand.core.data.connection.AccountConnection
 import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
+import com.hashtagchow.magehand.core.data.feed.ActivityFeedRepository
+import com.hashtagchow.magehand.core.model.FeedLine
+import com.hashtagchow.magehand.core.model.FeedEntry
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
@@ -44,6 +47,9 @@ import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.settings.UiScale
 import com.hashtagchow.magehand.core.model.Account
 import com.hashtagchow.magehand.core.model.CharacterSummary
+import com.hashtagchow.magehand.core.model.ActionBoard
+import com.hashtagchow.magehand.core.model.ActionEntry
+import com.hashtagchow.magehand.core.model.ActionType
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -52,6 +58,7 @@ import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryContainer
 import com.hashtagchow.magehand.core.model.InventoryItem
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.RollModifier
 import com.hashtagchow.magehand.core.model.TrackedResource
@@ -64,6 +71,7 @@ import com.hashtagchow.magehand.core.model.TrackerWriteKind
 import com.hashtagchow.magehand.core.model.Wallet
 import com.hashtagchow.magehand.core.model.WalletRow
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConnectionTone
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.detailFor
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.CustomizeSection
 import com.hashtagchow.magehand.ui.webview.SheetSessionFactory
 
@@ -120,11 +128,15 @@ class CharacterHomeViewModelTest {
             paneLayoutStore = paneLayouts,
             openCharacterFactory = factory,
             connectionManager = connectionManager,
+            activityFeedRepository = activityFeed,
         )
         return vm to factory
     }
 
     private val connectionManager = RecordingConnectionManager()
+
+    /** FR-28 decision 6's best-effort error look. See [FakeActivityFeedRepository]. */
+    private val activityFeed = FakeActivityFeedRepository()
 
     /** FR-7's per-character selection. In memory; the persistence itself is `:core:data`'s. */
     private val selectedRolls = FakeSelectedRollStore()
@@ -1252,6 +1264,237 @@ class CharacterHomeViewModelTest {
             assertFalse(vm.uiState.value.inventory.canWrite)
         }
 
+    // =======================================================================
+    // FR-28 — Use (docs/design/17-use-action.md decisions 2, 3 and 6)
+    // =======================================================================
+
+    private fun usableAction(id: String = "a1", name: String = "Rage") =
+        ActionEntry(propertyId = id, name = name, type = ActionType.BONUS)
+
+    private fun usableSpell(id: String = "s1", name: String = "Fireball", level: Int = 3) =
+        SpellEntry(propertyId = id, name = name, level = level, prepared = true)
+
+    /**
+     * The one gesture, routed by target type.
+     *
+     * `vm.use` takes a `UseTarget` and dispatches on its shape, which is the only place in `:app`
+     * that decides between the two DDP methods — and it decides from the type rather than from a
+     * flag, so there is no combination of arguments that could send a cast down the action path.
+     */
+    @Test
+    fun `using an action and casting a spell reach the two different intents`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        vm.use(usableAction().useTarget!!)
+        vm.use(usableSpell().useTarget!!, slotId = "slot-4", ritual = false)
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf("use a1", "cast s1 slot=slot-4 ritual=false"),
+            character.writes,
+        )
+    }
+
+    /** A ritual cast passes no slot — 17 decision 3's honest checkbox, end to end. */
+    @Test
+    fun `a ritual cast passes no slot through`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        vm.use(usableSpell().useTarget!!, slotId = null, ritual = true)
+        advanceUntilIdle()
+
+        assertEquals(listOf("cast s1 slot=none ritual=true"), character.writes)
+    }
+
+    /**
+     * The Actions state carries the three FR-28 inputs, live.
+     *
+     * Asserted together because they arrive through one `combine` and the failure mode of getting
+     * that wrong is a state that renders but whose Use button is permanently disabled, or whose
+     * slot picker is permanently empty — neither of which any other test would notice.
+     */
+    @Test
+    fun `the actions state carries the live slots, the in-flight set and canWrite`() =
+        runTest(dispatcher) {
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+
+            character.actions.value = ActionBoard(
+                spells = listOf(usableSpell()),
+                actions = listOf(usableAction()),
+            )
+            character.board.value = TrackerBoard(
+                slots = listOf(
+                    TrackedResource("l3", TrackerKind.SPELL_SLOT, "3rd", 2, 4, spellSlotLevel = 3),
+                ),
+            )
+            character.canWrite.value = true
+            character.usesInFlight.value = setOf("a1")
+            advanceUntilIdle()
+
+            val state = vm.uiState.value.actions
+            assertEquals(listOf("l3"), state.spellSlots.map { it.propertyId })
+            assertEquals(setOf("a1"), state.usesInFlight)
+            assertTrue(state.canWrite)
+
+            // …and they arrive where the sheet reads them.
+            assertFalse("the in-flight row's button is disabled", state.detailFor("a1")!!.use!!.enabled)
+            assertEquals("l3", state.detailFor("s1")!!.use!!.defaultSlotId)
+        }
+
+    /**
+     * Decision 6's best-effort look: an "Error" entry logged for **this creature** after the tap
+     * becomes a failure snackbar carrying the server's own words.
+     *
+     * `doAction` returns null for every outcome (probe U1), so this log entry is the only signal
+     * a refusal ever produces. The feed is asked for exactly one creature, which is asserted —
+     * the DM panel's party-wide merge would attribute another player's error to this tap.
+     */
+    @Test
+    fun `an Error logged after a use surfaces as a failure`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        val failures = mutableListOf<TrackerEvent.Failed>()
+        // A foreground collector, as every other failure test here uses: `advanceUntilIdle`
+        // drains foreground work, and a `backgroundScope` collector is not resumed by it — the
+        // emit lands in the SharedFlow's buffer and the assertion reads an empty list.
+        val collector = launch { vm.failureEvents.collect { failures += it } }
+        advanceUntilIdle()
+
+        vm.use(usableAction().useTarget!!)
+        // Pushed BEFORE the clock is advanced: `advanceUntilIdle` runs virtual time to
+        // quiescence, which includes expiring the watcher's 3 s window. In wall-clock terms the
+        // log lands a fraction of a second after the tap; in virtual time "inside the window"
+        // means "before anything has been allowed to run".
+        activityFeed.entries.value = listOf(
+            FeedEntry(
+                logId = "log-1",
+                creatureId = creatureId,
+                creatureName = "Scratch",
+                lines = listOf(FeedLine(name = "Error", value = "Not enough rage")),
+                // After the tap: `use` stamps `System.currentTimeMillis()`, and the test's own
+                // virtual clock is unrelated to it, so a far-future date is what "after" means
+                // here. The rule being pinned is that the timestamp is COMPARED at all.
+                dateMillis = Long.MAX_VALUE,
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(setOf(setOf(creatureId)), activityFeed.requested.toSet())
+        val failure = failures.single()
+        assertEquals("Not enough rage", failure.failure.reason)
+        assertEquals(TrackerWriteKind.USE_ACTION, failure.failure.kind)
+        assertNull("nothing rolled back, so no row shakes", failure.failure.propertyId)
+        collector.cancel()
+    }
+
+    /**
+     * An "Error" already sitting in the feed from before the tap is **not** reported as this
+     * tap's.
+     *
+     * Without the timestamp comparison every use would surface the last error the creature ever
+     * logged — and the 20-entry window keeps them for a long time, so it would fire constantly
+     * and mean nothing.
+     */
+    @Test
+    fun `an Error older than the tap is ignored`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        val failures = mutableListOf<TrackerEvent.Failed>()
+        val collector = launch { vm.failureEvents.collect { failures += it } }
+        activityFeed.entries.value = listOf(
+            FeedEntry(
+                logId = "old",
+                creatureId = creatureId,
+                creatureName = "Scratch",
+                lines = listOf(FeedLine(name = "Error", value = "ancient history")),
+                dateMillis = 1L,
+            ),
+        )
+        advanceUntilIdle()
+
+        vm.use(usableAction().useTarget!!)
+        advanceUntilIdle()
+
+        assertTrue("an old error is not this tap's", failures.isEmpty())
+        collector.cancel()
+    }
+
+    /**
+     * A **cast** starts no watcher: `doCastSpell` reports its own refusals atomically and
+     * verbatim through `writeFailures` (probe U2), so a second best-effort channel would either
+     * double-report or attribute a stray log to a call that already told us the truth.
+     */
+    @Test
+    fun `a cast starts no log watcher`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        vm.use(usableSpell().useTarget!!, slotId = "slot-4", ritual = false)
+        advanceUntilIdle()
+
+        assertTrue(
+            "doCastSpell throws — it needs no feed watcher",
+            activityFeed.requested.isEmpty(),
+        )
+    }
+
+    /** With no character open, a Use is a no-op rather than a crash. */
+    @Test
+    fun `a use with no character open does nothing`() = runTest(dispatcher) {
+        val (vm, _) = viewModel(character = null)
+        collecting(vm)
+        advanceUntilIdle()
+
+        vm.use(usableAction().useTarget!!)
+        advanceUntilIdle()
+
+        assertTrue(vm.uiState.value.actions.sections.isEmpty())
+    }
+
+    /**
+     * M3/M4 [architect ruling]: `:core:data`'s gate or single-flight latch can drop a Confirm
+     * tap before it reaches the wire. That used to be a silent `Unit` return; it must now
+     * surface through the existing failure lane (M3) — never a fresh one — AND must start no
+     * settle-window watch (M4), because there is no call in flight for it to watch for.
+     */
+    @Test
+    fun `a dropped use surfaces a failure and starts no watch window`() = runTest(dispatcher) {
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        character.useDispatches = false
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        val failures = mutableListOf<TrackerEvent.Failed>()
+        val collector = launch { vm.failureEvents.collect { failures += it } }
+        advanceUntilIdle()
+
+        vm.use(usableAction().useTarget!!)
+        advanceUntilIdle()
+
+        assertTrue("a dropped use must send nothing", character.writes.isEmpty())
+        assertTrue("a dropped use starts no watch window (M4)", activityFeed.requested.isEmpty())
+        val failure = failures.single().failure
+        assertTrue("M3's snackbar reads the dropped flag, not a reason", failure.dropped)
+        assertNull(failure.reason)
+        assertNull("nothing rolled back, so no row shakes", failure.propertyId)
+        assertEquals(TrackerWriteKind.USE_ACTION, failure.kind)
+        // A3: this id shares no namespace with `:core:data`'s own failure-id counter (which
+        // starts at 0 and is the one a real write failure counts from) — disjoint by range.
+        assertTrue("USE_ERROR_IDS must not collide with the write-failure id space", failure.id >= 1_000_000_000L)
+        collector.cancel()
+    }
+
     private fun historyEntry(id: Long, undoable: Boolean = true, undone: Boolean = false) =
         TrackerWrite(
             id = id,
@@ -1277,6 +1520,24 @@ private fun CharacterHomeViewModel.callOnCleared() {
  * Counts [restart] calls, which is the whole of what the connection sheet's retry button
  * is allowed to do — see `CharacterHomeViewModel.reconnect`.
  */
+/**
+ * FR-28 decision 6's feed, drivable.
+ *
+ * Cold and driven by a `MutableStateFlow`, so a test can push an "Error" entry *after* the tap
+ * that is supposed to be watching for one — which is the whole shape of the thing being tested.
+ * [requested] records which creature set was asked for, so the "one creature, not the party"
+ * claim is asserted rather than assumed.
+ */
+private class FakeActivityFeedRepository : ActivityFeedRepository {
+    val entries = MutableStateFlow<List<FeedEntry>>(emptyList())
+    val requested = mutableListOf<Set<String>>()
+
+    override fun feed(creatureIds: Set<String>): Flow<List<FeedEntry>> {
+        requested += creatureIds
+        return entries
+    }
+}
+
 private class RecordingConnectionManager : DdpConnectionManager {
     var restarts = 0
         private set

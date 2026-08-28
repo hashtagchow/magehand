@@ -6,19 +6,30 @@ package com.hashtagchow.magehand.core.model
  * Same posture as [TrackerBoard] and [InventoryBoard]: no JSON, no Room, no DiceCloud
  * vocabulary. The discovery rules that produce these live in `:core:data`'s `ActionEngine`.
  *
- * ### This surface is read-only, and the types are what make that true
+ * ### The surface WAS read-only; FR-28 gives it exactly one gesture
  *
- * 16 decision 7: *"no new OpenCharacter intents, no WritePostureTest edits, no DDP methods.
- * Read-only surface end to end."* Nothing here carries a write target, an amount to spend or a
- * property path — the rows are things to *look at* at the table. Casting and prepared-toggling
- * are recorded out of scope for v1 with their write paths already probed, so the temptation
- * this file has to resist is a `prepared` setter, and it resists it by having nowhere to put one.
+ * 16 decision 7 was *"no new OpenCharacter intents, no WritePostureTest edits, no DDP methods.
+ * Read-only surface end to end."* docs/design/17-use-action.md supersedes that for one gesture
+ * and one only: **Use**. Nothing here gained a write target, an amount to spend or a property
+ * path — the rows are still things to *look at*, and the single thing a player can now press is
+ * expressed as [UseTarget], a type that **cannot be constructed for a row the app has decided is
+ * not usable**. Prepared-toggling remains out of scope with its write path probed, so the
+ * temptation this file still has to resist is a `prepared` setter, and it still resists it by
+ * having nowhere to put one.
  *
- * ### Server rollups only
+ * ### Server rollups only — with one FR-28 exception, argued
  *
  * 16 decision 4 inherits 10 decision 3's grand-total lesson: every number on these rows is one
  * the server already computed. Nothing here re-derives a bonus, sums a dice pool or evaluates a
  * calculation — see [SpellEntry]'s missing hit bonus for the sharpest case of that rule.
+ *
+ * 17 decision 1 carves out the **usability** verdict, and it carves it out in the *opposite*
+ * direction to everything above: `usesLeft` and `insufficientResources` are rollups the server
+ * publishes and this app must NOT gate on, because probe U5 measured them lagging 4–10 s behind
+ * a debounced recompute. The rule generalises rather than reverses — *use the field the server
+ * writes synchronously, never the one it writes eventually* — and here the synchronous fields
+ * are `usesUsed`, an attribute's `value` and an item's `quantity`. [ActionCost] and [ActionUses]
+ * carry that reading; [UseTarget] carries its consequence.
  */
 
 /**
@@ -115,6 +126,241 @@ data class DamageLine(
 )
 
 /**
+ * One line of what a Use will spend — *"Rage: 1"*, *"Arrows: 2"* (17 decision 1's **Cost**).
+ *
+ * ### Why [available] is the sheet's own number and not the server's verdict
+ *
+ * DiceCloud publishes an `available` rollup beside each consumed resource, and a row carrying
+ * `insufficientResources: true` looks like exactly the answer this type wants. Probe U5 says it is
+ * not: both are recomputed on a **debounced** pass that trails the write by 4–10 s, so between
+ * tapping Use and that pass landing the sheet says a resource is exhausted that the player can
+ * see is not — or, worse, says one is available that a use half a second ago emptied.
+ *
+ * So [available] is read off the property the cost *names*: an attribute's own `value`, an item's
+ * own `quantity`. Those are written synchronously by `doAction`, arrive on the fast path in
+ * ~0.1–0.35 s, and are the same numbers the tracker and the inventory tab are already rendering
+ * — which means the Use button and the pip row beside it can never disagree about whether there
+ * is a charge left. `ActionEngine.costFor` is where the join happens.
+ *
+ * @property name what to call it on screen: the attribute's or item's own `name`, as the sheet
+ *   spells it. Never the `variableName` — `deathSaveFails` is not a thing to show a player.
+ * @property amount how many this use costs. The server's computed `quantity.value`.
+ * @property available what the sheet currently holds, or `null` when the cost names something
+ *   this sheet does not carry — see [satisfied] for why that is not a refusal.
+ */
+data class CostLine(
+    val name: String,
+    val amount: Int,
+    val available: Int? = null,
+) {
+    /**
+     * Whether this line, alone, permits a use.
+     *
+     * **An unresolvable cost is satisfied**, and that is a deliberate asymmetry. A cost naming a
+     * variable or an item id the sheet does not carry is one this app cannot evaluate — not one it
+     * has evaluated as zero. Treating it as a refusal would make a row permanently unusable in
+     * this app while the official UI casts it happily, which is the *silent* half of a
+     * silent-wrong-answer: the player gets no error, just a button that is never available and
+     * never says why. Erring the other way costs at most one refused server call, which
+     * `doCastSpell` reports verbatim and `doAction` swallows — see 17 decision 6.
+     */
+    val satisfied: Boolean get() = available == null || available >= amount
+}
+
+/**
+ * Everything one Use will spend (17 decision 1's **Cost**: *"each `resources.attributesConsumed`
+ * (name + amount) and `itemsConsumed` (name + count); 'Free' when none"*).
+ *
+ * Two lists rather than one, because the two halves are joined against **different** things — an
+ * attribute by `variableName`, an item by `itemId` — and a single list would have to carry a
+ * discriminator so that `ActionEngine` could tell them apart again. They render identically; that
+ * is the UI's business, not this type's.
+ */
+data class ActionCost(
+    /** `resources.attributesConsumed` — rage charges, ki points, a class resource. */
+    val attributes: List<CostLine> = emptyList(),
+    /** `resources.itemsConsumed` — arrows, a material component with a price. */
+    val items: List<CostLine> = emptyList(),
+) {
+    /** Nothing is spent. The detail sheet says "Free"; the confirm dialog drops its cost lines. */
+    val isFree: Boolean get() = attributes.isEmpty() && items.isEmpty()
+
+    /** Every line has enough behind it. See [CostLine.satisfied] for the unresolvable case. */
+    val satisfied: Boolean get() = attributes.all { it.satisfied } && items.all { it.satisfied }
+
+    /** Both halves, in the order the sheet lists them. For the dialog and the detail sheet. */
+    val lines: List<CostLine> get() = attributes + items
+
+    companion object {
+        val FREE = ActionCost()
+    }
+}
+
+/**
+ * A limited row's uses (17 decision 1's **Uses**: *"`uses.value − usesUsed`, shown as 'N of M uses
+ * left'"*).
+ *
+ * ### THE TRAP: this is NOT `usesLeft`
+ *
+ * The server publishes `usesLeft`, it means precisely `remaining`, and reading it is wrong.
+ * `usesLeft` is a **rollup** on the debounced recompute (probe U5, 4–10 s); `usesUsed` is a
+ * counter `doAction` increments in the same write. So the two disagree for most of a round after
+ * every use, and the direction of the disagreement is the dangerous one: `usesLeft` still reads
+ * `1` on a feature the player has just spent, so a Use gated on it stays enabled and a second tap
+ * spends a charge that is not there. Probe U3's burst produced three "Spent" log lines from a
+ * one-use ability for exactly this reason.
+ *
+ * [ActionEntry.usesLeft] still exists and still renders on the *list row*, because 16 decision 4
+ * put it there and a number that is right within ten seconds is fine for a row being scrolled
+ * past. It must not reach a decision, and the split between these two types is what states that:
+ * the rollup is a display field on the entry, and the gate is here.
+ *
+ * @property max `uses.value` — the computed maximum.
+ * @property used `usesUsed` — the synchronous counter.
+ */
+data class ActionUses(
+    val max: Int,
+    val used: Int,
+) {
+    /** Never negative: a sheet whose `usesUsed` overran its `uses` is exhausted, not owed. */
+    val remaining: Int get() = (max - used).coerceAtLeast(0)
+
+    val isExhausted: Boolean get() = remaining <= 0
+}
+
+/**
+ * A spell slot the upcast picker may offer (17 decision 3).
+ *
+ * @property propertyId the slot property's `_id` — what `doCastSpell` sends as `slotId`.
+ * @property level the slot's own level, which is what a player is choosing between.
+ * @property remaining how many of this level are left. Always `> 0` — see [spellSlotOptions].
+ * @property total the row's maximum, so the picker can say "2 of 3 left" rather than a bare count.
+ */
+data class SpellSlotOption(
+    val propertyId: String,
+    val level: Int,
+    val remaining: Int,
+    val total: Int,
+)
+
+/**
+ * The slots a spell of [spellLevel] may be cast with — 17 decision 3, whole and client-derived.
+ *
+ * > *"a slot picker lists slots with `spellSlotLevel ≥ spell.level` and remaining > 0
+ * > (client-derived), passing the chosen `slotId`"*
+ *
+ * ### Two exclusions, and the second one is the trap
+ *
+ * **Too small** is the obvious one: a level-3 spell cannot be cast from a level-1 slot, and
+ * offering one produces a server refusal for a choice the app could see was impossible.
+ *
+ * **Depleted** is the one that needs saying, because the tempting source for "how many are left"
+ * is the same class of rollup [ActionUses] refuses. It is not: [TrackedResource.value] is the
+ * tracker's own remaining count, built from the property's `total` and `damage` — the pair every
+ * pip in this app is already drawn from — so the picker and the slot row cannot disagree, and a
+ * slot the player just spent disappears from the picker on the same frame the pip empties.
+ *
+ * A slot with **no level** ([TrackedResource.spellSlotLevel] is `null`, which `TrackerEngine`
+ * leaves when neither the field nor the name's leading ordinal resolves) is **dropped**, not
+ * offered last. The engine's own ordering sorts such a row last because a list has to put it
+ * somewhere; a picker has no such obligation, and `spellSlotLevel ≥ spell.level` is not a question
+ * that can be answered about a slot whose level is unknown. Offering it would be guessing on the
+ * player's behalf about which slot they are spending.
+ *
+ * Ordered by level ascending, so the **cheapest legal slot leads** — the one a player wanting no
+ * upcast reaches for. That is the picker's default answer, and it is first because it is right
+ * more often than any other, not because it is smallest.
+ */
+fun spellSlotOptions(slots: List<TrackedResource>, spellLevel: Int): List<SpellSlotOption> =
+    slots
+        .mapNotNull { slot ->
+            val level = slot.spellSlotLevel ?: return@mapNotNull null
+            if (level < spellLevel) return@mapNotNull null
+            if (slot.value <= 0) return@mapNotNull null
+            SpellSlotOption(
+                propertyId = slot.propertyId,
+                level = level,
+                remaining = slot.value,
+                total = slot.total,
+            )
+        }
+        .sortedWith(compareBy({ it.level }, { it.propertyId }))
+
+/**
+ * What a Use will call, for a row the app has decided **is** usable (17 decisions 2, 3 and 6).
+ *
+ * ### This type is the prepared/active gate, structurally
+ *
+ * 17 decision 2: *"Use is ABSENT — not disabled — on: spells with `!prepared && !alwaysPrepared`,
+ * and any row with `inactive: true`."* Probe U2 is why it has to be the app's gate at all — the
+ * server casts an unprepared spell, casts a switched-off one, and **burns the slot doing it**.
+ * There is no server-side refusal to lean on.
+ *
+ * A gate that is a rule someone has to remember is a gate that is eventually forgotten, so this is
+ * a *shape* instead: [SpellEntry.useTarget] and [ActionEntry.useTarget] return `null` for a row
+ * that fails the gate, and every Use path in the app — the detail sheet's button, the confirm
+ * dialog, the view model's intent — is reached only through a non-null value of this type. There
+ * is no seam that takes a bare property id, so there is no seam an unprepared spell can be pushed
+ * through. That is [SpellEntry]'s own missing-hit-bonus argument applied to a write instead of to
+ * a number: *a value with nowhere to be put*.
+ *
+ * ### Why it still carries the id
+ *
+ * `doAction`/`doCastSpell` take a property id and nothing else can identify a row, so the id is
+ * on the type. The guarantee is not that the id is unforgeable — it is that a caller cannot obtain
+ * one **from this file** for a row that failed the gate, and `:core:data` re-resolves it against
+ * the live board before writing anyway (17 decision 6's *"validate ids against the live board
+ * before calling"*; a bogus id is an opaque 500, probe U3). Two gates, the same way
+ * `OpenCharacter.removeItem` has two.
+ */
+sealed interface UseTarget {
+
+    /** The property this use names. */
+    val propertyId: String
+
+    /** The row's name, for the confirm dialog and the journal entry. */
+    val name: String
+
+    /** What it will spend, for the dialog's cost lines. */
+    val cost: ActionCost
+
+    /** Uses before the tap, or `null` for an unlimited row. The dialog prints "left after". */
+    val uses: ActionUses?
+
+    /** `creatureProperties.doAction` — an action, a bonus action, an attack, a reaction. */
+    data class Action(
+        override val propertyId: String,
+        override val name: String,
+        override val cost: ActionCost,
+        override val uses: ActionUses?,
+    ) : UseTarget
+
+    /**
+     * `creatureProperties.doCastSpell` — a spell.
+     *
+     * @property level `0` for a cantrip, which is what makes [needsSlot] answerable here rather
+     *   than at three call sites.
+     * @property ritual whether the sheet marks this spell as a ritual — the checkbox 17 decision 3
+     *   asks to be *"honest about not consuming a slot"*. Offered only when this is true.
+     */
+    data class Spell(
+        override val propertyId: String,
+        override val name: String,
+        override val cost: ActionCost,
+        override val uses: ActionUses?,
+        val level: Int,
+        val ritual: Boolean,
+    ) : UseTarget {
+        /**
+         * Cantrips skip the picker (17 decision 3). Not because a cantrip has no slot it *could*
+         * take — it is that spending one on a cantrip is never what a player meant, and a picker
+         * whose only honest option is "none" is a dialog that exists to be dismissed.
+         */
+        val needsSlot: Boolean get() = level > 0
+    }
+}
+
+/**
  * A spell, as the Actions surface draws it (16 decisions 3, 4 and 5).
  *
  * ### THE TRAP: there is no hit bonus on this type, and that is the point
@@ -177,6 +423,10 @@ data class SpellEntry(
     val summary: String? = null,
     /** On-hit damage rollups — see [DamageLine] and `ActionEngine`'s descendant walk. */
     val damage: List<DamageLine> = emptyList(),
+    /** 17 decision 1's **Cost**. [ActionCost.FREE] when the spell consumes nothing. */
+    val cost: ActionCost = ActionCost.FREE,
+    /** 17 decision 1's **Uses**, or `null` when the spell is not use-limited. */
+    val uses: ActionUses? = null,
     val sortOrder: Int = 0,
 ) {
     /**
@@ -207,6 +457,46 @@ data class SpellEntry(
      * the honest rendering of "the sheet has switched this off for a reason it did not name".
      */
     val showsUnpreparedBadge: Boolean get() = !prepared && !alwaysPrepared
+
+    /**
+     * 17 decision 1's **Usability**, for a spell — client-derived, every clause.
+     *
+     * > *"usable iff (uses remain OR uses absent) AND every consumed attribute's live `value` ≥
+     * > amount AND every consumed item's `quantity` ≥ count AND the row is prepared/active per
+     * > decision 2"*
+     *
+     * The clause that is **not** here is the point: nothing on this line reads a server verdict.
+     * A spell the sheet has not yet recomputed is usable if the app's own arithmetic says the
+     * charges are there, and a spell whose stale rollup says "insufficient" is *still* usable if
+     * they are. See [ActionUses] for the measurement behind that, and [ActionEntry.isUsable],
+     * where the same rule has an extra rollup to ignore.
+     */
+    val isUsable: Boolean
+        get() = !inactive &&
+            !showsUnpreparedBadge &&
+            (uses?.isExhausted != true) &&
+            cost.satisfied
+
+    /**
+     * The Use call for this spell, or `null` when there is not one — see [UseTarget].
+     *
+     * `null` is what decision 2's *"ABSENT — not disabled"* means in code. A caller holding a
+     * `SpellEntry` cannot get a use out of an unprepared or switched-off one, whatever it does
+     * with the fields.
+     */
+    val useTarget: UseTarget.Spell?
+        get() = if (!isUsable) {
+            null
+        } else {
+            UseTarget.Spell(
+                propertyId = propertyId,
+                name = name,
+                cost = cost,
+                uses = uses,
+                level = level,
+                ritual = ritual,
+            )
+        }
 }
 
 /**
@@ -234,6 +524,10 @@ data class ActionEntry(
     val attackRoll: Int? = null,
     /**
      * `usesLeft` — how many are left, when the row is limited. `null` for an unlimited action.
+     *
+     * **A rollup, and a display field only.** It lags the write by 4–10 s (probe U5), so it may
+     * not reach a decision — [uses] is what the Use gate reads. See [ActionUses] for the whole
+     * argument and for the double-spend it prevents.
      */
     val usesLeft: Int? = null,
     /** `uses.value` — the maximum, when the row is limited. */
@@ -244,6 +538,13 @@ data class ActionEntry(
      * Decision 4: the row renders **dimmed with the flag stated**. Stated, not merely dimmed:
      * a greyed row with no words is indistinguishable from the [inactive] case above it, and
      * the two have different fixes (spend/rest versus switch something on).
+     *
+     * **It does not gate the Use button.** 17 decision 1: this is a rollup on the same 4–10 s
+     * debounce as [usesLeft], so it says "insufficient" through the whole window after a rest
+     * restores the resource, and says nothing for the whole window after a use empties it. It is
+     * a slow confirmation of the app's own arithmetic, which is [isUsable]. The two disagreeing
+     * on screen — a dimmed row with a live Use button, or an undimmed one without — is the
+     * *correct* rendering during that window, not a bug to reconcile.
      */
     val insufficientResources: Boolean = false,
     /** `inactive: true` — dimmed, no badge invented. Same rule as [SpellEntry.inactive]. */
@@ -251,10 +552,39 @@ data class ActionEntry(
     val description: String? = null,
     val summary: String? = null,
     val damage: List<DamageLine> = emptyList(),
+    /** 17 decision 1's **Cost**. [ActionCost.FREE] when the action consumes nothing. */
+    val cost: ActionCost = ActionCost.FREE,
+    /** 17 decision 1's **Uses**, or `null` when the action is not use-limited. */
+    val uses: ActionUses? = null,
     val sortOrder: Int = 0,
 ) {
     /** Which header this row sits under; an unknown [type] falls to Other. See [ActionGroup]. */
     val group: ActionGroup get() = type?.group ?: ActionGroup.OTHER
+
+    /**
+     * 17 decision 1's **Usability**, for an action.
+     *
+     * [SpellEntry.isUsable] minus the prepared clause — an action has no preparation — and with
+     * one more field deliberately unread: [insufficientResources]. That field is the server
+     * saying the exact thing this property computes, and it is *still* not consulted, because it
+     * says it late. The two rules a reader should take from this line and its twin:
+     *
+     * - a stale `insufficientResources: true` does **not** block a use the app can see is funded;
+     * - a stale `insufficientResources: false` does **not** permit one the app can see is not.
+     *
+     * Both directions matter and only the second looks dangerous, which is why the first is the
+     * one that gets deleted by somebody tidying up. `ActionEngineTest` pins both.
+     */
+    val isUsable: Boolean
+        get() = !inactive && (uses?.isExhausted != true) && cost.satisfied
+
+    /** The Use call for this action, or `null` when there is not one — see [UseTarget]. */
+    val useTarget: UseTarget.Action?
+        get() = if (!isUsable) {
+            null
+        } else {
+            UseTarget.Action(propertyId = propertyId, name = name, cost = cost, uses = uses)
+        }
 }
 
 /**
@@ -326,13 +656,27 @@ data class ActionBoard(
  *
  * ### What this is a feed OF, stated because the name would otherwise mislead
  *
- * Decision 9: this is a *DiceCloud activity* feed — rests, casts, checks and dice rolls made in
- * DiceCloud's own UI. **MageHand's own writes produce no entries.** Probe L3: `damage` and
+ * Decision 9: this is a *DiceCloud activity* feed — rests, casts, checks and dice rolls the
+ * **server** logged, whichever client asked for them. 16 decision 9 stated the sharper version,
+ * *"MageHand's own writes produce no entries"*, and probe L3 is why: `damage` and
  * `adjustQuantity` never log server-side, so a player who spends a slot in this app and then
- * opens this panel sees nothing new, and that is the server's behaviour rather than a bug in
- * the panel. The empty state says what the panel shows for exactly this reason — a feed that
- * silently omits the actions you just took reads as broken unless it tells you whose actions it
- * carries.
+ * opens this panel sees nothing new. That is the server's behaviour rather than a bug in the
+ * panel, and it is why the empty state names DiceCloud — a feed that silently omits the actions
+ * you just took reads as broken unless it says whose actions it carries.
+ *
+ * ### FR-28 corrects half of that, and corrects it in the right direction
+ *
+ * 17 decision 8: *"the FR-25 feed now shows MageHand's own uses (the server logs
+ * doAction/doCastSpell — design 16 decision 9's deferral resolves itself the right way)"*. A Use
+ * goes through the server's own machinery, so the server writes the log entry itself and this
+ * panel carries it with **no code in this app at all** — which is exactly the outcome decision 9
+ * deferred `creatureLogs.methods.insert` in the hope of: no double-journalling, no write lane
+ * spent per tap, and one entry per action rather than one per client that saw it.
+ *
+ * So the rule is no longer "MageHand's writes never appear"; it is *"what the server logged
+ * appears"*, and the app's tracker edits are simply not among the things it logs. The empty
+ * state's copy was corrected in the same wave — see `dm_feed_empty_hint`, which had become a
+ * claim the app disproves the first time anybody presses Use.
  *
  * Self-inserting our own writes via `creatureLogs.methods.insert` is **deferred and recorded**
  * (decision 9): it would double-journal for anyone using both clients, and spend the 5-per-5s

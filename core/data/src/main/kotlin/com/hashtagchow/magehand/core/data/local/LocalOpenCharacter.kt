@@ -450,6 +450,37 @@ class LocalOpenCharacter(
     override val actions: StateFlow<ActionBoard> = MutableStateFlow(ActionBoard.EMPTY)
 
     /**
+     * FR-28 decision 10: *"Local characters: unchanged (no action model)."*
+     *
+     * The empty set is not a placeholder waiting to be filled in — it is the only value this flow
+     * can ever hold, and it is *entailed* by [actions] above rather than asserted beside it. A
+     * local character's board is [ActionBoard.EMPTY], so no row exists to name a use, so no use
+     * can be in flight. The two flows cannot drift apart because one of them is constant.
+     */
+    override val usesInFlight: StateFlow<Set<String>> = MutableStateFlow(emptySet())
+
+    /**
+     * No-ops, per decision 10, and no-ops for a stronger reason than "the feature is server-only".
+     *
+     * [useAction] and [castSpell] ask DiceCloud to run an effect tree. A local character has no
+     * effect trees — it is a Room row with a name, some numbers and a list of items (09) — so
+     * there is nothing here that could be run, correctly or otherwise. This is not the local path
+     * *declining* a capability it could have implemented (contrast [setEquipped], which genuinely
+     * knows more than the server path and offers more): it is a call that has no meaning against
+     * this storage.
+     *
+     * Silent rather than throwing, matching [toggle] and [moveItem] below: the surface that would
+     * call this does not exist on a local character (there is no Actions tab — see [actions]), so
+     * a reachable exception here would be dead code with a crash in it.
+     */
+    // `true`: this is a silent SUCCESS, not a drop — see the KDoc above. Returning `false`
+    // would tell a caller the call was refused, which would route it into the M3/M4 failure
+    // lane for a surface that (per the KDoc) can never reach this call in the first place.
+    override fun useAction(actionId: String) = true
+
+    override fun castSpell(spellId: String, slotId: String?, ritual: Boolean) = true
+
+    /**
      * Local equip: a **plain flag** (10 decision 10).
      *
      * The server path's `creatureProperties.equip` reparents the property and its undo cannot

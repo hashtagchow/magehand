@@ -136,6 +136,40 @@ class FakeOpenCharacter(
         writes += "deathsaves $successes/$failures"
     }
 
+    /**
+     * FR-28 decision 5's latch, as a *driveable* flow rather than a simulated one.
+     *
+     * The fake deliberately does **not** implement single-flight: the real guard is
+     * `DefaultOpenCharacter`'s, `DefaultOpenCharacterWriteTest` pins it there, and a second
+     * implementation here would let a `:app` test pass against a latch the app does not ship.
+     * What this exposes instead is the *input* — a test sets it to make the button look busy and
+     * asserts what the UI does with that, which is the only half `:app` owns.
+     */
+    override val usesInFlight = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * M3/M4's other input: a test flips this to simulate `DefaultOpenCharacter`'s gate-1 or
+     * latch dropping the call — the fake sends nothing and reports it, same as the real
+     * implementation, so `CharacterHomeViewModelTest` can pin what `:app` does with a drop
+     * without duplicating the gate itself (this file's own reasoning, just above).
+     */
+    var useDispatches = true
+
+    override fun useAction(actionId: String): Boolean {
+        if (!useDispatches) return false
+        writes += "use $actionId"
+        return true
+    }
+
+    override fun castSpell(spellId: String, slotId: String?, ritual: Boolean): Boolean {
+        if (!useDispatches) return false
+        // The slot is spelled out rather than `toString()`d for `moveItem`'s reason: "no slot"
+        // and "a slot whose id happens to be null-ish" have to read differently, and a ritual
+        // cast is required to send no slot at all (17 decision 3).
+        writes += "cast $spellId slot=${slotId ?: "none"} ritual=$ritual"
+        return true
+    }
+
     override fun toggle(condition: ConditionToggle) {
         writes += "toggle ${condition.propertyId}"
     }

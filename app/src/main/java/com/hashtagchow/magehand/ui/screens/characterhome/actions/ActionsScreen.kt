@@ -39,6 +39,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -51,17 +52,20 @@ import com.hashtagchow.magehand.core.model.ActionGroup
 import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.SpellListHeader
+import com.hashtagchow.magehand.core.model.UseTarget
 
 /**
  * FR-26's Actions surface — a spell and action list for one DiceCloud character
  * (docs/design/16-actions-and-feed.md decisions 1–7).
  *
- * ### Read-only, end to end
+ * ### One callback reaches the character, and the signature says so
  *
- * Decision 7. This composable takes **no** callbacks that reach a character: collapse and the
- * filter are local view state, and there is nothing else to press. Compare `InventoryScreen`,
- * whose signature carries an actions bundle for its steppers. If a future wave adds casting, the
- * signature changing is the review's cue that the posture changed.
+ * 16 decision 7 was *"no callbacks that reach a character"*, with the note that *"if a future wave
+ * adds casting, the signature changing is the review's cue that the posture changed"*. FR-28 is
+ * that wave and this is that cue: [onUse] is the one callback, and it takes a
+ * [com.hashtagchow.magehand.core.model.UseTarget] rather than a property id — a value that cannot
+ * be constructed for a row 17 decision 2 forbids. Collapse, the filter and which row is open
+ * remain local view state.
  *
  * ### Collapse is `rememberSaveable`, not a store
  *
@@ -81,10 +85,15 @@ import com.hashtagchow.magehand.core.model.SpellListHeader
 @Composable
 fun ActionsScreen(
     state: ActionsUiState,
+    onUse: (UseTarget, String?, Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var collapsedKeys by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var query by rememberSaveable { mutableStateOf("") }
+
+    // The OPEN ROW's id, not the row — see `ActionDetailState`. Saveable, so a rotation with the
+    // sheet up re-derives it from the new board rather than dropping the player back to the list.
+    var openRowId by rememberSaveable { mutableStateOf<String?>(null) }
 
     // Re-sectioned here rather than in the ViewModel because both inputs are this composable's
     // own state. The ViewModel supplies the board-derived half (`state`); this applies the two
@@ -136,13 +145,25 @@ fun ActionsScreen(
             }
             if (!section.collapsed) {
                 items(section.rows.size, key = { section.rows[it].key }) { index ->
-                    when (val row = section.rows[index]) {
-                        is ActionRow.Spell -> SpellRow(row.entry)
-                        is ActionRow.Action -> ActionEntryRow(row.entry)
+                    val row = section.rows[index]
+                    val open = { openRowId = row.key }
+                    when (row) {
+                        is ActionRow.Spell -> SpellRow(row.entry, onClick = open)
+                        is ActionRow.Action -> ActionEntryRow(row.entry, onClick = open)
                     }
                 }
             }
         }
+    }
+
+    // Re-derived per frame from the live sections, so cost, uses and usability move with the
+    // sheet — and so a row that leaves the list closes its own detail. See `ActionDetailState`.
+    shown.detailFor(openRowId)?.let { detail ->
+        ActionDetailSheet(
+            state = detail,
+            onUse = onUse,
+            onDismiss = { openRowId = null },
+        )
     }
 }
 
@@ -205,11 +226,12 @@ private fun SpellListHeaders(lists: List<SpellListHeader>, modifier: Modifier = 
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SpellRow(entry: SpellEntry, modifier: Modifier = Modifier) {
+private fun SpellRow(entry: SpellEntry, onClick: () -> Unit, modifier: Modifier = Modifier) {
     RowShell(
         name = entry.name,
         dimmed = entry.inactive,
         testTag = "actions:spell:${entry.propertyId}",
+        onClick = onClick,
         modifier = modifier,
     ) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -230,7 +252,7 @@ private fun SpellRow(entry: SpellEntry, modifier: Modifier = Modifier) {
 /** An action or attack row (decision 4). Unlike a spell, its `attackRoll` is real. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ActionEntryRow(entry: ActionEntry, modifier: Modifier = Modifier) {
+private fun ActionEntryRow(entry: ActionEntry, onClick: () -> Unit, modifier: Modifier = Modifier) {
     RowShell(
         name = entry.name,
         // Two independent reasons to dim, both stated in words below rather than left as a
@@ -238,6 +260,7 @@ private fun ActionEntryRow(entry: ActionEntry, modifier: Modifier = Modifier) {
         dimmed = entry.inactive || entry.insufficientResources,
         testTag = "actions:action:${entry.propertyId}",
         trailing = entry.attackRoll?.let { stringResource(R.string.actions_attack_bonus, it) },
+        onClick = onClick,
         modifier = modifier,
     ) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -286,6 +309,7 @@ private fun RowShell(
     name: String,
     dimmed: Boolean,
     testTag: String,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier,
     trailing: String? = null,
     body: @Composable ColumnScope.() -> Unit,
@@ -298,6 +322,16 @@ private fun RowShell(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            // 16 decision 4's "tap → detail sheet", finally wired by FR-28. The whole row is the
+            // target and its minimum height is a touch target: a name plus two badges is one
+            // thing to press, not four. A5 nit: `Role.Button` + `onClickLabel` so TalkBack
+            // announces this as a button that opens details, not a bare "double-tap to activate".
+            .clickable(
+                onClickLabel = stringResource(R.string.actions_row_click_label),
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .heightIn(min = 48.dp)
             .semantics(mergeDescendants = true) { }
             .testTag(testTag),
         verticalArrangement = Arrangement.spacedBy(2.dp),

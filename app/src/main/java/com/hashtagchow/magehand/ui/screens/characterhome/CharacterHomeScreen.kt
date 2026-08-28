@@ -158,6 +158,10 @@ fun CharacterHomeScreen(
     // decouple them; `writeEvents`' one-deep drop-oldest buffer is the other half, and it only
     // works because nothing merges the two streams back together on the way here (see its KDoc).
     val undoLabel = stringResource(R.string.action_undo)
+    // M3 [architect ruling]: `describe()` is deliberately plain Kotlin (JVM-testable, no
+    // Android context), so the dropped-use copy — the one case here that IS a string
+    // resource — is read here and substituted in, rather than taught to that function.
+    val useDroppedMessage = stringResource(R.string.action_use_dropped)
     LaunchedEffect(viewModel) {
         viewModel.writeEvents.collect { event ->
             if (!event.write.undoable) {
@@ -186,7 +190,7 @@ fun CharacterHomeScreen(
             // them four seconds of not being told a write was lost.
             snackbarHostState.currentSnackbarData?.dismiss()
             snackbarHostState.showSnackbar(
-                message = event.failure.describe(),
+                message = if (event.failure.dropped) useDroppedMessage else event.failure.describe(),
                 duration = SnackbarDuration.Short,
             )
         }
@@ -405,10 +409,16 @@ fun CharacterHomeScreen(
                         ),
                     )
                 }
-                // FR-26. No actions bundle: the surface is read-only (16 decision 7), so unlike
-                // the two above it takes state and nothing else.
+                // FR-26 + FR-28. Still no actions *bundle*: the surface has exactly one gesture
+                // (17 decision 2's Use), so it takes one callback rather than the grouped
+                // lambdas the tracker and inventory need. The callback's first parameter is a
+                // `UseTarget` and not a property id — see `ActionsScreen`'s KDoc for why that
+                // difference is the gate rather than a style choice.
                 val actions = @Composable {
-                    ActionsScreen(state = uiState.actions)
+                    ActionsScreen(
+                        state = uiState.actions,
+                        onUse = viewModel::use,
+                    )
                 }
                 val sheet = @Composable {
                     if (sheetState == null) {

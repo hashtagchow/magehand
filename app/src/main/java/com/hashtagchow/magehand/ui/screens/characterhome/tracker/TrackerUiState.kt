@@ -908,6 +908,15 @@ fun TrackerWrite.describe(): String = when (kind) {
     TrackerWriteKind.TOGGLE -> "Toggled $targetName"
     TrackerWriteKind.SHORT_REST -> "Short rest"
     TrackerWriteKind.LONG_REST -> "Long rest"
+    // FR-28 decision 8, verbatim: "our journal entry for a Use is NON-undoable ('Used Rage — see
+    // the activity feed')". The pointer is the whole of the second clause — this app cannot say
+    // what the use *did* (the server ran the effect tree and told us nothing back, probe U1), and
+    // the feed is where the server's own account of it lands. `amount` is 1 and says nothing:
+    // you use the feature, not some of it.
+    TrackerWriteKind.USE_ACTION -> "Used $targetName — see the activity feed"
+    // "Cast", not "Used": a table says one and not the other, and the history sheet is read to
+    // answer "what did I do?".
+    TrackerWriteKind.CAST_SPELL -> "Cast $targetName — see the activity feed"
 }
 
 /**

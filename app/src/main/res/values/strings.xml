@@ -502,6 +502,9 @@
     <string name="actions_empty_hint">This character\'s sheet has no spells or actions on it.</string>
     <string name="actions_section_expand">collapsed, tap to expand</string>
     <string name="actions_section_collapse">expanded, tap to collapse</string>
+    <!-- A5 nit: RowShell's `onClickLabel` — TalkBack reads this instead of a bare
+         "double-tap to activate" once the row also carries `Role.Button`. -->
+    <string name="actions_row_click_label">View details</string>
     <string name="actions_filter_label">Search spells and actions</string>
     <string name="actions_filter_clear">Clear the search</string>
     <string name="actions_filter_none">Nothing matches “%1$s”</string>
@@ -517,13 +520,23 @@
     <!-- FR-25 (docs/design/16-actions-and-feed.md decisions 9–11): the DM activity feed.
 
          `dm_feed_empty_hint` is the HONEST empty state decision 9 requires. It names DiceCloud
-         on purpose: this app's own writes produce no server-side log entries (probe L3), so a
-         panel that said "No activity yet" would be claiming nothing had happened while the DM
-         was watching players act in this very app. Do not "improve" it into a shorter sentence
-         that drops the attribution — the attribution is the content. -->
+         on purpose: a panel that said "No activity yet" would be claiming nothing had happened
+         while the DM was watching players act in this very app. Do not "improve" it into a
+         shorter sentence that drops the attribution — the attribution is the content.
+
+         CORRECTED BY FR-28 (docs/design/17-use-action.md decision 8). The old second sentence
+         read "Changes made in MageHand are not logged by the server", which was true of every
+         write this app could make in 1.9.x — probe L3 established that `damage` and
+         `adjustQuantity` log nothing. It is NOT true of a Use: the server runs the effect tree
+         and writes its own `creatureLogs` entry, so a Use made in MageHand appears in this panel
+         like any other. Decision 8 calls that 16 decision 9's deferral resolving itself the right
+         way, and it needs no code — the feed already carries whatever the server logs. What it
+         did need was this sentence, which had become a claim the app disproves the first time
+         anybody presses Use. The distinction the copy now draws is the true one: the panel shows
+         what DiceCloud logged, and the app's tracker edits are not among those. -->
     <string name="dm_feed_title">Activity</string>
     <string name="dm_feed_empty">No activity yet</string>
-    <string name="dm_feed_empty_hint">Actions logged by DiceCloud appear here. Changes made in MageHand are not logged by the server.</string>
+    <string name="dm_feed_empty_hint">Actions logged by DiceCloud appear here, including uses made in MageHand. Tracker edits — spending a slot, adjusting an item — are not logged by the server.</string>
     <string name="dm_feed_expand">collapsed, tap to expand</string>
     <string name="dm_feed_collapse">expanded, tap to collapse</string>
     <string name="dm_feed_entry_spoken">%1$s, %2$s. %3$s</string>
@@ -536,6 +549,76 @@
         <item quantity="one">%1$d entry</item>
         <item quantity="other">%1$d entries</item>
     </plurals>
+
+    <!--
+        FR-28 (docs/design/17-use-action.md): the action detail sheet and the Use gesture.
+
+        `action_detail_cost` and its two line shapes are decision 1's COST. Every number in them
+        is client-derived from the sheet's fast-path fields — an attribute's `value`, an item's
+        `quantity` — and NOT from the server's `available`/`insufficientResources` rollups, which
+        probe U5 measured lagging 4-10 s behind. `action_detail_uses` is the same story for
+        `uses.value - usesUsed` against `usesLeft`. Do not "simplify" these onto the server's own
+        fields: they are the same sentence with a ten-second lie in it.
+
+        `action_detail_unusable_*` are decision 2's "dimmed rows explain why in the detail sheet".
+        Four sentences and not one, because the four have four different fixes — prepare it, switch
+        it on, get the resource back, take a rest — and "You can't use this" tells a player none of
+        them. `_unprepared` names the sheet rather than this app on purpose: MageHand has no
+        prepared toggle in this release (16 decision 5), so the only true instruction is where to
+        go and do it.
+
+        `action_use_confirm_*` is decision 4's dialog, which is shown before EVERY use including a
+        free one. `action_use_no_undo` carries both halves of why: there is no inverse (probe U4),
+        AND the use posts to the party's activity feed and to whatever else the table has wired to
+        it. [M2, architect ruling] "integrations" rather than naming Discord — not every table has
+        a webhook, and "integrations" is honest for the ones that have something else. The second
+        half is the non-obvious one and is the reason the sentence is two clauses rather than the
+        usual "This can't be undone." — a player who would happily re-do a mistaken tap still
+        deserves to know it left the app.
+
+        `action_use_ritual` is decision 3's "honest about not consuming a slot". "Ritual" alone is
+        a rules word that does not say what it will cost, which is exactly what a player is asking
+        the dialog.
+    -->
+    <string name="action_detail_close">Close</string>
+    <string name="action_detail_cost">Costs</string>
+    <string name="action_detail_cost_free">Free</string>
+    <string name="action_detail_cost_line">%1$s × %2$d</string>
+    <!-- A5 nit: this is the LONGER of the two cost-line strings (it adds the remaining count) —
+         `_short` had it backwards. Named for what it carries, not its length. -->
+    <string name="action_detail_cost_line_with_remaining">%1$s × %2$d (%3$d left)</string>
+    <plurals name="action_detail_uses">
+        <item quantity="one">%1$d of %2$d use left</item>
+        <item quantity="other">%1$d of %2$d uses left</item>
+    </plurals>
+    <string name="action_detail_casting_time">Casting time</string>
+    <string name="action_detail_range">Range</string>
+    <string name="action_detail_spell_level">Level %1$d spell</string>
+    <string name="action_detail_cantrip">Cantrip</string>
+    <string name="action_detail_unusable_unprepared">Not prepared. Prepare it in DiceCloud to use it here.</string>
+    <string name="action_detail_unusable_inactive">Switched off on the sheet, so there\'s nothing to use.</string>
+    <string name="action_detail_unusable_resources">You don\'t have what this costs.</string>
+    <string name="action_detail_unusable_uses">No uses left. A rest brings them back.</string>
+    <string name="action_use">Use</string>
+    <string name="action_use_offline">Use — you\'re offline</string>
+    <string name="action_use_in_flight">Using…</string>
+    <string name="action_use_confirm_title">Use %1$s?</string>
+    <string name="action_use_confirm_cast_title">Cast %1$s?</string>
+    <string name="action_use_confirm_spends">This will spend:</string>
+    <string name="action_use_confirm_free">This spends nothing.</string>
+    <string name="action_use_confirm_uses_after">Uses left afterwards: %1$d of %2$d</string>
+    <string name="action_use_no_undo">Can\'t be undone. Logged to the party\'s activity feed and any connected integrations.</string>
+    <string name="action_use_confirm">Use</string>
+    <string name="action_use_confirm_cast">Cast</string>
+    <string name="action_use_slot_label">Cast with</string>
+    <string name="action_use_slot_option">Level %1$d — %2$d of %3$d left</string>
+    <string name="action_use_slot_none">No slots of that level or higher are left.</string>
+    <!-- M3 [architect ruling]: shown when :core:data's gate or single-flight latch drops a
+         confirmed use before it reaches the wire — a real outcome (the row changed under the
+         dialog, or a use was already in flight), not a network failure, so it does not claim
+         one. -->
+    <string name="action_use_dropped">Couldn\'t use that right now — try again</string>
+    <string name="action_use_ritual">Cast as a ritual (takes 10 minutes longer, spends no slot)</string>
 
     <!-- Actions -->
     <string name="action_settings">Settings</string>

@@ -1,9 +1,13 @@
 package com.hashtagchow.magehand.core.data.tracker
 
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import com.hashtagchow.magehand.core.model.ActionBoard
+import com.hashtagchow.magehand.core.model.ActionCost
 import com.hashtagchow.magehand.core.model.ActionEntry
 import com.hashtagchow.magehand.core.model.ActionType
+import com.hashtagchow.magehand.core.model.ActionUses
+import com.hashtagchow.magehand.core.model.CostLine
 import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.SpellListHeader
@@ -36,6 +40,7 @@ object ActionEngine {
     // --- DiceCloud vocabulary (verified against the live capture, 2026-08-24) ---
     private const val TYPE_SPELL = "spell"
     private const val TYPE_ACTION = "action"
+    private const val TYPE_ITEM = "item"
     private const val TYPE_SPELL_LIST = "spellList"
     private const val TYPE_BRANCH = "branch"
     private const val TYPE_DAMAGE = "damage"
@@ -49,6 +54,16 @@ object ActionEngine {
      * future save-rider branch from silently being read as on-hit damage.
      */
     private const val BRANCH_HIT = "hit"
+
+    // --- FR-28 cost vocabulary (docs/design/17-use-action.md decision 1) ---
+    private const val RESOURCES = "resources"
+    private const val ATTRIBUTES_CONSUMED = "attributesConsumed"
+    private const val ITEMS_CONSUMED = "itemsConsumed"
+    private const val QUANTITY = "quantity"
+    private const val VARIABLE_NAME = "variableName"
+    private const val ITEM_ID = "itemId"
+    private const val USES = "uses"
+    private const val USES_USED = "usesUsed"
 
     /**
      * How deep [damageFor] will walk. The real shapes are one and two levels; this is the guard
@@ -68,10 +83,11 @@ object ActionEngine {
         // accessor `CreatureSheet` added for exactly this class of new consumer.
         val properties = sheet.livePropertyList
         val childrenByParent = properties.groupBy { it.parentId() }
+        val resources = ResourceIndex.of(properties)
 
         val spells = properties
             .filter { it.string("type") == TYPE_SPELL }
-            .mapNotNull { it.toSpell(childrenByParent) }
+            .mapNotNull { it.toSpell(childrenByParent, resources) }
             // Decision 3: *"sorted by `order` then STABLE-sorted by `level`"*. Two passes, in
             // that sequence, because that is what "stable" buys: `sortedBy` is stable in Kotlin,
             // so sorting by level second preserves the `order` sequence *within* each level.
@@ -83,7 +99,7 @@ object ActionEngine {
 
         val actions = properties
             .filter { it.string("type") == TYPE_ACTION }
-            .mapNotNull { it.toAction(childrenByParent) }
+            .mapNotNull { it.toAction(childrenByParent, resources) }
             // Decision 3: group order first (the enum's own declaration order — see
             // `ActionGroup`), then the sheet's `order` inside a group. Name is the final
             // tie-break so a rebuild of the same sheet cannot reshuffle two rows that share an
@@ -117,7 +133,10 @@ object ActionEngine {
      *
      * The honest number is the spell **list**'s DC and ability modifier — see [toSpellList].
      */
-    private fun JsonObject.toSpell(childrenByParent: Map<String?, List<JsonObject>>): SpellEntry? {
+    private fun JsonObject.toSpell(
+        childrenByParent: Map<String?, List<JsonObject>>,
+        resources: ResourceIndex,
+    ): SpellEntry? {
         val id = string("_id") ?: return null
         return SpellEntry(
             propertyId = id,
@@ -138,6 +157,8 @@ object ActionEngine {
             description = text("description"),
             summary = text("summary"),
             damage = damageFor(id, childrenByParent),
+            cost = costFor(resources),
+            uses = usesFor(),
             sortOrder = number("order") ?: 0,
         )
     }
@@ -150,7 +171,10 @@ object ActionEngine {
      * (`max(daggerWeapon,simpleMeleeWeapon)` → `3` in the capture), so the server's number is
      * true at rest. `ActionEngineTest` pins the pair.
      */
-    private fun JsonObject.toAction(childrenByParent: Map<String?, List<JsonObject>>): ActionEntry? {
+    private fun JsonObject.toAction(
+        childrenByParent: Map<String?, List<JsonObject>>,
+        resources: ResourceIndex,
+    ): ActionEntry? {
         val id = string("_id") ?: return null
         return ActionEntry(
             propertyId = id,
@@ -164,9 +188,153 @@ object ActionEngine {
             description = text("description"),
             summary = text("summary"),
             damage = damageFor(id, childrenByParent),
+            cost = costFor(resources),
+            uses = usesFor(),
             sortOrder = number("order") ?: 0,
         )
     }
+
+    // -----------------------------------------------------------------------
+    // FR-28 — cost and uses (docs/design/17-use-action.md decision 1)
+    // -----------------------------------------------------------------------
+
+    /**
+     * The live sheet, indexed the two ways a cost line needs to be looked up.
+     *
+     * ### Why an index rather than a scan per line
+     *
+     * A sheet carries hundreds of properties and a caster's board carries dozens of rows, each
+     * with up to a handful of cost lines. Scanning the property list per line is O(rows × lines ×
+     * properties) on every board rebuild, and the board rebuilds on **every mirror change** — a
+     * DM dashboard watching six creatures rebuilds constantly. Two maps built once per build make
+     * it O(properties + rows × lines), which is what [ActionEngine.build]'s existing
+     * `childrenByParent` already does for the damage walk. Same pattern, same reason.
+     *
+     * @property attributeValues `variableName` → the attribute's own `value`.
+     * @property itemQuantities `_id` → the item's own `quantity`.
+     */
+    private class ResourceIndex(
+        val attributeValues: Map<String, Int>,
+        val itemQuantities: Map<String, Int>,
+        val names: Map<String, String>,
+    ) {
+        companion object {
+            /**
+             * Both maps in one pass over the live properties.
+             *
+             * A **duplicate `variableName` keeps the first** it meets, which is the sheet's own
+             * order. DiceCloud allows two properties to declare one variable name and resolves
+             * the collision by its own rules, which this app does not implement; picking the
+             * first is at least stable across rebuilds, and picking the *largest* — the tempting
+             * "be generous" choice — would let a stale duplicate unlock a use the sheet cannot
+             * fund. See [CostLine.satisfied] for what happens when the lookup misses entirely.
+             */
+            fun of(properties: List<JsonObject>): ResourceIndex {
+                val attributes = HashMap<String, Int>()
+                val quantities = HashMap<String, Int>()
+                val names = HashMap<String, String>()
+                for (property in properties) {
+                    val id = property.string("_id") ?: continue
+                    property.string("name")?.takeIf { it.isNotBlank() }?.let { names[id] = it }
+                    property.string(VARIABLE_NAME)?.takeIf { it.isNotBlank() }?.let { variable ->
+                        property.number("value")?.let { attributes.putIfAbsent(variable, it) }
+                        names.putIfAbsent(variable, property.string("name").orEmpty())
+                    }
+                    // `quantity` absent reads as 1 — `quantityRule` in the contract export, and
+                    // the same reading `InventoryEngine` uses. An item with no quantity field is
+                    // one of that item, not none.
+                    if (property.string("type") == TYPE_ITEM) {
+                        quantities[id] = property.number(QUANTITY) ?: 1
+                    }
+                }
+                return ResourceIndex(attributes, quantities, names)
+            }
+        }
+    }
+
+    /**
+     * 17 decision 1's **Cost**, joined against the live sheet.
+     *
+     * ### What is read, and what is deliberately not
+     *
+     * Each `attributesConsumed` entry carries a `variableName`, a `quantity` calculation, and —
+     * on a recomputed sheet — a `statName` and an `available` rollup. This reads the first two
+     * and **ignores `available`**, joining `variableName` against the attribute property's own
+     * `value` instead. `itemsConsumed` gets the same treatment: `itemId` joined against the
+     * item's `quantity`, never the entry's `available`.
+     *
+     * That is 17 decision 1's whole instruction (*"the server fields are a slow confirmation
+     * only"*) and probe U5 is the measurement behind it: `available` and `insufficientResources`
+     * are recomputed on a debounced pass 4–10 s behind the write, while `value` and `quantity`
+     * are written synchronously. Reading the rollup would mean a Use button that stays lit for
+     * ten seconds after the last charge is gone — which is the exact window probe U3's burst
+     * lives in.
+     *
+     * The **display name** comes from the resolved property, falling back to the entry's own
+     * `statName` and then to the raw `variableName`. Never straight to `variableName` when
+     * anything better exists: "rage" is not what the sheet calls the row, and a dialog that lists
+     * `rageResource: 1` as what a tap will spend is asking the player to trust a word they have
+     * never seen.
+     */
+    private fun JsonObject.costFor(resources: ResourceIndex): ActionCost {
+        val block = this[RESOURCES] as? JsonObject ?: return ActionCost.FREE
+
+        val attributes = block.entries(ATTRIBUTES_CONSUMED).mapNotNull { entry ->
+            val variable = entry.string(VARIABLE_NAME)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            CostLine(
+                name = resources.names[variable]?.takeIf { it.isNotBlank() }
+                    ?: entry.string("statName")?.takeIf { it.isNotBlank() }
+                    ?: variable,
+                amount = entry.number(QUANTITY) ?: 1,
+                available = resources.attributeValues[variable],
+            )
+        }
+
+        val items = block.entries(ITEMS_CONSUMED).mapNotNull { entry ->
+            val itemId = entry.string(ITEM_ID)?.takeIf { it.isNotBlank() }
+            CostLine(
+                name = itemId?.let { resources.names[it] }?.takeIf { it.isNotBlank() }
+                    ?: entry.string("itemName")?.takeIf { it.isNotBlank() }
+                    ?: entry.string("tag")?.takeIf { it.isNotBlank() }
+                    // A consumed item the sheet has not been told the identity of is a real
+                    // shape — the entry exists with a tag and no `itemId` until the player picks
+                    // one — and it has no name to print, so the line is dropped rather than
+                    // rendered as a blank bullet in a confirm dialog.
+                    ?: return@mapNotNull null,
+                amount = entry.number(QUANTITY) ?: 1,
+                available = itemId?.let { resources.itemQuantities[it] },
+            )
+        }
+
+        return if (attributes.isEmpty() && items.isEmpty()) {
+            ActionCost.FREE
+        } else {
+            ActionCost(attributes = attributes, items = items)
+        }
+    }
+
+    /**
+     * 17 decision 1's **Uses** — `uses.value − usesUsed`, expressed as the pair rather than the
+     * difference.
+     *
+     * `null` when the row states no `uses` at all, which is what an unlimited action looks like
+     * and is why [ActionUses] is nullable rather than defaulting to zero: a `max` of 0 would read
+     * as "exhausted" and hide the Use button on every unlimited row on the sheet.
+     *
+     * `usesUsed` absent reads as **0**, not as null-propagating: a limited row the player has
+     * never used carries no counter, and treating that as "unknown" would suppress the uses line
+     * on exactly the rows where it is most obviously true.
+     *
+     * See [ActionUses] for why this pair and not the server's own `usesLeft`.
+     */
+    private fun JsonObject.usesFor(): ActionUses? {
+        val max = number(USES) ?: return null
+        return ActionUses(max = max, used = number(USES_USED) ?: 0)
+    }
+
+    /** The objects in an array-valued field; empty for a field that is absent or the wrong shape. */
+    private fun JsonObject.entries(key: String): List<JsonObject> =
+        (this[key] as? JsonArray)?.filterIsInstance<JsonObject>().orEmpty()
 
     /**
      * A `spellList` header — the DC and ability modifier the surface shows *instead of* a

@@ -4,12 +4,20 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import com.hashtagchow.magehand.core.model.ActionBoard
+import com.hashtagchow.magehand.core.model.ActionCost
 import com.hashtagchow.magehand.core.model.ActionEntry
 import com.hashtagchow.magehand.core.model.ActionGroup
 import com.hashtagchow.magehand.core.model.ActionType
+import com.hashtagchow.magehand.core.model.ActionUses
+import com.hashtagchow.magehand.core.model.CostLine
 import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.SpellListHeader
+import com.hashtagchow.magehand.core.model.TrackedResource
+import com.hashtagchow.magehand.core.model.TrackerKind
+import com.hashtagchow.magehand.core.model.UseTarget
 
 /**
  * The Actions surface's sectioning, search and collapse (16 decisions 3, 6 and 9).
@@ -267,4 +275,276 @@ class ActionsUiStateTest {
         val base = toActionsUiState("c1", board)
         assertEquals(base, base.withView("", emptySet()))
     }
+
+    // =======================================================================
+    // FR-28 — the detail sheet and the Use affordance
+    // (docs/design/17-use-action.md decisions 1, 2, 3 and 5)
+    // =======================================================================
+
+    /**
+     * A prepared, funded row resolves to a detail state carrying a Use — and the target is
+     * `UseTarget`, not an id.
+     *
+     * The type is the assertion. Everything downstream of this — the button, the dialog, the
+     * ViewModel intent — takes a `UseTarget`, so a row that produced one has passed 17 decision
+     * 2's gate by construction rather than by a check somebody remembered to write.
+     */
+    @Test
+    fun `a usable row's detail carries a use target`() {
+        val entry = ActionEntry(
+            propertyId = "a1",
+            name = "Rage",
+            type = ActionType.BONUS,
+            cost = ActionCost(attributes = listOf(CostLine("Rage", amount = 1, available = 3))),
+            uses = ActionUses(max = 3, used = 1),
+        )
+        val detail = toActionsUiState("c1", ActionBoard(actions = listOf(entry)), canWrite = true)
+            .detailFor("a1")
+
+        assertNotNull(detail)
+        assertEquals("Rage", detail!!.name)
+        assertEquals(2, detail.uses?.remaining)
+        assertEquals(1, detail.cost.attributes.single().amount)
+        assertNotNull(detail.use)
+        assertTrue(detail.use!!.enabled)
+        assertNull("a row with a Use explains nothing — it offers one", detail.unusableReason)
+    }
+
+    /**
+     * **THE STRUCTURAL TRAP** (decision 2): an unprepared or switched-off row exposes NO use
+     * path through this seam.
+     *
+     * `use == null` is the whole claim. The composable draws the button inside a `?.let`, so
+     * there is nothing to press; and because [UseAffordance] can only be built from a non-null
+     * `useTarget`, there is no way for a later edit to this file to produce one for these rows
+     * either. What the sheet gets instead is a *sentence*, which decision 2 asks for in as many
+     * words — a missing button explains nothing.
+     */
+    @Test
+    fun `unprepared and switched-off rows offer no use, and say why`() {
+        val board = ActionBoard(
+            spells = listOf(
+                SpellEntry(propertyId = "s-unprepared", name = "Bless", level = 1),
+                SpellEntry(propertyId = "s-inactive", name = "Shield", level = 1, prepared = true, inactive = true),
+            ),
+            actions = listOf(
+                ActionEntry(propertyId = "a-inactive", name = "Rage", type = ActionType.BONUS, inactive = true),
+                ActionEntry(
+                    propertyId = "a-broke",
+                    name = "Volley",
+                    type = ActionType.ACTION,
+                    cost = ActionCost(items = listOf(CostLine("Arrows", amount = 3, available = 0))),
+                ),
+                ActionEntry(
+                    propertyId = "a-spent",
+                    name = "Second Wind",
+                    type = ActionType.BONUS,
+                    // The lagging rollup still claims one is left; the pair says otherwise.
+                    usesLeft = 1,
+                    uses = ActionUses(max = 1, used = 1),
+                ),
+            ),
+        )
+        val state = toActionsUiState("c1", board, canWrite = true)
+
+        val expected = mapOf(
+            "s-unprepared" to UnusableReason.UNPREPARED,
+            "s-inactive" to UnusableReason.INACTIVE,
+            "a-inactive" to UnusableReason.INACTIVE,
+            "a-broke" to UnusableReason.NO_RESOURCES,
+            "a-spent" to UnusableReason.NO_USES,
+        )
+        for ((id, reason) in expected) {
+            val detail = state.detailFor(id)!!
+            assertNull("$id must expose no use path at all", detail.use)
+            assertEquals("$id must say why", reason, detail.unusableReason)
+        }
+    }
+
+    /**
+     * Decision 3's picker, derived at the detail sheet from the live tracker rows.
+     *
+     * The depleted level-4 slot and the too-small level-1 slot are both absent — the trap
+     * `UseTargetTest` pins on the derivation, re-checked here on the path the UI actually takes,
+     * because a state that forgot to pass `spellSlots` through would have an empty picker and no
+     * test would have noticed.
+     */
+    @Test
+    fun `the detail sheet's slot picker offers only legal slots`() {
+        val spell = SpellEntry(propertyId = "s1", name = "Fireball", level = 3, prepared = true)
+        val state = toActionsUiState(
+            "c1",
+            ActionBoard(spells = listOf(spell)),
+            spellSlots = listOf(
+                slotRow("l1", level = 1, remaining = 4),
+                slotRow("l3", level = 3, remaining = 2),
+                slotRow("l4", level = 4, remaining = 0),
+                slotRow("l5", level = 5, remaining = 1),
+            ),
+            canWrite = true,
+        )
+
+        val use = state.detailFor("s1")!!.use!!
+        assertTrue("a leveled spell draws the picker", use.showsSlotPicker)
+        assertEquals(listOf("l3", "l5"), use.slots.map { it.propertyId })
+        assertEquals("the dialog opens on the cheapest legal slot", "l3", use.defaultSlotId)
+    }
+
+    /** A cantrip skips the picker entirely — there is no upcast decision to make. */
+    @Test
+    fun `a cantrip draws no slot picker`() {
+        val state = toActionsUiState(
+            "c1",
+            ActionBoard(spells = listOf(SpellEntry(propertyId = "s0", name = "Light", level = 0, prepared = true))),
+            spellSlots = listOf(slotRow("l1", level = 1, remaining = 4)),
+            canWrite = true,
+        )
+        val use = state.detailFor("s0")!!.use!!
+        assertFalse(use.showsSlotPicker)
+        assertTrue(use.slots.isEmpty())
+    }
+
+    /**
+     * A leveled spell with nothing left to cast it with still offers the Use, with an empty
+     * picker — the row is not gated (B1 [architect ruling]: it is the dialog's own Confirm that
+     * refuses, not this affordance; see [confirmDisabled below]).
+     */
+    @Test
+    fun `a spell with no slots left still offers the use, with an empty picker`() {
+        val state = toActionsUiState(
+            "c1",
+            ActionBoard(spells = listOf(SpellEntry(propertyId = "s1", name = "Fireball", level = 3, prepared = true))),
+            spellSlots = listOf(slotRow("l1", level = 1, remaining = 4)),
+            canWrite = true,
+        )
+        val use = state.detailFor("s1")!!.use!!
+        assertNotNull(use)
+        assertTrue(use.showsSlotPicker)
+        assertTrue(use.slots.isEmpty())
+        assertNull(use.defaultSlotId)
+    }
+
+    /**
+     * B1 [architect ruling]: `confirmDisabled` is the one place this rule lives, pure so it is
+     * testable without the Compose harness `:app` does not have. Four cases: empty picker blocks
+     * (unless ritual, which needs no slot at all), and every other combination does not,
+     * matching the PIN's own words — "non-empty unchanged".
+     */
+    @Test
+    fun `confirmDisabled is true only for an empty picker on a non-ritual leveled spell`() {
+        val emptyPicker = state("s1", level = 3, ritual = false, slotsLeft = false)
+        val nonEmptyPicker = state("s1", level = 3, ritual = false, slotsLeft = true)
+        val emptyButRitual = state("s1", level = 3, ritual = true, slotsLeft = false)
+        val cantrip = state("s0", level = 0, ritual = false, slotsLeft = false)
+
+        assertTrue("empty picker, not ritual: Confirm must be disabled", emptyPicker.confirmDisabled(false))
+        assertFalse("slots present: Confirm is unaffected", nonEmptyPicker.confirmDisabled(false))
+        assertFalse("ritual needs no slot: an empty picker is moot", emptyButRitual.confirmDisabled(true))
+        assertFalse("a cantrip draws no picker at all", cantrip.confirmDisabled(false))
+    }
+
+    private fun state(id: String, level: Int, ritual: Boolean, slotsLeft: Boolean): UseAffordance {
+        val spell = SpellEntry(propertyId = id, name = "Spell", level = level, prepared = true, ritual = ritual)
+        val board = toActionsUiState(
+            "c1",
+            ActionBoard(spells = listOf(spell)),
+            spellSlots = if (slotsLeft) listOf(slotRow("l$level", level = level, remaining = 1)) else emptyList(),
+            canWrite = true,
+        )
+        return board.detailFor(id)!!.use!!
+    }
+
+    /** The ritual checkbox is drawn only where the sheet marks the spell as one. */
+    @Test
+    fun `the ritual checkbox follows the sheet's own flag`() {
+        fun useFor(ritual: Boolean) = toActionsUiState(
+            "c1",
+            ActionBoard(spells = listOf(SpellEntry("s1", "Detect Magic", level = 1, ritual = ritual, prepared = true))),
+            canWrite = true,
+        ).detailFor("s1")!!.use!!
+
+        assertTrue(useFor(ritual = true).showsRitual)
+        assertFalse(useFor(ritual = false).showsRitual)
+    }
+
+    /**
+     * Decision 5's single-flight and 04's offline rule, both expressed as `enabled` rather than
+     * as absence.
+     *
+     * The distinction is the point: "not right now" is a disabled control, "not on this row, in
+     * this state" is an absent one. Conflating them is how a player ends up tapping a greyed
+     * button waiting for it to start working.
+     */
+    @Test
+    fun `a use in flight or offline is disabled but still present`() {
+        val board = ActionBoard(actions = listOf(ActionEntry("a1", "Dash", ActionType.ACTION)))
+
+        val busy = toActionsUiState("c1", board, usesInFlight = setOf("a1"), canWrite = true)
+            .detailFor("a1")!!.use!!
+        assertTrue("in flight is a disabled button, not a missing one", busy.inFlight)
+        assertFalse(busy.enabled)
+
+        val offline = toActionsUiState("c1", board, canWrite = false).detailFor("a1")!!.use!!
+        assertFalse(offline.canWrite)
+        assertFalse(offline.enabled)
+
+        val ready = toActionsUiState("c1", board, canWrite = true).detailFor("a1")!!.use!!
+        assertTrue(ready.enabled)
+    }
+
+    /** The latch is per row: one busy use does not disable every other row's button. */
+    @Test
+    fun `only the row that is in flight is disabled`() {
+        val state = toActionsUiState(
+            "c1",
+            ActionBoard(
+                actions = listOf(
+                    ActionEntry("a1", "Rage", ActionType.BONUS),
+                    ActionEntry("a2", "Dash", ActionType.ACTION),
+                ),
+            ),
+            usesInFlight = setOf("a1"),
+            canWrite = true,
+        )
+        assertFalse(state.detailFor("a1")!!.use!!.enabled)
+        assertTrue(state.detailFor("a2")!!.use!!.enabled)
+    }
+
+    /**
+     * A row that has left the list resolves to `null`, and the screen closes the sheet on it.
+     *
+     * Reachable two ways: a filter that no longer matches the open row, and a property the server
+     * soft-removed while the sheet was up. Freezing the last frame instead would leave a Use
+     * button on a row that is no longer on the character.
+     */
+    @Test
+    fun `a row that leaves the list has no detail`() {
+        val state = toActionsUiState("c1", board, query = "fireball")
+        assertNull("a filtered-out row closes its own detail", state.detailFor("a-Dash"))
+        assertNull(state.detailFor(null))
+        assertNull(state.detailFor("nothing-like-this"))
+    }
+
+    /** The body prefers the rules text over DiceCloud's own one-line gloss of it. */
+    @Test
+    fun `the detail body prefers description over summary`() {
+        val withBoth = ActionEntry("a1", "Dash", ActionType.ACTION, description = "long", summary = "short")
+        val summaryOnly = ActionEntry("a2", "Dodge", ActionType.ACTION, summary = "short")
+        val neither = ActionEntry("a3", "Hide", ActionType.ACTION, description = "   ")
+        val state = toActionsUiState("c1", ActionBoard(actions = listOf(withBoth, summaryOnly, neither)))
+
+        assertEquals("long", state.detailFor("a1")!!.body)
+        assertEquals("short", state.detailFor("a2")!!.body)
+        assertNull("blank is absent, never an empty paragraph", state.detailFor("a3")!!.body)
+    }
+
+    /** A slot row as the tracker board hands one up. See `spellSlotOptions`. */
+    private fun slotRow(id: String, level: Int, remaining: Int, total: Int = 4) = TrackedResource(
+        propertyId = id,
+        kind = TrackerKind.SPELL_SLOT,
+        name = "Level $level",
+        value = remaining,
+        total = total,
+        spellSlotLevel = level,
+    )
 }

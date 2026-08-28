@@ -560,6 +560,35 @@ enum class TrackerWriteKind {
     TOGGLE,
     SHORT_REST,
     LONG_REST,
+
+    /**
+     * An action used through the server's own machinery (FR-28,
+     * docs/design/17-use-action.md decisions 3 and 8).
+     *
+     * **Not invertible, and not for [ITEM_CREATE]'s reason.** A create has an inverse this app
+     * declines to ship; a use has *no inverse at all*. Probe U4: `doAction` runs the property's
+     * whole effect tree — it spends attributes, decrements items, increments `usesUsed`, appends
+     * to the party log and posts to any configured Discord webhook — and DiceCloud offers no
+     * method that undoes any of it, let alone all of it atomically. Rewinding the resources by
+     * hand would leave the log entry and the webhook post standing, which is a worse lie than no
+     * undo: the sheet would say the Rage never happened and the table's feed would say it did.
+     *
+     * So the history entry is a **fact with a pointer** — 17 decision 8's *"Used Rage — see the
+     * activity feed"* — and the confirm dialog before the tap is where the reversibility question
+     * actually gets answered. That is [SHORT_REST]'s shape, one step further: a rest has no
+     * inverse either, and it too is confirmed rather than undone.
+     */
+    USE_ACTION,
+
+    /**
+     * A spell cast through `creatureProperties.doCastSpell` (FR-28, 17 decisions 3 and 8).
+     *
+     * Separate from [USE_ACTION] only because the **sentence** differs — you use a feature and
+     * you cast a spell, and a history sheet that said "Used Fireball" would be reporting the
+     * event in a vocabulary nobody at the table uses. Everything else about the two is identical,
+     * including having no inverse.
+     */
+    CAST_SPELL,
     ;
 
     /**
@@ -579,7 +608,8 @@ enum class TrackerWriteKind {
         ITEM_RESTORE -> ITEM_DELETE
         ITEM_MOVE -> ITEM_MOVE
         TOGGLE -> TOGGLE
-        SET_VALUE, ITEM_SET, ITEM_CREATE, SHORT_REST, LONG_REST -> null
+        // FR-28: a use has no inverse of any kind — see [USE_ACTION].
+        SET_VALUE, ITEM_SET, ITEM_CREATE, SHORT_REST, LONG_REST, USE_ACTION, CAST_SPELL -> null
     }
 }
 
@@ -600,6 +630,13 @@ data class TrackerWriteFailure(
     val refusedOffline: Boolean,
     /** True when the server's rate limiter rejected it even after the one allowed retry. */
     val rateLimited: Boolean,
+    /**
+     * FR-28, M3/M4 [architect ruling]: true when a Use was dropped by `:core:data`'s gate or
+     * single-flight latch and never reached the wire at all — as opposed to every other case
+     * here, which is a call that WAS sent and then failed. Nothing was rolled back (there was
+     * nothing optimistic to roll back), which is also why [propertyId] is `null` for this case.
+     */
+    val dropped: Boolean = false,
 )
 
 /**

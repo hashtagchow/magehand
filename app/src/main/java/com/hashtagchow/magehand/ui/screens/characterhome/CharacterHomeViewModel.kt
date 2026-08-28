@@ -21,10 +21,13 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
 import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
+import com.hashtagchow.magehand.core.data.feed.ActivityFeedRepository
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
@@ -38,6 +41,7 @@ import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.ExactQuantity
+import com.hashtagchow.magehand.core.model.FeedEntry
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.RestKind
@@ -47,6 +51,8 @@ import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
+import com.hashtagchow.magehand.core.model.TrackerWriteKind
+import com.hashtagchow.magehand.core.model.UseTarget
 import com.hashtagchow.magehand.ui.panes.movePane
 import com.hashtagchow.magehand.ui.panes.nextStoredPanes
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryLayoutPlan
@@ -164,6 +170,12 @@ class CharacterHomeViewModel @Inject constructor(
     private val paneLayoutStore: PaneLayoutStore,
     private val openCharacterFactory: OpenCharacterFactory,
     private val connectionManager: DdpConnectionManager,
+    /**
+     * FR-25's feed, injected here for FR-28 decision 6's best-effort `doAction` error look —
+     * see [watchForUseError]. The repository is a `@Singleton` handing out cold flows, so a
+     * second consumer beside `DmViewViewModel` costs no subscription and no extra mirror.
+     */
+    private val activityFeedRepository: ActivityFeedRepository,
 ) : ViewModel() {
 
     /** Type-safe nav routes store each component under its property name. */
@@ -458,22 +470,43 @@ class CharacterHomeViewModel @Inject constructor(
     /**
      * FR-26's Actions surface state (docs/design/16-actions-and-feed.md decisions 3–6).
      *
-     * ### One source, so no `combine` at all
+     * ### It used to be one source; FR-28 makes it four
      *
-     * The narrowest of the four state flows, and deliberately: the surface is read-only
-     * (decision 7), so unlike [inventoryState] it needs no `canWrite`, no `isShowingSnapshot`
-     * and no preference store — none of those change what a read-only list draws. It is a `map`
-     * over one flow, which is also why it costs nothing to add here at the arity ceiling.
+     * This was *"the narrowest of the four state flows … a `map` over one flow"*, because 16
+     * decision 7's read-only surface needed no `canWrite` and no write state. 17 gives it exactly
+     * one gesture and with it three more inputs, each of which is the *live* half of a decision
+     * that would otherwise be made against a stale number:
      *
-     * The query and the collapse set are **not** here. They are `ActionsScreen`'s own
-     * `rememberSaveable` state, applied on top via `ActionsUiState.withView` — see that function
-     * for why the split is where it is.
+     * - `board.slots` — decision 3's picker, from the tracker's own rows so the picker and the
+     *   pips cannot disagree about how many slots are left;
+     * - `usesInFlight` — decision 5's single-flight, mirrored so the button looks the way the
+     *   latch in `:core:data` already behaves;
+     * - `canWrite` — so an offline Use dims rather than being swallowed, 04's standing rule.
+     *
+     * Four is inside `combine`'s typed arity, so no `Prefs`-style pairing is needed here.
+     *
+     * The query and the collapse set are **not** here, and neither is which row is open. They are
+     * `ActionsScreen`'s own `rememberSaveable` state, applied on top via `ActionsUiState.withView`
+     * — see that function for why the split is where it is.
      */
     private val actionsState: Flow<ActionsUiState> = open.flatMapLatest { character ->
         if (character == null) {
             flowOf(ActionsUiState(creatureId = creatureId))
         } else {
-            character.actions.map { toActionsUiState(creatureId = creatureId, board = it) }
+            combine(
+                character.actions,
+                character.board,
+                character.usesInFlight,
+                character.canWrite,
+            ) { board, tracker, inFlight, canWrite ->
+                toActionsUiState(
+                    creatureId = creatureId,
+                    board = board,
+                    spellSlots = tracker.slots,
+                    usesInFlight = inFlight,
+                    canWrite = canWrite,
+                )
+            }
         }
     }
 
@@ -638,6 +671,128 @@ class CharacterHomeViewModel @Inject constructor(
      */
     fun setDeathSaves(successes: Int, failures: Int) {
         open.value?.setDeathSaves(successes, failures)
+    }
+
+    // --- FR-28: Use (docs/design/17-use-action.md) ----------------------------------
+
+    /**
+     * The Actions surface's one gesture (17 decisions 3, 4 and 6).
+     *
+     * ### It takes a [UseTarget], not a property id
+     *
+     * That is the third of decision 2's gates and the only one visible from here. A
+     * `useAction(propertyId: String)` on this class would be a seam an unprepared spell could be
+     * pushed through by any caller that had an id — and every caller has an id. A `UseTarget` can
+     * only be obtained from `SpellEntry.useTarget` / `ActionEntry.useTarget`, which return `null`
+     * for a row that fails the gate, so there is no value of the parameter type for a row the app
+     * has refused. `:core:data` re-resolves against the live board anyway (gate two), because a
+     * target built three frames ago is a claim about a sheet that may have moved.
+     *
+     * ### The dialog has already been shown
+     *
+     * Decision 4 requires a confirm before **every** use, free ones included, and this call
+     * assumes it — [rest]'s contract, and `removeItem`'s. The reason is stronger than either: a
+     * use has no inverse *and* posts to the party feed and any configured Discord webhook (probe
+     * U4), so the dialog is the only place the player can decline.
+     *
+     * @param slotId decision 3's upcast choice, from the picker. `null` for an action, a cantrip
+     *   or a ritual cast.
+     */
+    fun use(target: UseTarget, slotId: String? = null, ritual: Boolean = false) {
+        val character = open.value ?: return
+        val dispatched = when (target) {
+            is UseTarget.Action -> character.useAction(target.propertyId)
+            is UseTarget.Spell -> character.castSpell(
+                spellId = target.propertyId,
+                slotId = slotId,
+                ritual = ritual,
+            )
+        }
+        // M3/M4 [architect ruling]: `dispatched` is `false` exactly when `:core:data`'s gate 1
+        // or its single-flight latch dropped the tap — the player confirmed and nothing went
+        // out. That used to return silently; now it surfaces through the existing failure lane
+        // (M3) instead of a bespoke one, and starts no settle-window watch (M4) — there is no
+        // call in flight for [watchForUseError] to watch for.
+        if (!dispatched) {
+            _failureEvents.tryEmit(
+                TrackerEvent.Failed(
+                    TrackerWriteFailure(
+                        id = USE_ERROR_IDS.incrementAndGet(),
+                        kind = if (target is UseTarget.Spell) {
+                            TrackerWriteKind.CAST_SPELL
+                        } else {
+                            TrackerWriteKind.USE_ACTION
+                        },
+                        propertyId = null,
+                        targetName = target.name,
+                        reason = null,
+                        refusedOffline = false,
+                        rateLimited = false,
+                        dropped = true,
+                    ),
+                ),
+            )
+            return
+        }
+        watchForUseError(target)
+    }
+
+    /**
+     * Decision 6's second half — the best-effort look at the feed after a `doAction`.
+     *
+     * ### Why this exists, and why it is honestly labelled best-effort
+     *
+     * `doCastSpell` throws an atomic `Meteor.Error` and needs nothing here: the refusal rides
+     * `writeFailures` to the existing snackbar with the server's `reason` on it. **`doAction`
+     * returns `null` always** (probe U1) — for a success and for every refusal alike — so there
+     * is no error frame to catch and no way to distinguish "used it" from "the server declined
+     * silently". What the server *does* do is append a `creatureLogs` entry named "Error" with
+     * the refusal's text in it, which the FR-25 feed is already carrying for this creature.
+     *
+     * So this reads that feed for a window after the tap and surfaces such an entry as a
+     * snackbar. It is a **look**, not a check, and three things about it are wrong on purpose:
+     *
+     * - it can miss (the log arriving after the window closes);
+     * - it can fire for an error somebody *else* caused on the same creature inside the window
+     *   — attribution is creature-level only, there is no actor field anywhere in the data
+     *   (16 decision 11);
+     * - it proves nothing about a use that produced no log at all.
+     *
+     * The real gate is the client-side one (decision 1). This is the difference between showing
+     * the player a sentence the server wrote and showing them nothing, and decision 6 asks for it
+     * on exactly those terms. Making it *look* authoritative would be the error — hence a plain
+     * snackbar carrying the server's own words, and no claim in the UI that a use "succeeded".
+     *
+     * Entries older than the tap are ignored by timestamp, so an "Error" already sitting in the
+     * feed from ten minutes ago cannot be reported as this tap's.
+     */
+    private fun watchForUseError(target: UseTarget) {
+        if (target !is UseTarget.Action) return
+        val since = System.currentTimeMillis()
+        viewModelScope.launch {
+            withTimeoutOrNull(USE_ERROR_WINDOW_MILLIS) {
+                activityFeedRepository.feed(setOf(creatureId))
+                    .mapNotNull { entries -> entries.firstOrNull { it.isUseErrorSince(since) } }
+                    .first()
+            }?.let { entry ->
+                _failureEvents.emit(
+                    TrackerEvent.Failed(
+                        TrackerWriteFailure(
+                            id = USE_ERROR_IDS.incrementAndGet(),
+                            kind = TrackerWriteKind.USE_ACTION,
+                            // No row shakes. The write was not rolled back — nothing optimistic
+                            // was applied to roll back — and shaking a row would claim the sheet
+                            // had snapped back, which it did not.
+                            propertyId = null,
+                            targetName = target.name,
+                            reason = entry.errorText(),
+                            refusedOffline = false,
+                            rateLimited = false,
+                        ),
+                    ),
+                )
+            }
+        }
     }
 
     // --- inventory tab (docs/design/10-inventory.md) --------------------------------
@@ -1021,6 +1176,40 @@ class CharacterHomeViewModel @Inject constructor(
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch { character.close() }
     }
 
+    /**
+     * Is this feed entry a refusal the server logged *for this tap* (17 decision 6)?
+     *
+     * Two conditions, and both are needed.
+     *
+     * **Named "Error".** `doAction`'s refusals arrive as an ordinary `creatureLogs` document whose
+     * `content[].name` is the word — the only thing distinguishing it from the entry a successful
+     * use also writes. Prefix-matched case-insensitively; see [LOG_ERROR_NAME].
+     *
+     * **Newer than the tap.** Without this every use would report the last error the creature
+     * ever logged, because the feed is a 20-entry window that keeps old rows. `dateMillis` is
+     * `null` on a document the server sent no `date` for, and such an entry is **excluded**: it
+     * cannot be shown to be this tap's, and 16 decision 11's rule for the same field is that an
+     * absent date does not get to claim the top of the feed. Not claiming to be our error is the
+     * same rule one step further.
+     */
+    private fun FeedEntry.isUseErrorSince(since: Long): Boolean {
+        val at = dateMillis ?: return false
+        if (at < since) return false
+        return lines.any { it.name?.trim()?.startsWith(LOG_ERROR_NAME, ignoreCase = true) == true }
+    }
+
+    /**
+     * The server's own words out of a logged refusal — the `value` of the "Error" line.
+     *
+     * `null` when the line carried a heading and no text, which routes the snackbar to its
+     * generic sentence rather than printing "Not saved: ". Paraphrasing the absence would be this
+     * app inventing a reason, which is the one thing decision 6 is careful not to do.
+     */
+    private fun FeedEntry.errorText(): String? = lines
+        .firstOrNull { it.name?.trim()?.startsWith(LOG_ERROR_NAME, ignoreCase = true) == true }
+        ?.value
+        ?.takeIf { it.isNotBlank() }
+
     private val zone: ZoneId get() = ZoneId.systemDefault()
 
     /**
@@ -1056,5 +1245,39 @@ class CharacterHomeViewModel @Inject constructor(
 
     private companion object {
         const val STOP_TIMEOUT_MILLIS = 5_000L
+
+        /**
+         * How long [watchForUseError] watches the feed after a `doAction` (17 decision 6).
+         *
+         * Three seconds, and the number is a trade rather than a measurement. The `creatureLogs`
+         * document is written by the same server pass that ran the action, so it rides the same
+         * fast path the resource fields do (~0.1-0.35 s, probe U3) plus whatever the mirror takes
+         * to deliver it. Long enough to catch that comfortably; short enough that an error the
+         * player caused with a *later* tap cannot still be attributed to this one, which matters
+         * because the feed carries no actor and this window is the only attribution there is.
+         */
+        const val USE_ERROR_WINDOW_MILLIS = 3_000L
+
+        /**
+         * The `content[].name` DiceCloud gives a refusal it logged rather than threw.
+         *
+         * Matched case-insensitively and as a prefix, because the observed shapes are "Error" and
+         * "Error:" and pinning the exact spelling of a server's log heading is the kind of
+         * assertion that breaks silently on their next release. A false positive here costs one
+         * snackbar the player can dismiss; a false negative costs the only signal `doAction` ever
+         * gives (probe U1: it returns null for every refusal).
+         */
+        const val LOG_ERROR_NAME = "error"
+
+        /**
+         * Distinct ids, so two refusals in a row produce two snackbars rather than one.
+         *
+         * [A3] Starts at a billion, not 0: `OpenCharacter.kt`'s own `FAILURE_IDS` is a
+         * SEPARATE `AtomicLong(0)` counting real write failures, and [TrackerWriteFailure.id]
+         * is a Compose key two different counters both starting at 0 would happily collide on
+         * — a real failure and a dropped use minted the same frame could compare equal and
+         * fail to animate twice. Disjoint ranges cost nothing and remove the coincidence.
+         */
+        val USE_ERROR_IDS = java.util.concurrent.atomic.AtomicLong(1_000_000_000L)
     }
 }

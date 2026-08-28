@@ -104,6 +104,12 @@ object ContractFixtures {
     val skillRemovedId: String = fakeId("skill-removed")
     val skillNamelessId: String = fakeId("skill-nameless")
 
+    // FR-28 (docs/design/17-use-action.md decision 9). Ids only: the two Use vectors record a
+    // `method` frame, and a frame carries an id and a slot id and nothing else — no fixture
+    // sheet is needed to build one, unlike the insert/move vectors which resolve a parent.
+    val rageActionId: String = fakeId("action-rage")
+    val fireballSpellId: String = fakeId("spell-fireball")
+
     val goldId: String = fakeId("coin-gold")
     val silverId: String = fakeId("coin-silver")
     val platinumId: String = fakeId("coin-platinum")

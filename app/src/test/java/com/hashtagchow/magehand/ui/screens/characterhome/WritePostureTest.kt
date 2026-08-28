@@ -76,6 +76,17 @@ class WritePostureTest {
         "creatureProperties.softRemove",
         "creatureProperties.restore",
         "organize.organizeDoc",
+        // FR-28's two (docs/design/17-use-action.md decision 7). These are the reason this list
+        // exists at all, more than any entry above it: `doAction` runs a property's whole effect
+        // tree — spending attributes and items, incrementing `usesUsed`, appending to the party
+        // log and posting to a Discord webhook (probe U4) — with ONE method invocation, no
+        // inverse of any kind, and no server-side refusal to fall back on (`doAction` returns
+        // null for every outcome, probe U1). A composable that could name either string could
+        // spend a player's resources and announce it to their table, past the confirm dialog,
+        // past the single-flight latch and past the client-side prepared gate that is the only
+        // gate there is.
+        "creatureProperties.doAction",
+        "creatureProperties.doCastSpell",
         "creature.methods.rest",
         "creatures.insertCreature",
         "creatures.update",
@@ -126,6 +137,28 @@ class WritePostureTest {
         // FR-22 remains zero-new-intents, per decision 9 — its direct entry is an overload of
         // `adjustItem`/`adjustCoins`, which adds no name to this set.
         "setDeathSaves",
+        // FR-28's two, added deliberately per this list's own rule and — like `setDeathSaves` —
+        // **with written authorization**: docs/design/17-use-action.md decision 7 overrides 16
+        // decision 7's "zero new writes" in as many words: "new OpenCharacter intents
+        // `useAction(actionId)` and `castSpell(spellId, slotId?, ritual)` — WritePostureTest's
+        // name AND signature catalogs deliberately extended".
+        //
+        // Neither could have been composed from the entries above it, and the bar is cleared more
+        // clearly here than anywhere else in this list. Every other intent writes A NUMBER TO A
+        // PROPERTY THIS APP CAN NAME — `spend` an increment, `setHitPoints` an absolute,
+        // `adjustItem` a quantity. A use asks the server to run an effect tree whose contents this
+        // app deliberately does not know, precisely so that it never becomes a second
+        // implementation of DiceCloud's rules engine (10 decision 3's grand-total lesson, in write
+        // form). There is no `spend` that could express it: working out what to spend is the thing
+        // being delegated.
+        //
+        // They are still *intents*, not methods. `:app` says "use this action" and says nothing
+        // about `creatureProperties.doAction`, its `targetIds` array, or the fact that one
+        // implementation makes a DDP call and the other does nothing at all (a local character has
+        // no effect trees — `LocalOpenCharacter.useAction`). The first two assertions above prove
+        // that, and they are unchanged except for gaining two more strings to scan for.
+        "useAction",
+        "castSpell",
         "toggle",
         "rest",
         "undoLastWrite",
@@ -167,6 +200,12 @@ class WritePostureTest {
         "removeItem(String,String)",
         "moveItem(String,InventoryMoveTarget,String)",
         "setDeathSaves(int,int)",
+        // FR-28. `useAction` takes the id alone; `castSpell` takes the id plus the player's two
+        // choices — which slot to spend (17 decision 3's upcast picker) and whether to cast it as
+        // a ritual. Neither takes a `WriteOp`, a `parentRef` or anything else from `:core:data`'s
+        // vocabulary; the fifth assertion below re-checks that no `core.ddp` type leaked in.
+        "useAction(String)",
+        "castSpell(String,String,boolean)",
         "toggle(ConditionToggle)",
         "rest(RestKind)",
         "undoLastWrite(Continuation)",

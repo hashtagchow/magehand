@@ -82,6 +82,10 @@ class DefaultOpenCharacterWriteTest {
     /** Named once: it is the string most of the quantity-latch assertions filter on. */
     private val ADJUST = "creatureProperties.adjustQuantity"
 
+    /** FR-28's two, named the same way and for the same reason. */
+    private val DO_ACTION = "creatureProperties.doAction"
+    private val DO_CAST_SPELL = "creatureProperties.doCastSpell"
+
     private lateinit var database: MageHandDatabase
     private lateinit var snapshots: SnapshotStore
     private val scopes = mutableListOf<CoroutineScope>()
@@ -1457,6 +1461,264 @@ class DefaultOpenCharacterWriteTest {
         advanceUntilIdle()
 
         assertEquals(1, h.callsTo("creatureProperties.damage").size)
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-28 — Use (docs/design/17-use-action.md decisions 2, 3, 5 and 6)
+    // -----------------------------------------------------------------------
+
+    private fun action(
+        id: String,
+        name: String,
+        actionType: String = "action",
+        extra: String = "",
+    ) = """{"_id":"$id","type":"action","name":"$name","actionType":"$actionType","order":1$extra}"""
+
+    private fun spell(id: String, name: String, level: Int, extra: String = "") =
+        """{"_id":"$id","type":"spell","name":"$name","level":$level,"order":1$extra}"""
+
+    /**
+     * **THE SINGLE-FLIGHT TRAP** (decision 5): a rapid double-tap is ONE wire call.
+     *
+     * ### How the burst is made, and why it must NOT use the caller's gate
+     *
+     * The two taps are made **back to back with no `advanceUntilIdle` between them**, so nothing
+     * has run in between: no coroutine has been scheduled, the queue's worker has not woken, and
+     * the first call has not reached the fake caller. That is what a rapid double-tap is, and it
+     * is the shape probe U3 turned into three phantom "Spent" log entries.
+     *
+     * Parking the caller on its `gate` instead — the obvious setup, and the one this test was
+     * first written with — proves **nothing**. With a call parked on the wire the queue's own
+     * seriality holds the second entry back, so the wire count is 1 whether the latch exists or
+     * not; the assertion passes against a build with the guard deleted. It was caught by running
+     * exactly that mutation. Seriality is `WriteQueue`'s first guarantee and is pinned in its own
+     * suite; this test is about the latch, so the burst has to reach the queue *unserialized*.
+     *
+     * ### The mutation this catches
+     *
+     * Delete the `claimUse` check-and-set from `DefaultOpenCharacter.useAction` — or replace it
+     * with a `usesInFlight.value` read followed by a write, which is the same bug in two steps —
+     * and this fails with **two** calls where it wants one.
+     *
+     * The server will not help: resource checking is honour-system and unserialized (probe U3),
+     * so both calls would land, both would spend, and both would log to the party's feed.
+     */
+    @Test
+    fun `a rapid double-tap on Use reaches the wire exactly once`() = runTest {
+        val h = harness(action("a1", "Rage", actionType = "bonus"))
+
+        h.character.useAction("a1")
+        h.character.useAction("a1")
+        advanceUntilIdle()
+
+        assertEquals(
+            "the latch must drop the second tap — the server would accept both",
+            1,
+            h.callsTo(DO_ACTION).size,
+        )
+    }
+
+    /**
+     * The same trap on the cast side, so the two intents cannot drift apart.
+     *
+     * `castSpell` has its own `claimUse` call, and a copy-paste that dropped the `if` on one of
+     * them would leave the other perfectly pinned.
+     */
+    @Test
+    fun `a rapid double-tap on Cast reaches the wire exactly once`() = runTest {
+        val h = harness(spell("s1", "Fireball", level = 3, extra = ""","prepared":true"""))
+
+        h.character.castSpell("s1", slotId = "slot-4", ritual = false)
+        h.character.castSpell("s1", slotId = "slot-4", ritual = false)
+        advanceUntilIdle()
+
+        assertEquals(1, h.callsTo(DO_CAST_SPELL).size)
+    }
+
+    /**
+     * The latch also holds across a call that is genuinely outstanding on the wire.
+     *
+     * The gated form, asserted on the thing the gate can actually show: `usesInFlight` still
+     * names the row, so the button is disabled and a third tap would be dropped too. The wire
+     * count is deliberately *not* asserted here — see the double-tap test for why it would prove
+     * nothing while a call is parked.
+     */
+    @Test
+    fun `a use stays in flight while the call is outstanding`() = runTest {
+        val h = harness(action("a1", "Rage", actionType = "bonus"))
+        h.caller.gate = CompletableDeferred()
+
+        h.character.useAction("a1")
+        advanceUntilIdle()
+
+        assertEquals(setOf("a1"), h.character.usesInFlight.value)
+
+        h.caller.gate?.complete(Unit)
+        h.caller.gate = null
+        advanceUntilIdle()
+
+        assertTrue("and releases once the call has settled", h.character.usesInFlight.value.isEmpty())
+    }
+
+    /**
+     * The latch is **per property**, not global.
+     *
+     * Two different features used in quick succession is an ordinary thing to do at a table, and
+     * a global latch would turn the second one into a silently dropped tap.
+     *
+     * The control for the double-tap test above: the identical burst shape, two different ids,
+     * and **two** calls. Without it that test would pass just as happily against a latch that had
+     * become global, or against an implementation that had stopped sending uses at all.
+     */
+    @Test
+    fun `a use of a second action is not blocked by the first`() = runTest {
+        val h = harness(action("a1", "Rage", actionType = "bonus"), action("a2", "Dash"))
+
+        h.character.useAction("a1")
+        h.character.useAction("a2")
+        advanceUntilIdle()
+
+        assertEquals(
+            "the latch is per property — a second row's tap is accepted, not dropped",
+            2,
+            h.callsTo(DO_ACTION).size,
+        )
+    }
+
+    /** The latch releases once the call has settled, so a second, later use goes through. */
+    @Test
+    fun `the latch releases and a later use goes out`() = runTest {
+        val h = harness(action("a1", "Rage", actionType = "bonus"))
+
+        h.character.useAction("a1")
+        advanceUntilIdle()
+        assertTrue("the latch is released after the settle window", h.character.usesInFlight.value.isEmpty())
+
+        h.character.useAction("a1")
+        advanceUntilIdle()
+        assertEquals(2, h.callsTo(DO_ACTION).size)
+    }
+
+    /**
+     * **THE STRUCTURAL GATE, second copy** (decision 2): an unprepared or switched-off row
+     * reaches no wire call *through this seam either*.
+     *
+     * `UseTarget` makes it unreachable from the UI; this makes it unreachable from
+     * `DefaultOpenCharacter`, which is the layer a stale frame or a future caller would come
+     * through. Both gates are needed for the same reason `removeItem` has two: the server does
+     * not check `prepared` and **burns the slot** on an unprepared cast (probe U2), so there is
+     * nothing downstream to catch a call that gets this far.
+     */
+    @Test
+    fun `an unprepared or inactive row sends nothing, whatever the caller asks for`() = runTest {
+        val h = harness(
+            spell("s-unprepared", "Bless", level = 1),
+            spell("s-inactive", "Shield", level = 1, extra = ""","prepared":true,"inactive":true"""),
+            action("a-inactive", "Rage", actionType = "bonus", extra = ""","inactive":true"""),
+        )
+
+        h.character.castSpell("s-unprepared", slotId = null, ritual = false)
+        h.character.castSpell("s-inactive", slotId = null, ritual = false)
+        h.character.useAction("a-inactive")
+        advanceUntilIdle()
+
+        assertTrue("no use may reach the wire from a row the app has gated", h.caller.calls.isEmpty())
+        assertTrue("and nothing is filed in the history either", h.character.writeHistory.value.isEmpty())
+    }
+
+    /**
+     * Decision 6's id validation: a property id that names nothing on the live board is dropped.
+     *
+     * A bogus id is an opaque 500 (probe U3) — a failure with nothing in it a player could act
+     * on, spent against the shared rate budget. Dropping is strictly better than sending.
+     */
+    @Test
+    fun `a use naming an id the board does not carry is dropped`() = runTest {
+        val h = harness(action("a1", "Rage", actionType = "bonus"))
+
+        h.character.useAction("a-does-not-exist")
+        h.character.castSpell("s-does-not-exist", slotId = null, ritual = false)
+        advanceUntilIdle()
+
+        assertTrue(h.caller.calls.isEmpty())
+    }
+
+    /**
+     * Decision 1's gate, enforced below the UI: an exhausted row sends nothing, and it is
+     * exhausted by `uses.value − usesUsed` rather than by the server's `usesLeft`.
+     *
+     * The fixture states them in contradiction on purpose — this is the sheet as it reads for the
+     * 4–10 s after a use, and `usesLeft` still claiming one is left is exactly what a
+     * rollup-gated client would send a second use on.
+     */
+    @Test
+    fun `an exhausted row sends nothing though usesLeft still claims one`() = runTest {
+        val h = harness(
+            action(
+                "a1",
+                "Second Wind",
+                actionType = "bonus",
+                extra = ""","uses":{"calculation":"1","value":1},"usesUsed":1,"usesLeft":1""",
+            ),
+        )
+
+        h.character.useAction("a1")
+        advanceUntilIdle()
+
+        assertTrue(h.caller.calls.isEmpty())
+    }
+
+    /**
+     * Decision 3's wire shape for an upcast, and the journal entry decision 8 asks for.
+     *
+     * The slot is passed **through unexamined** — see `OpenCharacter.castSpell` for why a slot
+     * that emptied under the picker is better refused verbatim by the server than dropped here.
+     */
+    @Test
+    fun `castSpell sends the spell, the chosen slot and the ritual flag`() = runTest {
+        val h = harness(spell("s1", "Fireball", level = 3, extra = ""","prepared":true"""))
+
+        h.character.castSpell("s1", slotId = "slot-4", ritual = false)
+        advanceUntilIdle()
+
+        val call = h.caller.calls.single()
+        assertEquals(DO_CAST_SPELL, call.method)
+        assertEquals("s1", call.text("spellId"))
+        assertEquals("slot-4", call.text("slotId"))
+        assertEquals(false, call.bool("ritual"))
+
+        val entry = h.character.writeHistory.value.single()
+        assertEquals("Fireball", entry.targetName)
+        assertFalse("a use has no inverse, so it offers no UNDO", entry.undoable)
+        assertFalse(h.character.canUndo.value)
+    }
+
+    /** A ritual cast sends **no** `slotId` key at all — the omission is the instruction. */
+    @Test
+    fun `a ritual cast omits the slot key entirely`() = runTest {
+        val h = harness(spell("s1", "Detect Magic", level = 1, extra = ""","prepared":true,"ritual":true"""))
+
+        h.character.castSpell("s1", slotId = null, ritual = true)
+        advanceUntilIdle()
+
+        val call = h.caller.calls.single()
+        assertEquals(true, call.bool("ritual"))
+        assertFalse("`slotId` absent, not null", call.body.containsKey("slotId"))
+    }
+
+    /** `targetIds` is present and empty — v1 does not target, and says so rather than omitting. */
+    @Test
+    fun `a use sends an empty targetIds array`() = runTest {
+        val h = harness(action("a1", "Dash"))
+
+        h.character.useAction("a1")
+        advanceUntilIdle()
+
+        assertEquals(
+            "targeting is out of scope, and an empty array states that",
+            0,
+            (h.caller.calls.single().body["targetIds"] as kotlinx.serialization.json.JsonArray).size,
+        )
     }
 
     /** The `TrackedResource` the direct-entry overload is handed, as the UI would build it. */

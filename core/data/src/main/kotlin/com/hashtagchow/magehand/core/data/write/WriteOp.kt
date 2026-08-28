@@ -113,6 +113,42 @@ sealed class WriteOp {
     /** A barrier stops coalescing dead: a rest rewrites the whole sheet. */
     open val isBarrier: Boolean = false
 
+    /**
+     * Whether the queue may put this op on the wire a **second** time after a
+     * `too-many-requests` (FR-28, docs/design/17-use-action.md decision 5).
+     *
+     * ### Why this lives on the op and not at the call site
+     *
+     * Decision 5 is *"no coalescing, no queue-retry: a Use is never replayed … a replayed use
+     * double-spends"*, and there were three places that rule could have been expressed.
+     *
+     * - **`WriteQueue.submitWithoutReceipt`-adjacent**, i.e. a second `submitNoRetry` entry
+     *   point. Rejected on both halves. It is the wrong *axis*: `submitWithoutReceipt` decides
+     *   whether a write mints a history row and an undo entry, and a Use very much wants one
+     *   (decision 8's "Used Rage — see the activity feed"). And it makes the guarantee a
+     *   property of **who submitted**, so a second caller for the same op — a macro, a
+     *   tracker shortcut, anything a later wave adds — re-opens the hole by calling the wrong
+     *   method, with nothing failing.
+     * - **A branch in the queue on `op is DoAction || op is DoCastSpell`.** Correct today and
+     *   silently wrong the moment a third non-idempotent method is added, which is exactly how
+     *   an enumerated list fails.
+     * - **A property of the op**, here. Non-idempotence is a fact about the *call*, not about
+     *   its caller, so it travels with the call — the same argument [coalesceKey] and
+     *   [isBarrier] already make about two other queue behaviours that could equally have been
+     *   `when`-branches inside the queue.
+     *
+     * ### What it actually guards
+     *
+     * Exactly one line: [WriteQueue.callWithRateLimitRetry]'s single retry. That is the queue's
+     * *only* replay — a socket death is already final for every op (the class KDoc's *"we never
+     * saw its result"*), and the reconnect path replays subscriptions rather than methods. So
+     * one flag closes the whole of it.
+     *
+     * Default `true`, so every op that existed before FR-28 keeps the behaviour it was pinned
+     * with. The two that override it to `false` are [DoAction] and [DoCastSpell].
+     */
+    open val isReplayable: Boolean = true
+
     /** What to show before the server answers, or `null` for ops with no local prediction. */
     open val optimistic: OptimisticChange? = null
 
@@ -753,6 +789,152 @@ sealed class WriteOp {
     }
 
     /**
+     * `creatureProperties.doAction {actionId, targetIds: []}` — the Use button on an action
+     * (FR-28, docs/design/17-use-action.md decision 3).
+     *
+     * ### The server's own machinery, and the four things that follow from that
+     *
+     * This call runs the property's whole effect tree server-side: it spends every
+     * `attributesConsumed` and `itemsConsumed`, increments `usesUsed`, appends a `creatureLogs`
+     * entry and posts to any Discord webhook the sheet is configured with (probe U4). MageHand
+     * computes none of it. That is the feature — a second implementation of "what does Rage
+     * cost" is the grand-total lesson (10 decision 3) in write form — and it is also why the
+     * next four paragraphs are the ones a reader has to keep.
+     *
+     * **Never replayed.** [isReplayable] is `false`. A `too-many-requests` retry would spend
+     * the resources twice, log twice and post to Discord twice, for one tap. See that property
+     * for why the flag lives here rather than at the call site.
+     *
+     * **Never coalesced, and a barrier.** [coalesceKey] is `null`, so two uses can never merge
+     * — there is no arithmetic in which using a feature twice is using it once with a bigger
+     * number. [isBarrier] is `true` for the *other* direction, which is the subtle half: without
+     * it, `takeCoalescedHead` would happily merge a `damage` on some other property across this
+     * op, reordering a slot spend around a call that itself rewrites resources. A rest is a
+     * barrier because it rewrites the whole sheet; a use is a barrier because it rewrites an
+     * unknown part of it, which is strictly less knowable, not more.
+     *
+     * **Not undoable.** [inverse] is `null` — see [TrackerWriteKind.USE_ACTION] for the whole
+     * argument. There is no method that reverses this, and a hand-rolled resource rewind would
+     * leave the log entry and the webhook post standing.
+     *
+     * **No optimistic overlay.** [OptimisticChange]'s vocabulary is one property's value or one
+     * toggle's state; a use moves an unbounded set of properties by amounts only the server
+     * knows. Predicting that is the guesswork 06 refuses. The fast-path fields land in
+     * ~0.1–0.35 s (probe U3) and the single-flight latch holds the button until they do, which
+     * is latency compensation by *waiting* rather than by inventing.
+     *
+     * ### Refusals are silent, and that is the whole of decision 6's first half
+     *
+     * **`doAction` returns `null` ALWAYS** (probe U1) — for a success, for an unprepared spell,
+     * for an exhausted feature, for a resource the character does not have. There is no error
+     * frame to catch, so this op resolving without a `DdpError` means *the call was accepted*
+     * and nothing more. MageHand's client-side gate ([ActionEntry.isUsable]) is therefore the
+     * only real gate there is, and the settle-window log scan is a best-effort second look
+     * rather than a check. A bogus `actionId` is the one exception and it is not an improvement:
+     * an opaque 500 (probe U3), which is why `DefaultOpenCharacter` re-resolves the id against
+     * the live board first.
+     *
+     * ### Rate class
+     *
+     * [ACTION_SPACING_MILLIS] — 10 calls per 5 s, **shared per connection** (probe U3), which is
+     * neither of the two classes that existed before this op. Faster than the 5-per-5 s default
+     * because the server grants it; slower than `damage`'s 20 because it is not `damage`. The
+     * queue spaces per method name, so `doAction` and `doCastSpell` each get their own lane out
+     * of the same server budget — a client-side approximation of a shared bucket that errs
+     * toward sending less, which is the direction to err in.
+     *
+     * @property actionId the property to run. Validated against the live board by the caller.
+     */
+    data class DoAction(
+        val actionId: String,
+        override val targetName: String = "",
+    ) : WriteOp() {
+        override val method: String get() = METHOD_DO_ACTION
+        override val targetId: String get() = actionId
+        override val params: List<JsonElement>
+            get() = listOf(
+                buildJsonObject {
+                    put("actionId", actionId)
+                    // v1 sends NO targets (decision 3: targeting is out of scope). An empty
+                    // array rather than an omitted key: the field is the server's own shape and
+                    // "no targets" is a thing we are saying, not a thing we forgot.
+                    put("targetIds", JsonArray(emptyList()))
+                },
+            )
+        override val minSpacingMillis: Long get() = ACTION_SPACING_MILLIS
+        override val coalesceKey: String? get() = null
+        override val isBarrier: Boolean get() = true
+        override val isReplayable: Boolean get() = false
+        override val optimistic: OptimisticChange? get() = null
+        override val inverse: WriteOp? get() = null
+        override val intent: TrackerWriteKind get() = TrackerWriteKind.USE_ACTION
+        override val magnitude: Int get() = 1
+
+        override val description: String get() = "doAction $actionId"
+    }
+
+    /**
+     * `creatureProperties.doCastSpell {spellId, slotId?, ritual, targetIds: []}` — the Use button
+     * on a spell (FR-28, docs/design/17-use-action.md decision 3).
+     *
+     * [DoAction]'s twin, and everything on that type applies here — never replayed, never
+     * coalesced, a barrier, no inverse, no overlay, the same rate class. Two differences, both
+     * load-bearing.
+     *
+     * ### It throws, where `doAction` returns null
+     *
+     * Decision 6, probe U2: **`doCastSpell` raises an atomic `Meteor.Error` before any write**
+     * for a slot that is depleted, too small, or absent. So a refusal here arrives as a real
+     * [DdpError] with a `reason`, reaches `WriteQueue.failures` like any other rolled-back write,
+     * and is surfaced **verbatim** — the server's sentence about the player's own slots is more
+     * use to them than anything this app could paraphrase. The asymmetry between the two methods
+     * is not a MageHand choice; it is what the server does, and it is why decision 6 is called
+     * "refusal surfacing, **split by method**".
+     *
+     * ### The slot is chosen by the client, and it is chosen from live rows
+     *
+     * [slotId] comes from `spellSlotOptions`, which offers only slots of a high enough level with
+     * charges left. Sending `null` means "no slot" — a cantrip, or a ritual cast. The server
+     * refuses an omitted slotId atomically ("Slot not found to cast spell" - live-verified 2026-08-28, sweep U6; an earlier auto-pick claim here was wrong), and naming one is exactly the upcast decision a
+     * player wants to make for themselves.
+     *
+     * @property ritual sent as the server's own flag. `true` casts without consuming a slot; the
+     *   checkbox that sets it is required by decision 3 to say so in words, because "ritual" on
+     *   its own does not tell a player what it will cost them.
+     */
+    data class DoCastSpell(
+        val spellId: String,
+        val slotId: String? = null,
+        val ritual: Boolean = false,
+        override val targetName: String = "",
+    ) : WriteOp() {
+        override val method: String get() = METHOD_DO_CAST_SPELL
+        override val targetId: String get() = spellId
+        override val params: List<JsonElement>
+            get() = listOf(
+                buildJsonObject {
+                    put("spellId", spellId)
+                    // Omitted rather than sent as JSON null when there is no slot: an absent key
+                    // is "the client is not choosing", which is the shape every optional
+                    // parameter in this app's catalog takes (see `insertItem`'s weight/value).
+                    slotId?.let { put("slotId", it) }
+                    put("ritual", ritual)
+                    put("targetIds", JsonArray(emptyList()))
+                },
+            )
+        override val minSpacingMillis: Long get() = ACTION_SPACING_MILLIS
+        override val coalesceKey: String? get() = null
+        override val isBarrier: Boolean get() = true
+        override val isReplayable: Boolean get() = false
+        override val optimistic: OptimisticChange? get() = null
+        override val inverse: WriteOp? get() = null
+        override val intent: TrackerWriteKind get() = TrackerWriteKind.CAST_SPELL
+        override val magnitude: Int get() = 1
+
+        override val description: String get() = "doCastSpell $spellId"
+    }
+
+    /**
      * The result of coalescing a pair of ops that cancel out (two flips of one toggle, or
      * increments summing to zero). Never sent; the queue drops it and completes its
      * callers successfully, because "nothing needed to change" is a success.
@@ -778,6 +960,27 @@ sealed class WriteOp {
 
         /** `adjustQuantity`, `rest`, `flipToggle`, `update` are 5 / 5 s → 1 s apart. */
         const val SLOW_SPACING_MILLIS: Long = 1_000
+
+        /**
+         * `doAction` / `doCastSpell` are 10 / 5 s → 500 ms apart (FR-28, probe U3).
+         *
+         * The third rate class, and the first one this app learned from a probe rather than
+         * from design 02's table. The server's budget is **shared across both methods on one
+         * connection**; the queue gates per method name, so in the worst case — alternating a
+         * use and a cast as fast as the UI allows — the two lanes together could put 20 calls
+         * in a window against a budget of 10. That worst case is not reachable: decision 5's
+         * single-flight allows one use at a time per row and holds it through a confirm dialog
+         * and a settle window, so the interaction that would produce it does not exist. Stated
+         * rather than engineered around, because the alternative is a cross-method gate the
+         * queue has no vocabulary for, added to defend against a gesture nobody can make.
+         */
+        const val ACTION_SPACING_MILLIS: Long = 500
+
+        /** `creatureProperties.doAction` — see [DoAction]. */
+        const val METHOD_DO_ACTION: String = "creatureProperties.doAction"
+
+        /** `creatureProperties.doCastSpell` — see [DoCastSpell]. */
+        const val METHOD_DO_CAST_SPELL: String = "creatureProperties.doCastSpell"
 
         private fun idOperationValue(id: String, operation: WriteOperation, value: Int): JsonObject =
             buildJsonObject {
@@ -1066,6 +1269,34 @@ sealed class WriteOp {
 
         /** The DDP collection name a `parentRef` names when the parent is a property. */
         const val COLLECTION_CREATURE_PROPERTIES: String = "creatureProperties"
+
+        /**
+         * Use an action (17 decision 3).
+         *
+         * No "current state" to capture, unlike the value factories: a use is not an increment
+         * against a number this app knows, it is a request for the server to run a tree. There
+         * is nothing to build an inverse from and [DoAction] declares it has none.
+         */
+        fun useAction(actionId: String, targetName: String = ""): WriteOp =
+            DoAction(actionId = actionId, targetName = targetName)
+
+        /**
+         * Cast a spell (17 decision 3).
+         *
+         * @param slotId the slot the player chose, from `spellSlotOptions`. `null` for a cantrip
+         *   or a ritual cast — see [DoCastSpell] for why an absent key beats a JSON null.
+         */
+        fun castSpell(
+            spellId: String,
+            slotId: String? = null,
+            ritual: Boolean = false,
+            targetName: String = "",
+        ): WriteOp = DoCastSpell(
+            spellId = spellId,
+            slotId = slotId,
+            ritual = ritual,
+            targetName = targetName,
+        )
 
         fun rest(creatureId: String, restType: RestType): WriteOp = Rest(creatureId, restType)
 

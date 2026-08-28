@@ -63,8 +63,17 @@ android {
         // 18 / 1.9.1 carries FR-27 (configurable pane/tab order) and BUG-4 (phone tab labels
         // wrapping mid-word). The FR row names the pair, so the bump belongs with the build
         // rather than with the upload — see the comment above.
-        versionCode = 18
-        versionName = "1.9.1"
+        // 19 / 1.10.0 carries FR-28 (docs/design/17-use-action.md): the action detail sheet and
+        // the Use gesture — the first writes this app makes through DiceCloud's own effect
+        // machinery, and the first two DDP methods added since FR-9. A MINOR bump rather than a
+        // patch because the surface gains a capability, and because it bumps the vendored
+        // contract to schema 6 (two new method vectors, a third rate class, four probe quirks) —
+        // WebHand pins on that number. **DEPLOY IS HELD** for the operator's word per the
+        // design's own operator scope; the bump belongs with the build regardless, because
+        // `exportContract` re-runs at every version bump (16 addendum, L5) and the export in this
+        // tree is the one this version produced.
+        versionCode = 19
+        versionName = "1.10.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

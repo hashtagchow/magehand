@@ -124,8 +124,24 @@ object ContractExport {
      * exclusion itself is unchanged and still required; only its stated reason is corrected, and
      * `#discovery.spellSlots.exclusionCorrection` carries the correction in the document a
      * consumer is already reading.
+     *
+     * **6** — FR-28's Use (`ddp/method-vectors.json`'s `doAction.*` / `doCastSpell.*` vectors and
+     * the `use` block, plus a **third rate class** in `ddp/rate-limits.json`). Like 4 and 5 this
+     * is a bump rather than a quiet addition because something already exported is now
+     * insufficient: `rate-limits.json` held exactly two classes, `damage` and `default`, and a
+     * consumer that read it as "250 ms if it is damage, otherwise 1 s" — which is the only reading
+     * two classes support, and is what MageHand's own emitter did — will space `doAction` at
+     * 1 s and quietly halve its throughput, or worse, port the rule and never notice the server
+     * grants 10 per 5 s. The class list is the same shape it always was; what changed is that a
+     * binary reading of it is now wrong.
+     *
+     * The four quirks are the point of the bump, though. `doAction` **returns null for every
+     * outcome**, the server **does not check `prepared`** and burns the slot, resource checking is
+     * **honour-system**, and `usesLeft`/`insufficientResources` **lag 4–10 s**. Each of those is a
+     * bug a second client ships before it learns — the way MageHand learned `description` must be
+     * an object — and three of them are silent. See `#use` in `ddp/method-vectors.json`.
      */
-    const val SCHEMA_VERSION: Int = 5
+    const val SCHEMA_VERSION: Int = 6
 
     /** Where the export lives, relative to the repository root. */
     const val DIRECTORY: String = "contract-export"
@@ -882,6 +898,27 @@ object ContractExport {
                 )
                 add(
                     rateClass(
+                        name = "action",
+                        callsPerWindow = 10,
+                        spacingMillis = WriteOp.ACTION_SPACING_MILLIS,
+                        methods = listOf(
+                            WriteOp.METHOD_DO_ACTION,
+                            WriteOp.METHOD_DO_CAST_SPELL,
+                        ),
+                        note = "FR-28's class, and the first one this app learned from a probe " +
+                            "rather than from a documented table. The budget is SHARED ACROSS " +
+                            "BOTH METHODS on one connection, which the per-method-name spacing " +
+                            "rule below cannot express: two lanes at 500 ms could in principle " +
+                            "put 20 calls in a 5 s window against a budget of 10. MageHand does " +
+                            "not reach that, because a use is single-flighted per row and sits " +
+                            "behind a confirm dialog, so the gesture that would produce it does " +
+                            "not exist. A consumer with a different interaction model — a macro " +
+                            "bar, an auto-use — should gate these two together rather than " +
+                            "porting the two lanes.",
+                    ),
+                )
+                add(
+                    rateClass(
                         name = "default",
                         callsPerWindow = 5,
                         spacingMillis = WriteOp.SLOW_SPACING_MILLIS,
@@ -896,10 +933,20 @@ object ContractExport {
                             "organize.organizeDoc",
                             "creature.methods.rest",
                         ),
-                        note = "Everything that is not damage.",
+                        note = "Everything that is neither damage nor an action.",
                     ),
                 )
             },
+        )
+        put(
+            "readingRule",
+            "Match a method against the `methods` list of each class; do NOT infer the class " +
+                "from a two-way test. Until schema 6 there were exactly two classes, so " +
+                "\"250 ms if it is `creatureProperties.damage`, otherwise 1 s\" was a correct " +
+                "reading — and it is now wrong for `doAction`/`doCastSpell`, silently, by a " +
+                "factor of two in the safe direction and by a factor of two the other way if " +
+                "the fallback is guessed at instead. MageHand's own exporter made exactly that " +
+                "mistake and the schema-6 wave fixed it here.",
         )
         put(
             "clientRules",
@@ -935,6 +982,35 @@ object ContractExport {
     }
 
     private const val RATE_WINDOW_MILLIS = 5_000L
+
+    /**
+     * A spacing → the rate class that enforces it, for a vector's `rateClass` label.
+     *
+     * ### This function is the schema-6 correction, in one place
+     *
+     * It used to be `if (spacing == DAMAGE_SPACING) "damage" else "default"` — a two-way test,
+     * correct for as long as there were exactly two classes, and **silently wrong the instant a
+     * third arrived**: FR-28's `doAction` spaces at 500 ms and the old expression labelled it
+     * `default`, a class whose own `minSpacingMillis` the same document states as 1000. A vector
+     * disagreeing with the table it names is the shape of drift a golden pin cannot catch,
+     * because both halves regenerate together and agree with the code that produced them.
+     *
+     * So it is a **lookup over the classes themselves**, and `error` rather than a fallback: a
+     * fourth spacing with no class behind it fails the export rather than being filed under
+     * whichever label the `else` branch happened to name. `ContractExportTest` asserts the
+     * reverse direction as well — every vector's `rateClass` names a class whose spacing matches
+     * the vector's — so the two documents cannot drift apart in either direction.
+     */
+    private fun rateClassNameFor(spacingMillis: Long): String = when (spacingMillis) {
+        WriteOp.DAMAGE_SPACING_MILLIS -> "damage"
+        WriteOp.ACTION_SPACING_MILLIS -> "action"
+        WriteOp.SLOW_SPACING_MILLIS -> "default"
+        else -> error(
+            "a WriteOp spaces at ${spacingMillis}ms, which no rate class in rateLimits() " +
+                "declares. Add the class (with its probed calls-per-window) rather than " +
+                "labelling the vector with a class it does not belong to.",
+        )
+    }
 
     private fun rateClass(
         name: String,
@@ -1385,6 +1461,85 @@ object ContractExport {
             ),
 
             // --- creature.methods.rest -------------------------------------------------
+            // --- FR-28 Use (docs/design/17-use-action.md decisions 3 and 9) ----------
+            Vector(
+                name = "doAction.useAction",
+                op = WriteOp.useAction(ContractFixtures.rageActionId, targetName = "Rage"),
+                note = "Use an action. The server runs the property's WHOLE effect tree: it " +
+                    "spends every `attributesConsumed` and `itemsConsumed`, increments " +
+                    "`usesUsed`, appends a `creatureLogs` entry and posts to any Discord webhook " +
+                    "the sheet is configured with. A client computes none of that — which is the " +
+                    "feature, and the reason `targetIds` is the only other parameter. It is sent " +
+                    "EMPTY here: targeting is out of MageHand v1's scope, and an empty array is " +
+                    "a thing being said rather than a key forgotten.",
+                quirk = "TWO probe-established traps in one call, and both are SILENT.\n\n" +
+                    "(1) `doAction` RETURNS NULL ALWAYS (probe U1). Null for a success, null for " +
+                    "an unprepared spell, null for an exhausted feature, null for a resource the " +
+                    "character does not have. There is no error frame to catch, so a resolved " +
+                    "call means the server ACCEPTED it and nothing more — a client cannot " +
+                    "distinguish 'used' from 'silently declined' from the reply. What the server " +
+                    "does do is append a `creatureLogs` entry named 'Error' with the refusal's " +
+                    "text; MageHand watches the feed for one for 3 s after the tap and surfaces " +
+                    "it, best-effort. Best-effort is the honest word: it can miss, and the feed " +
+                    "carries no actor, so an error another client caused on the same creature " +
+                    "inside the window is indistinguishable from ours.\n\n" +
+                    "(2) RESOURCE CHECKING IS HONOUR-SYSTEM (probe U3). A burst of three calls " +
+                    "against a ONE-use ability produced three 'Spent' log entries and three " +
+                    "resource decrements. The server does not serialize them and does not refuse " +
+                    "the second. A client MUST single-flight its own uses — MageHand holds a " +
+                    "per-property latch from tap until the call resolves and the fast-path " +
+                    "fields land — and MUST NOT retry: a replayed use double-spends, so a " +
+                    "`too-many-requests` on this method is final rather than retried once (which " +
+                    "is what every other method here does). See `#use.neverReplay`.\n\n" +
+                    "A BOGUS `actionId` is the one thing that does raise, and it raises an " +
+                    "opaque 500 with nothing in it a player could act on. Validate ids against " +
+                    "the live board before calling.",
+            ),
+            Vector(
+                name = "doCastSpell.upcast",
+                op = WriteOp.castSpell(
+                    spellId = ContractFixtures.fireballSpellId,
+                    slotId = ContractFixtures.spellSlotL2Id,
+                    ritual = false,
+                    targetName = "Fireball",
+                ),
+                note = "Cast a spell, upcast into a chosen slot. `slotId` is the CLIENT's " +
+                    "choice: an omitted key is refused atomically ('Slot not found to cast spell', live-verified sweep U6 2026-08-28 - an earlier note here claimed auto-pick and was WRONG), and which " +
+                    "slot to burn is exactly the decision a player wants to make. MageHand " +
+                    "derives the offered set client-side — slots whose `spellSlotLevel` is at " +
+                    "least the spell's level and whose remaining count is above zero, read off " +
+                    "the same `total`/`damage` pair every pip in the app is drawn from — so the " +
+                    "picker and the slot row can never disagree.",
+                quirk = "IT THROWS, WHERE `doAction` RETURNS NULL (probe U2). `doCastSpell` " +
+                    "raises an ATOMIC `Meteor.Error` BEFORE ANY WRITE for a slot that is " +
+                    "depleted, too small or absent, so a refusal arrives as a real error with a " +
+                    "`reason` a client should surface VERBATIM — it is the server's own sentence " +
+                    "about the player's own slots. Do not build one refusal path for both " +
+                    "methods: half of the pair reports nothing.\n\n" +
+                    "THE SERVER DOES NOT CHECK `prepared`. It casts an unprepared spell, casts " +
+                    "one whose `inactive` is true, and BURNS THE SLOT doing it — the atomicity " +
+                    "above covers the slot's validity and nothing else. So the prepared/active " +
+                    "gate is the CLIENT's, and it is the only one that exists. MageHand makes it " +
+                    "structural: a spell with `!prepared && !alwaysPrepared`, or with " +
+                    "`inactive: true`, has no Use control at all rather than a disabled one, and " +
+                    "the type its UI needs cannot be constructed for such a row.",
+            ),
+            Vector(
+                name = "doCastSpell.ritual",
+                op = WriteOp.castSpell(
+                    spellId = ContractFixtures.fireballSpellId,
+                    slotId = null,
+                    ritual = true,
+                    targetName = "Fireball",
+                ),
+                note = "The same spell as a ritual: `ritual: true` and NO `slotId` key at all. " +
+                    "The omission is the instruction — a ritual consumes no slot, so sending one " +
+                    "alongside `ritual: true` would be asking the server to reconcile two " +
+                    "contradictory statements. Compare the vector above, where the key is " +
+                    "present. A client offering a ritual checkbox should say in words that it " +
+                    "spends no slot; 'ritual' is a rules term that does not answer the question " +
+                    "the player is actually asking.",
+            ),
             Vector(
                 name = "rest.short",
                 op = WriteOp.rest(ContractFixtures.creatureId, RestType.SHORT_REST),
@@ -1445,6 +1600,7 @@ object ContractExport {
             },
         )
         put("deathSaveClear", deathSaveClearRule())
+        put("use", useRule())
         put(
             "documentedNotCalled",
             buildJsonArray {
@@ -1532,13 +1688,118 @@ object ContractExport {
         )
     }
 
+    /**
+     * FR-28's four traps, as the block a porting client has to read before wiring a Use button
+     * (docs/design/17-use-action.md decision 9).
+     *
+     * The vectors above give the frames. Not one of these four facts is expressible in a frame:
+     * they are about what the server does *not* do — not report, not check, not serialize, not
+     * recompute promptly — and an absence has no wire shape. Each one is a bug a second client
+     * ships and then debugs, which is what this whole export exists to prevent.
+     *
+     * Stated (`generated: false`) because they are probe observations rather than values read
+     * off a production constant. The behaviour they demand of a client IS pinned in code, and
+     * `ContractExportTest` asserts the pairing: `neverReplay` against `WriteOp.isReplayable`,
+     * `rateClass` against the exported table.
+     */
+    private fun useRule(): JsonObject = buildJsonObject {
+        put("generated", false)
+        put("methods", JsonArray(listOf(WriteOp.METHOD_DO_ACTION, WriteOp.METHOD_DO_CAST_SPELL).map { JsonPrimitive(it) }))
+        put(
+            "purpose",
+            "Everything about `doAction`/`doCastSpell` that a `method` frame cannot carry. All " +
+                "four items below are things the server does NOT do, established by live probe " +
+                "on 2026-08-25; three of the four fail silently, which is why they are here " +
+                "rather than left to be discovered.",
+        )
+        put(
+            "trap.nullReturnRefusals",
+            "`doAction` RETURNS NULL FOR EVERY OUTCOME — success, unprepared, exhausted, " +
+                "unaffordable, all null. A resolved call proves the server accepted the frame " +
+                "and nothing else. `doCastSpell` is the opposite: it raises an ATOMIC " +
+                "`Meteor.Error` before any write when the named slot is depleted, too small or " +
+                "absent, with a `reason` worth surfacing verbatim. Build the refusal path " +
+                "SPLIT BY METHOD; a single shared path is either half-deaf or half-imaginary. " +
+                "A refused `doAction` does leave a `creatureLogs` entry named 'Error'; watching " +
+                "the feed for one after a tap is BEST-EFFORT (it can miss, and the log carries " +
+                "no actor, so a concurrent error on the same creature is indistinguishable).",
+        )
+        put(
+            "trap.preparedUnchecked",
+            "THE SERVER DOES NOT CHECK `prepared`. `doCastSpell` on a spell with " +
+                "`!prepared && !alwaysPrepared`, or with `inactive: true`, casts it and BURNS " +
+                "THE SLOT. The atomic refusal above covers the slot's validity only. So the " +
+                "prepared/active gate is the CLIENT's and is the only one that exists — make it " +
+                "structural rather than a condition somebody has to remember. MageHand omits " +
+                "the Use control entirely on such a row (absent, not disabled) and the type its " +
+                "UI needs cannot be built for one.",
+        )
+        put(
+            "trap.honorSystemResources",
+            "RESOURCE CHECKING IS HONOUR-SYSTEM AND UNSERIALIZED. Three rapid `doAction` calls " +
+                "against a ONE-use ability all landed: three log entries, three decrements, no " +
+                "refusal. The server neither queues them nor rejects the second. Single-flight " +
+                "per property on the client — MageHand holds a latch from tap until the call " +
+                "resolves and the fast-path fields land — and confirm before every use. There " +
+                "is no server-side backstop to fall through to.",
+        )
+        put(
+            "trap.usesLeftLag",
+            "`usesLeft`, `insufficientResources` and each consumed resource's `available` are " +
+                "ROLLUPS on a DEBOUNCED recompute that trails the write by 4-10 s. They MUST " +
+                "NOT gate a Use. Derive usability from the fields the server writes " +
+                "synchronously: `uses.value - usesUsed` for charges, a consumed attribute's own " +
+                "`value`, a consumed item's own `quantity` — all of which land in ~0.1-0.35 s. " +
+                "BOTH directions matter and only one looks dangerous: a stale " +
+                "`insufficientResources: true` must not block a use the client can see is " +
+                "funded, and a stale `false` must not permit one it can see is not. The first is " +
+                "the one somebody deletes while tidying.",
+        )
+        put(
+            "neverReplay",
+            "A use is NEVER REPLAYED — not on a socket death (which is already true of every " +
+                "method here) and not after a `too-many-requests`, which every OTHER method in " +
+                "this export retries once. A replayed use spends the resources twice, logs " +
+                "twice and posts to Discord twice. 'Did not happen' beats 'happened, possibly " +
+                "twice' for a call with side effects outside the sheet. (MageHand: " +
+                "`WriteOp.isReplayable`, read by the queue's one retry branch.)",
+        )
+        put(
+            "noInverse",
+            "There is NO undo. No method reverses a use, and rewinding the resources by hand " +
+                "would leave the party-log entry and the Discord post standing — a worse lie " +
+                "than no undo, because the sheet would then disagree with the table's feed. " +
+                "Confirm before, rather than offer an undo after; this is `creature.methods.rest`'s " +
+                "posture, one step stronger.",
+        )
+        put(
+            "sideEffects",
+            "A use APPENDS TO THE PARTY'S ACTIVITY LOG AND POSTS TO ANY CONFIGURED DISCORD " +
+                "WEBHOOK. That is not a MageHand feature and is not manageable from a client; " +
+                "it is a consequence a player is entitled to know about before they tap, and it " +
+                "is why the confirm dialog is shown even for a use that spends nothing.",
+        )
+        put(
+            "rateClass",
+            "`action` in ddp/rate-limits.json — 10 calls per 5 s, SHARED ACROSS BOTH METHODS on " +
+                "one connection. The per-method-name spacing rule the rest of this export uses " +
+                "cannot express a shared budget; see that class's note.",
+        )
+        put(
+            "targeting",
+            "`targetIds` is sent as an EMPTY ARRAY. MageHand v1 does not target; the key is " +
+                "present so that 'no targets' is stated rather than omitted. A consumer that " +
+                "implements targeting fills this array and changes nothing else about the call.",
+        )
+    }
+
     private fun vectorDocument(vector: Vector, frame: JsonObject): JsonObject = buildJsonObject {
         put("name", vector.name)
         put("method", vector.op.method)
         put("generated", true)
         put("frame", frame)
         put("minSpacingMillis", vector.op.minSpacingMillis)
-        put("rateClass", if (vector.op.minSpacingMillis == WriteOp.DAMAGE_SPACING_MILLIS) "damage" else "default")
+        put("rateClass", rateClassNameFor(vector.op.minSpacingMillis))
         put("coalesceKey", vector.op.coalesceKey?.let { JsonPrimitive(coalesceShape(it)) } ?: JsonNull)
         put("isBarrier", vector.op.isBarrier)
         put("undoable", vector.op.inverse != null)
@@ -2797,7 +3058,11 @@ object ContractExport {
         appendLine("| `ddp/timings.json` | Every timeout, heartbeat interval, pong deadline, reconnect-backoff step and re-subscribe spacing the client runs on. |")
         appendLine("| `ddp/subscriptions.json` | The two publications used, with recorded `sub` frames. |")
         appendLine("| `ddp/rate-limits.json` | The server's rate-limit classes and the client rules that stay inside them. |")
-        appendLine("| `ddp/method-vectors.json` | One canonical method frame per catalogued call, plus its inverse and its rate class. |")
+        appendLine(
+            "| `ddp/method-vectors.json` | One canonical method frame per catalogued call, plus " +
+                "its inverse and its rate class. Schema 6's `#use` block covers `doAction`/" +
+                "`doCastSpell`'s four traps. |",
+        )
         appendLine(
             "| `domain/rules.json` | Discovery (tracker rows, rolls AND death saves), " +
                 "soft-delete, equippability, carry capacity, wallet, quantity and write " +
@@ -2867,6 +3132,28 @@ object ContractExport {
         appendLine()
         appendLine("Every exported `trackerBoard` now carries a `deathSaves` key (null on a sheet")
         appendLine("without the pair), so a consumer diffing boards against this export must expect it.")
+        appendLine()
+        appendLine("## New in schema 6 — FR-28's Use, and a rate class you cannot infer")
+        appendLine()
+        appendLine("`ddp/method-vectors.json` gains `doAction.*`/`doCastSpell.*` vectors and a `#use`")
+        appendLine("block; `ddp/rate-limits.json` gains a THIRD class, `action`, alongside `damage` and")
+        appendLine("`default`. The third class is why this is a bump: a consumer that read two classes")
+        appendLine("as \"250 ms if `creatureProperties.damage`, otherwise 1 s\" — the only reading two")
+        appendLine("classes support, and what MageHand's own emitter did — spaces `doAction`/")
+        appendLine("`doCastSpell` at 1 s and quietly halves the 10-per-5-s throughput the server")
+        appendLine("actually grants, shared across both methods on one connection. Match a method")
+        appendLine("against each class's `methods` list; never infer the class from a two-way test.")
+        appendLine()
+        appendLine("The `#use` block carries four traps, none expressible in a `method` frame because")
+        appendLine("each is about something the server does NOT do. In brief: `doAction` returns `null`")
+        appendLine("for every outcome, success and refusal alike, so a resolved call proves only that")
+        appendLine("the frame was accepted — `doCastSpell` is the opposite and throws an atomic error")
+        appendLine("with a usable `reason`, so build the refusal path split by method. The server does")
+        appendLine("not check `prepared` and will burn a spell slot on an unprepared cast. Resource")
+        appendLine("checking is honour-system and unserialized — three rapid calls against a one-use")
+        appendLine("ability all land — so single-flight belongs on the client; there is no server-side")
+        appendLine("backstop. And `usesLeft`/`insufficientResources` lag the write by 4-10 s and must")
+        appendLine("not gate a Use in either direction. Read `#use` in full before wiring a Use button.")
         appendLine()
         appendLine("Fields named `quirk` mark behaviour established by a **live probe** against a running")
         appendLine("server, usually after shipping the obvious reading and watching it fail. Those are the")
