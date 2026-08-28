@@ -21,8 +21,8 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * FR-17's per-character pane choice (docs/design/14-large-screen-arc.md decision 8), against a
- * **real** DataStore on a real file.
+ * FR-17's per-character pane choice (docs/design/14-large-screen-arc.md decision 8) and FR-27's
+ * per-character *order* over it, against a **real** DataStore on a real file.
  *
  * ### Why not a fake
  *
@@ -79,54 +79,94 @@ class PaneLayoutStoreTest {
 
     private val key = PaneLayoutStore.serverKey("acct-1", "creature-1")
 
+    /** An entry that is in the order *and* open — the only shape any pre-FR-27 value had. */
+    private fun open(surface: PaneSurface) = PaneLayoutEntry(surface, selected = true)
+
     // ---- the default ---------------------------------------------------------
 
     @Test
     fun `a character nobody has arranged has no preference`() = withStore(prefsFile()) { store ->
-        // The empty set is decision 8's "Default: Tracker only" — expressed as *absence*, not as
-        // a stored Tracker. The UI resolves it; this store must not pre-empt that, or every
-        // release that changed the default would leave old characters on the old one.
-        assertEquals(emptySet<PaneSurface>(), store.panes(key).first())
+        // The empty list is decision 8's "Default: Tracker only" plus FR-27's default order —
+        // expressed as *absence*, not as a stored arrangement. The UI resolves it; this store
+        // must not pre-empt that, or every release that changed either default would leave old
+        // characters on the old one.
+        assertEquals(emptyList<PaneLayoutEntry>(), store.panes(key).first())
     }
 
     // ---- persistence ---------------------------------------------------------
 
     @Test
-    fun `a chosen set survives the store being torn down and reopened`() {
+    fun `a chosen arrangement survives the store being torn down and reopened`() {
         val file = prefsFile()
         withStore(file) { store ->
-            store.setPanes(key, setOf(PaneSurface.TRACKER, PaneSurface.SHEET))
+            store.setPanes(key, listOf(open(PaneSurface.TRACKER), open(PaneSurface.SHEET)))
         }
 
         // A second store over the same file: the only shape in which "persisted" is asserted
         // rather than assumed, and the only one that exercises the codec in both directions.
         val restored = withStore(file) { store -> store.panes(key).first() }
 
-        assertEquals(setOf(PaneSurface.TRACKER, PaneSurface.SHEET), restored)
+        assertEquals(listOf(open(PaneSurface.TRACKER), open(PaneSurface.SHEET)), restored)
     }
 
     @Test
-    fun `selection order is not stored, so two writers of one set agree`() {
+    fun `the order the player chose is what comes back, not the declaration order`() {
+        // FR-27 decision 1, and the whole of what the file gained. Before it, this arrangement
+        // and its reverse were the same two bytes; the assertion below would have failed on the
+        // *order*, which is exactly the fact that used to be discarded at the codec.
         val file = prefsFile()
-        val other = PaneLayoutStore.serverKey("acct-1", "creature-2")
+        val backwards = listOf(open(PaneSurface.SHEET), open(PaneSurface.TRACKER))
+        withStore(file) { store -> store.setPanes(key, backwards) }
 
-        withStore(file) { store ->
-            // Same set, opposite insertion order. Decision 6: "panes are places, not history" —
-            // if selection order reached the file, these two would produce different bytes and a
-            // later `encode(decode(s))` would not be stable.
-            store.setPanes(key, linkedSetOf(PaneSurface.SHEET, PaneSurface.TRACKER))
-            store.setPanes(other, linkedSetOf(PaneSurface.TRACKER, PaneSurface.SHEET))
-        }
+        assertEquals(backwards, withStore(file) { it.panes(key).first() })
+        assertEquals("sheet,tracker", PaneLayoutCodec.encode(backwards))
+    }
 
-        val (a, b) = withStore(file) { store ->
-            store.panes(key).first() to store.panes(other).first()
-        }
-        assertEquals(a, b)
-        assertEquals(
-            "the encoding is canonical, in PaneSurface ordinal order",
-            "tracker,sheet",
-            PaneLayoutCodec.encode(linkedSetOf(PaneSurface.SHEET, PaneSurface.TRACKER)),
+    @Test
+    fun `a surface can hold a position without being open as a pane`() {
+        // FR-27's other half. A phone player who reorders their tab row writes positions for
+        // surfaces the pane picker has not ticked, and those must not come back ticked — see
+        // `PaneLayoutEntry`. The mark is what carries it.
+        val file = prefsFile()
+        val arrangement = listOf(
+            open(PaneSurface.TRACKER),
+            PaneLayoutEntry(PaneSurface.SHEET, selected = false),
+            PaneLayoutEntry(PaneSurface.INVENTORY, selected = false),
         )
+        withStore(file) { store -> store.setPanes(key, arrangement) }
+
+        assertEquals(arrangement, withStore(file) { it.panes(key).first() })
+        assertEquals("tracker,!sheet,!inventory", PaneLayoutCodec.encode(arrangement))
+    }
+
+    @Test
+    fun `an unmarked value written by 1_9_0 still means what it meant`() {
+        // The migration that is not needed, asserted rather than argued. `tracker,sheet` is the
+        // only shape any released build ever wrote; it has to decode to those two surfaces, in
+        // that order, both open. If this ever fails, somebody has silently reset every player's
+        // panes.
+        val file = prefsFile()
+        writeRaw(file, key, "tracker,sheet")
+
+        assertEquals(
+            listOf(open(PaneSurface.TRACKER), open(PaneSurface.SHEET)),
+            withStore(file) { it.panes(key).first() },
+        )
+    }
+
+    @Test
+    fun `encode and decode round-trip byte-stably`() {
+        // Two writers of one arrangement must produce one string, or a `dataStore.edit` that
+        // changes nothing still writes a new file. `!` is emitted in exactly one spelling.
+        val arrangement = listOf(
+            PaneLayoutEntry(PaneSurface.ACTIONS, selected = false),
+            open(PaneSurface.TRACKER),
+        )
+        val encoded = PaneLayoutCodec.encode(arrangement)
+
+        assertEquals("!actions,tracker", encoded)
+        assertEquals(arrangement, PaneLayoutCodec.decode(encoded))
+        assertEquals(encoded, PaneLayoutCodec.encode(PaneLayoutCodec.decode(encoded)))
     }
 
     // ---- the tolerant codec (decision 8: "unknown keys dropped") -------------
@@ -140,8 +180,36 @@ class PaneLayoutStoreTest {
         val panes = withStore(file) { store -> store.panes(key).first() }
 
         // Not a crash, not an empty column, and — the part that matters — not the loss of the
-        // two surfaces this build *can* draw.
-        assertEquals(setOf(PaneSurface.TRACKER, PaneSurface.SHEET), panes)
+        // two surfaces this build *can* draw, nor of their relative order.
+        assertEquals(listOf(open(PaneSurface.TRACKER), open(PaneSurface.SHEET)), panes)
+    }
+
+    @Test
+    fun `a mark a newer build invented is dropped and the surface kept`() {
+        // The prefix run is read negatively — everything before the first alphanumeric — so a
+        // future `~sheet` loses the one flag it carries rather than the surface. The opposite
+        // policy to an unknown *key*, and deliberately: the vocabulary of keys is closed and the
+        // vocabulary of marks is not.
+        val file = prefsFile()
+        writeRaw(file, key, "tracker,~sheet")
+
+        assertEquals(
+            listOf(open(PaneSurface.TRACKER), open(PaneSurface.SHEET)),
+            withStore(file) { it.panes(key).first() },
+        )
+    }
+
+    @Test
+    fun `a repeated surface collapses first-wins, keeping the position it was written at`() {
+        // FR-27 decision 3. With an order in play, *which* copy survives is a visible decision:
+        // last-wins would move `tracker` to the end of a list the player never touched there.
+        val file = prefsFile()
+        writeRaw(file, key, "sheet,tracker,!sheet")
+
+        assertEquals(
+            listOf(open(PaneSurface.SHEET), open(PaneSurface.TRACKER)),
+            withStore(file) { it.panes(key).first() },
+        )
     }
 
     @Test
@@ -149,9 +217,10 @@ class PaneLayoutStoreTest {
         val file = prefsFile()
         writeRaw(file, key, "notes,spells")
 
-        // Degrades to the default rather than to a blank screen: the empty set is what an
-        // untouched character reads as, so this character opens on Tracker like a new one.
-        assertEquals(emptySet<PaneSurface>(), withStore(file) { it.panes(key).first() })
+        // Degrades to the default rather than to a blank screen: the empty list is what an
+        // untouched character reads as, so this character opens on Tracker like a new one, in
+        // the default order.
+        assertEquals(emptyList<PaneLayoutEntry>(), withStore(file) { it.panes(key).first() })
     }
 
     @Test
@@ -159,9 +228,9 @@ class PaneLayoutStoreTest {
         val file = prefsFile()
         writeRaw(file, key, ",,tracker,,,tracker,")
 
-        // Blank segments dropped, the duplicate collapsed by the set — a surface cannot be in two
-        // columns, which is the property `PaneRow`'s "no keyed-state collisions" argument rests on.
-        assertEquals(setOf(PaneSurface.TRACKER), withStore(file) { it.panes(key).first() })
+        // Blank segments dropped, the duplicate collapsed — a surface cannot be in two columns,
+        // which is the property `PaneRow`'s "no keyed-state collisions" argument rests on.
+        assertEquals(listOf(open(PaneSurface.TRACKER)), withStore(file) { it.panes(key).first() })
     }
 
     // ---- empty removes the key ----------------------------------------------
@@ -170,8 +239,8 @@ class PaneLayoutStoreTest {
     fun `the empty set removes the key rather than writing an empty string`() {
         val file = prefsFile()
         withStore(file) { store ->
-            store.setPanes(key, setOf(PaneSurface.INVENTORY))
-            store.setPanes(key, emptySet())
+            store.setPanes(key, listOf(open(PaneSurface.INVENTORY)))
+            store.setPanes(key, emptyList())
         }
 
         // Both readings are "no preference", which is exactly why one of them must not be
@@ -195,15 +264,16 @@ class PaneLayoutStoreTest {
     fun `clearing one character is the reset, and leaves the others alone`() =
         withStore(prefsFile()) { store ->
             val sibling = PaneLayoutStore.serverKey("acct-1", "creature-2")
-            store.setPanes(key, setOf(PaneSurface.TRACKER, PaneSurface.INVENTORY))
-            store.setPanes(sibling, setOf(PaneSurface.SHEET))
+            store.setPanes(key, listOf(open(PaneSurface.TRACKER), open(PaneSurface.INVENTORY)))
+            store.setPanes(sibling, listOf(open(PaneSurface.SHEET)))
 
             store.clearForCharacter(key)
 
-            // Decision 8's "reset-to-default = delete": back to no preference, which the UI
-            // resolves to Tracker only.
-            assertEquals(emptySet<PaneSurface>(), store.panes(key).first())
-            assertEquals(setOf(PaneSurface.SHEET), store.panes(sibling).first())
+            // Decision 8's "reset-to-default = delete", which FR-27 decision 3 extends to "the
+            // default order AND the default set": one key holds both, so one removal restores
+            // both. Back to no preference, which the UI resolves to Tracker only.
+            assertEquals(emptyList<PaneLayoutEntry>(), store.panes(key).first())
+            assertEquals(listOf(open(PaneSurface.SHEET)), store.panes(sibling).first())
         }
 
     @Test
@@ -213,7 +283,7 @@ class PaneLayoutStoreTest {
             val alsoDoomed = PaneLayoutStore.serverKey("acct-1", "creature-2")
             val sibling = PaneLayoutStore.serverKey("acct-2", "creature-3")
             val onDevice = PaneLayoutStore.localKey("local-1")
-            val chosen = setOf(PaneSurface.TRACKER, PaneSurface.INVENTORY)
+            val chosen = listOf(open(PaneSurface.TRACKER), open(PaneSurface.INVENTORY))
             listOf(doomed, alsoDoomed, sibling, onDevice).forEach { store.setPanes(it, chosen) }
 
             store.deleteForAccount("acct-1")
@@ -234,13 +304,13 @@ class PaneLayoutStoreTest {
             // silently reset another account's characters.
             val short = PaneLayoutStore.serverKey("acct", "creature-1")
             val longer = PaneLayoutStore.serverKey("acct-2", "creature-1")
-            store.setPanes(short, setOf(PaneSurface.SHEET))
-            store.setPanes(longer, setOf(PaneSurface.INVENTORY))
+            store.setPanes(short, listOf(open(PaneSurface.SHEET)))
+            store.setPanes(longer, listOf(open(PaneSurface.INVENTORY)))
 
             store.deleteForAccount("acct")
 
             assertTrue(store.panes(short).first().isEmpty())
-            assertEquals(setOf(PaneSurface.INVENTORY), store.panes(longer).first())
+            assertEquals(listOf(open(PaneSurface.INVENTORY)), store.panes(longer).first())
         }
 
     // ---- the shared file -----------------------------------------------------
@@ -264,9 +334,9 @@ class PaneLayoutStoreTest {
         )
         // …and the store still works when handed a key shaped like another's, because nothing
         // here parses a key: it is an opaque string all the way down.
-        store.setPanes(SelectedRollStore.serverKey("a", "b"), setOf(PaneSurface.SHEET))
+        store.setPanes(SelectedRollStore.serverKey("a", "b"), listOf(open(PaneSurface.SHEET)))
         assertEquals(
-            setOf(PaneSurface.SHEET),
+            listOf(open(PaneSurface.SHEET)),
             store.panes(SelectedRollStore.serverKey("a", "b")).first(),
         )
     }

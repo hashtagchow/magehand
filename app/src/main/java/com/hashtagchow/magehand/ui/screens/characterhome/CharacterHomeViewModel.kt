@@ -31,9 +31,9 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
-import com.hashtagchow.magehand.ui.panes.nextStoredPanes
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -47,6 +47,8 @@ import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
+import com.hashtagchow.magehand.ui.panes.movePane
+import com.hashtagchow.magehand.ui.panes.nextStoredPanes
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryLayoutPlan
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.toActionsUiState
@@ -318,27 +320,60 @@ class CharacterHomeViewModel @Inject constructor(
      * 10 needs to survive a gate crossing untouched, and keeping it out of the character's ui
      * state keeps it out of every rebuild of that state — including the ones a DDP sync causes.
      *
-     * The empty set is *"no preference"*, not *"no panes"*; `resolvePanes` turns it into decision
-     * 8's Tracker-only default, which is also what renders for the frame before the character
-     * opens. See `PaneLayoutStore`.
+     * The empty list is *"no preference"*, not *"no panes"*; `resolvePaneLayout` turns it into
+     * decision 8's Tracker-only default in FR-27's default order, which is also what renders for
+     * the frame before the character opens. See `PaneLayoutStore`.
      */
-    val panes: StateFlow<Set<PaneSurface>> = open.flatMapLatest { character ->
-        if (character == null) flowOf(emptySet()) else paneLayoutStore.panes(paneLayoutKey(character))
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+    val panes: StateFlow<List<PaneLayoutEntry>> = open.flatMapLatest { character ->
+        if (character == null) {
+            flowOf(emptyList())
+        } else {
+            paneLayoutStore.panes(paneLayoutKey(character))
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     /**
      * Decision 6's picker gesture, persisted.
      *
-     * [current] is what is on screen — the resolved list, not the stored set — because
-     * `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. What gets
-     * *persisted* is `nextStoredPanes`'s delta against [panes]' current value (the raw stored
-     * set), not [current] itself — see its KDoc for why writing the resolved set directly
-     * silently erased a filtered-out preference. A gesture the rule refuses returns `null` and
-     * is not written, matching [mutateInventoryLayout]'s no-op contract.
+     * [resolved] is what is on screen — `resolvePaneLayout`'s answer, not the raw stored list —
+     * because `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. What gets
+     * *persisted* is `nextStoredPanes`'s edit woven back against [panes]' current value, not
+     * [resolved] itself — see its KDoc for why writing the resolved arrangement directly silently
+     * erased a filtered-out preference. A gesture the rule refuses returns the empty list and is
+     * not written, matching [mutateInventoryLayout]'s no-op contract.
      */
-    fun togglePane(current: Set<PaneSurface>, surface: PaneSurface) {
+    fun togglePane(resolved: List<PaneLayoutEntry>, surface: PaneSurface) {
+        writePaneLayout(nextStoredPanes(resolved, panes.value, surface))
+    }
+
+    /**
+     * FR-27 decision 2's reorder gesture, persisted.
+     *
+     * [togglePane]'s shape exactly, down to the empty-for-a-no-op contract, and written as a twin
+     * rather than folded into one `mutatePaneLayout(plan)` for `InventoryLayoutPlan.setCollapsed`'s
+     * reason: they are two different player intents reached from two different controls, and a
+     * reader at either call site should see which one they are looking at.
+     */
+    fun movePane(resolved: List<PaneLayoutEntry>, surface: PaneSurface, delta: Int) {
+        writePaneLayout(movePane(resolved, panes.value, surface, delta))
+    }
+
+    /**
+     * FR-27 decision 3's Reset: **delete the key**, which restores the default order and the
+     * default pane set together because both live in it.
+     *
+     * `clearForCharacter` rather than `setPanes(key, emptyList())` — they reach the same state,
+     * and the named one says which of the two intents this is. See `PaneLayoutStore`.
+     */
+    fun resetPaneLayout() {
         val key = paneLayoutKey(open.value ?: return)
-        val next = nextStoredPanes(current, panes.value, surface) ?: return
+        viewModelScope.launch { paneLayoutStore.clearForCharacter(key) }
+    }
+
+    /** The one write path for both pane gestures. Empty is the plans' no-op signal. */
+    private fun writePaneLayout(next: List<PaneLayoutEntry>) {
+        if (next.isEmpty()) return
+        val key = paneLayoutKey(open.value ?: return)
         viewModelScope.launch { paneLayoutStore.setPanes(key, next) }
     }
 

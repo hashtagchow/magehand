@@ -21,6 +21,14 @@
          the group's own TalkBack label is new. -->
     <string name="panes_picker_label">Panes shown</string>
 
+    <!-- FR-27: the reorder sheet. One title string for both the app-bar icon's TalkBack label
+         and the sheet's heading, as customize_title is for the tracker's wrench. "Tabs" rather
+         than "panes" because the phone is where most players meet it and a phone has no panes;
+         the subtitle is what says the one order does both. The move/reset strings are the
+         tracker sheet's, unchanged — see PaneOrderSheet. -->
+    <string name="panes_order_title">Arrange tabs</string>
+    <string name="panes_order_subtitle">Reorder this character\'s tabs. The same order arranges the panes on a wide screen. Saved on this device only.</string>
+
     <!-- FR-8: inventory tab (docs/design/10-inventory.md) -->
     <string name="inventory_section_wallet">Wallet</string>
     <string name="inventory_section_equipped">Equipped</string>

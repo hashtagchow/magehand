@@ -30,8 +30,10 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
+import com.hashtagchow.magehand.ui.panes.movePane
 import com.hashtagchow.magehand.ui.panes.nextStoredPanes
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
@@ -228,24 +230,45 @@ class LocalCharacterHomeViewModel @Inject constructor(
      * crossing untouched — keeping it out of the character's ui state keeps it out of every
      * rebuild of that state.
      *
-     * The empty set is *"no preference"*, not *"no panes"*; `resolvePanes` turns it into decision
-     * 8's Tracker-only default. See `PaneLayoutStore`.
+     * The empty list is *"no preference"*, not *"no panes"*; `resolvePaneLayout` turns it into
+     * decision 8's Tracker-only default in FR-27's default order. See `PaneLayoutStore`.
      */
-    val panes: StateFlow<Set<PaneSurface>> = paneLayoutStore.panes(paneLayoutKey)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptySet())
+    val panes: StateFlow<List<PaneLayoutEntry>> = paneLayoutStore.panes(paneLayoutKey)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     /**
-     * Decision 6's picker gesture, persisted.
+     * Decision 6's picker gesture, persisted — the DiceCloud view model's, unchanged, over a
+     * smaller set of surfaces (FR-27 decision 4: *"local characters get the same mechanism over
+     * their smaller set"*).
      *
-     * [current] is what is on screen — the resolved list, not the stored set — because
-     * `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. What gets
-     * *persisted* is `nextStoredPanes`'s delta against [panes]' current value (the raw stored
-     * set), not [current] itself — see its KDoc for why writing the resolved set directly
-     * silently erased a filtered-out preference. A gesture the rule refuses returns `null` and
-     * is not written, matching `mutateInventoryLayout`'s no-op contract.
+     * [resolved] is what is on screen — `resolvePaneLayout`'s answer, not the raw stored list —
+     * because `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. What gets
+     * *persisted* is `nextStoredPanes`'s edit woven back against [panes]' current value, not
+     * [resolved] itself — see its KDoc for why writing the resolved arrangement directly silently
+     * erased a filtered-out preference. A gesture the rule refuses returns the empty list and is
+     * not written, matching `mutateInventoryLayout`'s no-op contract.
      */
-    fun togglePane(current: Set<PaneSurface>, surface: PaneSurface) {
-        val next = nextStoredPanes(current, panes.value, surface) ?: return
+    fun togglePane(resolved: List<PaneLayoutEntry>, surface: PaneSurface) {
+        writePaneLayout(nextStoredPanes(resolved, panes.value, surface))
+    }
+
+    /** FR-27 decision 2's reorder gesture. `CharacterHomeViewModel.movePane`'s twin. */
+    fun movePane(resolved: List<PaneLayoutEntry>, surface: PaneSurface, delta: Int) {
+        writePaneLayout(movePane(resolved, panes.value, surface, delta))
+    }
+
+    /**
+     * FR-27 decision 3's Reset: delete the key, restoring the default order and the default pane
+     * set together because both live in it. Also the local-delete reap's write — see
+     * `LocalCharacterRepository.delete`, which reaches the same method (09 decision 10).
+     */
+    fun resetPaneLayout() {
+        viewModelScope.launch { paneLayoutStore.clearForCharacter(paneLayoutKey) }
+    }
+
+    /** The one write path for both pane gestures. Empty is the plans' no-op signal. */
+    private fun writePaneLayout(next: List<PaneLayoutEntry>) {
+        if (next.isEmpty()) return
         viewModelScope.launch { paneLayoutStore.setPanes(paneLayoutKey, next) }
     }
 

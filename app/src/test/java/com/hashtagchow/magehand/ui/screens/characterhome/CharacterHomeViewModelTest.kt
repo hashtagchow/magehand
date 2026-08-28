@@ -34,6 +34,10 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
+import com.hashtagchow.magehand.ui.panes.resolvePaneLayout
+import com.hashtagchow.magehand.ui.panes.resolvePanes
+import com.hashtagchow.magehand.ui.panes.serverPaneSurfaces
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
@@ -130,6 +134,13 @@ class CharacterHomeViewModelTest {
 
     /** FR-17's per-character pane choice, likewise in memory (14 decision 8). */
     private val paneLayouts = FakePaneLayoutStore()
+
+    /**
+     * The surfaces a caster has, which the *screen* passes to `resolvePaneLayout` and the view
+     * model deliberately never sees — availability is a UI-layer fact (FR-26's discovery gate).
+     * These tests stand in for the screen, so they resolve with it here.
+     */
+    private val allSurfaces = serverPaneSurfaces(hasActions = true)
 
     /** FR-10's per-item overrides. In memory, for the same reason as the selection above. */
     private val equippableOverrides = FakeEquippableOverrideStore()
@@ -539,7 +550,7 @@ class CharacterHomeViewModelTest {
         assertTrue(vm.uiState.value.inventory.sections.single { it.key == "weapons" }.collapsed)
     }
 
-    // ---- FR-17 panes (14 decisions 6 and 8) ---------------------------------
+    // ---- FR-17 panes (14 decisions 6 and 8) + FR-27's order ------------------
 
     @Test
     fun `a character nobody has arranged reports no pane preference`() = runTest(dispatcher) {
@@ -548,10 +559,11 @@ class CharacterHomeViewModelTest {
         collecting(vm)
         advanceUntilIdle()
 
-        // The empty set is "use the default", not "no panes" — see `PaneLayoutStore`. Asserted
-        // here because the *view model* is where a well-meaning `?: setOf(TRACKER)` would go, and
-        // that would freeze today's default into every character the moment it was touched.
-        assertEquals(emptySet<PaneSurface>(), vm.panes.value)
+        // The empty list is "use the default", not "no panes" — see `PaneLayoutStore`. Asserted
+        // here because the *view model* is where a well-meaning `?: listOf(TRACKER)` would go,
+        // and that would freeze today's default order and set into every character the moment it
+        // was touched.
+        assertEquals(emptyList<PaneLayoutEntry>(), vm.panes.value)
         assertTrue("nothing is written just by opening a character", paneLayouts.keys.isEmpty())
     }
 
@@ -562,7 +574,7 @@ class CharacterHomeViewModelTest {
         collecting(vm)
         advanceUntilIdle()
 
-        vm.togglePane(setOf(PaneSurface.TRACKER), PaneSurface.SHEET)
+        vm.togglePane(resolvePaneLayout(vm.panes.value, allSurfaces), PaneSurface.SHEET)
         advanceUntilIdle()
 
         // Account-scoped, not bare-creature: the same creature reached from two accounts is two
@@ -570,9 +582,60 @@ class CharacterHomeViewModelTest {
         // prefix match rather than a scan.
         val key = PaneLayoutStore.serverKey(character.accountId, creatureId)
         assertEquals(setOf(key), paneLayouts.keys)
-        assertEquals(setOf(PaneSurface.TRACKER, PaneSurface.SHEET), paneLayouts.panesFor(key))
-        assertEquals(setOf(PaneSurface.TRACKER, PaneSurface.SHEET), vm.panes.value)
+        assertEquals(
+            listOf(PaneSurface.TRACKER, PaneSurface.SHEET),
+            resolvePanes(paneLayouts.panesFor(key), allSurfaces),
+        )
+        assertEquals(listOf(PaneSurface.TRACKER, PaneSurface.SHEET), resolvePanes(vm.panes.value, allSurfaces))
     }
+
+    @Test
+    fun `reordering writes the same account-scoped key, and opens nothing`() = runTest(dispatcher) {
+        // FR-27 decisions 2 and 4: one key, one lifecycle, and a reorder that leaves the pane
+        // selection exactly where it was. The view model is where a `movePane` wired to
+        // `setPanes` with the wrong key — or one that persisted the resolved list directly —
+        // would land.
+        val character = FakeOpenCharacter(creatureId = creatureId)
+        val (vm, _) = viewModel(character)
+        collecting(vm)
+        advanceUntilIdle()
+
+        vm.movePane(resolvePaneLayout(vm.panes.value, allSurfaces), PaneSurface.SHEET, -1)
+        advanceUntilIdle()
+
+        val key = PaneLayoutStore.serverKey(character.accountId, creatureId)
+        assertEquals(setOf(key), paneLayouts.keys)
+        assertEquals(
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.SHEET, PaneSurface.ACTIONS),
+            resolvePaneLayout(vm.panes.value, allSurfaces).map { it.surface },
+        )
+        assertEquals(
+            "still the Tracker-only default — an arrow is not a tick",
+            listOf(PaneSurface.TRACKER),
+            resolvePanes(vm.panes.value, allSurfaces),
+        )
+    }
+
+    @Test
+    fun `resetting the arrangement deletes the key rather than writing a default`() =
+        runTest(dispatcher) {
+            // FR-27 decision 3. A reset that *wrote* today's default would freeze it into the
+            // character, so a later release changing the default would change it for nobody —
+            // `PaneLayoutStore`'s argument, asserted at the one call site that could get it wrong.
+            val character = FakeOpenCharacter(creatureId = creatureId)
+            val (vm, _) = viewModel(character)
+            collecting(vm)
+            advanceUntilIdle()
+            vm.movePane(resolvePaneLayout(vm.panes.value, allSurfaces), PaneSurface.SHEET, -1)
+            advanceUntilIdle()
+            assertTrue("sanity: something was stored to reset", paneLayouts.keys.isNotEmpty())
+
+            vm.resetPaneLayout()
+            advanceUntilIdle()
+
+            assertTrue(paneLayouts.keys.isEmpty())
+            assertEquals(emptyList<PaneLayoutEntry>(), vm.panes.value)
+        }
 
     @Test
     fun `deselecting the last pane writes nothing at all`() = runTest(dispatcher) {
@@ -581,12 +644,12 @@ class CharacterHomeViewModelTest {
         collecting(vm)
         advanceUntilIdle()
 
-        vm.togglePane(setOf(PaneSurface.TRACKER), PaneSurface.TRACKER)
+        vm.togglePane(resolvePaneLayout(vm.panes.value, allSurfaces), PaneSurface.TRACKER)
         advanceUntilIdle()
 
         // Decision 6's minimum of one, all the way down: a refused gesture is not a write of the
         // same value, it is no write — the same no-op contract `mutateInventoryLayout` has, and
-        // the reason `togglePane` returns its input by identity.
+        // the reason `nextStoredPanes` returns the empty list.
         assertEquals(0, paneLayouts.writes)
         assertTrue(paneLayouts.keys.isEmpty())
     }
@@ -1318,20 +1381,20 @@ private class FakeInventoryLayoutStore : InventoryLayoutStore {
  * minimum-of-one rule refuses is not written at all — neither of which a constant could show.
  */
 private class FakePaneLayoutStore : PaneLayoutStore {
-    private val entries = MutableStateFlow<Map<String, Set<PaneSurface>>>(emptyMap())
+    private val entries = MutableStateFlow<Map<String, List<PaneLayoutEntry>>>(emptyMap())
 
     val keys: Set<String> get() = entries.value.keys
 
-    fun panesFor(characterKey: String): Set<PaneSurface> = entries.value[characterKey].orEmpty()
+    fun panesFor(characterKey: String): List<PaneLayoutEntry> = entries.value[characterKey].orEmpty()
 
     /** How many times anything was written, so a refused gesture can be shown to write nothing. */
     var writes: Int = 0
         private set
 
-    override fun panes(characterKey: String): Flow<Set<PaneSurface>> =
+    override fun panes(characterKey: String): Flow<List<PaneLayoutEntry>> =
         entries.map { it[characterKey].orEmpty() }
 
-    override suspend fun setPanes(characterKey: String, panes: Set<PaneSurface>) {
+    override suspend fun setPanes(characterKey: String, panes: List<PaneLayoutEntry>) {
         writes++
         entries.value = entries.value.toMutableMap().apply {
             if (panes.isEmpty()) remove(characterKey) else put(characterKey, panes)

@@ -33,6 +33,7 @@ import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.DmViewStore
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.db.ThemePrefEntity
@@ -504,7 +505,7 @@ class DefaultAccountRepositoryTest {
         // key left behind is unreachable rather than merely stale.
         paneLayouts.setPanes(
             PaneLayoutStore.serverKey(accountId, CREATURE_ID),
-            setOf(PaneSurface.TRACKER, PaneSurface.SHEET),
+            listOf(PaneLayoutEntry(PaneSurface.TRACKER), PaneLayoutEntry(PaneSurface.SHEET)),
         )
         // 14 decision 16's DM-view membership — the fifth key, and the first that is not
         // per-character: it names the account itself, so nothing but this reap can ever remove it.

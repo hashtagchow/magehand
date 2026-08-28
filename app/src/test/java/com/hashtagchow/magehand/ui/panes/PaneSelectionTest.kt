@@ -1,5 +1,6 @@
 package com.hashtagchow.magehand.ui.panes
 
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.ui.navigation.CharacterHomeTab
 import com.hashtagchow.magehand.ui.navigation.LocalCharacterHomeTab
@@ -34,6 +35,13 @@ import java.io.File
  *   across the gate; the way it does not is by never converting.
  * - **sheetWanted**: a WebView that outlives its column, holding a renderer and a live socket for
  *   a pane nobody can see.
+ * - **resolvePaneLayout / movePane** (FR-27): an arrangement that silently loses a surface. The
+ *   two shapes are a *reorder* that forgets a surface the character does not have right now (the
+ *   L1 lesson, decision 5) and a *reorder* that opens panes the player never ticked (decision 2's
+ *   "select/deselect unchanged"). Both are silent, permanent, and impossible to notice on the
+ *   screen that caused them.
+ * - **HomeTabRow** (BUG-4): a tab label that wraps mid-word. Not a rule a pure function can
+ *   carry, so it is read out of the source in `UiScaleProviderTest`'s manner.
  */
 class PaneSelectionTest {
 
@@ -44,6 +52,26 @@ class PaneSelectionTest {
     private val serverNoActions = serverPaneSurfaces(hasActions = false)
     private val serverTabs = serverHomeTabs(hasActions = true)
     private val local = localPaneSurfaces
+
+    /**
+     * An arrangement of open surfaces, in this order — the shape every value a released build
+     * wrote had, and the shape most of these fixtures want.
+     */
+    private fun open(vararg surfaces: PaneSurface): List<PaneLayoutEntry> =
+        surfaces.map { PaneLayoutEntry(it, selected = true) }
+
+    /** The DiceCloud screen's own call, with a caster's surfaces — the common fixture. */
+    private fun chromeFor(
+        expandedWidth: Boolean,
+        selectedTab: CharacterHomeTab,
+        stored: List<PaneLayoutEntry>,
+    ): CharacterHomeChrome<CharacterHomeTab> = characterHomeChrome(
+        expandedWidth = expandedWidth,
+        selectedTab = selectedTab,
+        layout = resolvePaneLayout(stored, server),
+        availableTabs = serverTabs,
+        surfaceOf = { it.surface },
+    )
 
     // ---- the vocabulary agrees with the tab rows (decision 6) ----------------
 
@@ -86,15 +114,69 @@ class PaneSelectionTest {
         assertEquals(LocalCharacterHomeTab.entries.map { it.surface }, local)
     }
 
-    // ---- resolvePanes (decisions 6, 7, 8) -----------------------------------
+    // ---- resolvePaneLayout / resolvePanes (decisions 6, 7, 8; FR-27 decisions 1 and 3) ------
 
     @Test
-    fun `panes render in fixed display order, never in the order they were chosen`() {
-        // Decision 6: "panes are places, not history". A player who added the Sheet first and the
-        // Tracker second still gets Tracker on the left, because that is where the Tracker is.
-        val chosenBackwards = linkedSetOf(PaneSurface.SHEET, PaneSurface.TRACKER)
+    fun `panes render in the player's stored order`() {
+        // FR-27 decision 1. This is the one assertion whose *expected value* the feature changed:
+        // before it, a stored `sheet,tracker` rendered Tracker first, because the order was the
+        // enum's and the stored value was a set.
+        assertEquals(
+            listOf(PaneSurface.SHEET, PaneSurface.TRACKER),
+            resolvePanes(open(PaneSurface.SHEET, PaneSurface.TRACKER), server),
+        )
+    }
 
-        assertEquals(listOf(PaneSurface.TRACKER, PaneSurface.SHEET), resolvePanes(chosenBackwards, server))
+    @Test
+    fun `panes are still places, not history - the picker never writes an order`() {
+        // Decision 6's surviving half, and where it now lives. A player who ticks the Sheet on a
+        // Tracker-only character has not asked for the Sheet on the left; only an arrow does
+        // that. The claim is about the WRITE, so it is asserted on `nextStoredPanes`.
+        val stored = open(PaneSurface.TRACKER)
+        val resolved = resolvePaneLayout(stored, server)
+
+        val next = nextStoredPanes(resolved, stored, PaneSurface.SHEET)
+
+        assertEquals(
+            "the tapped surface is opened where it already sat, never moved to the front",
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS, PaneSurface.SHEET),
+            next.map { it.surface },
+        )
+        assertEquals(
+            listOf(PaneSurface.TRACKER, PaneSurface.SHEET),
+            resolvePanes(next, server),
+        )
+    }
+
+    @Test
+    fun `a surface the player never arranged lands at its DEFAULT position`() {
+        // FR-27 decision 3's "missing keys append at their DEFAULT position", which is what makes
+        // the Actions surface — added to the enum in 1.9.0, absent from every string written
+        // before it — appear between Inventory and Sheet rather than after the Sheet.
+        val stored = open(PaneSurface.SHEET, PaneSurface.TRACKER)
+
+        assertEquals(
+            listOf(
+                PaneSurface.SHEET,
+                PaneSurface.TRACKER,
+                // Woven in after Tracker, its nearest earlier default-order neighbour that the
+                // stored list has — not appended to the end, and not at index 1.
+                PaneSurface.INVENTORY,
+                PaneSurface.ACTIONS,
+            ),
+            resolvePaneLayout(stored, server).map { it.surface },
+        )
+    }
+
+    @Test
+    fun `a woven-in surface is in the order but not open`() {
+        // Decision 8's default survives FR-27: the tab row draws all four, the pane row draws
+        // one. If a woven-in surface arrived `selected`, opening any character on a tablet would
+        // show four columns.
+        val resolved = resolvePaneLayout(open(PaneSurface.TRACKER), server)
+
+        assertEquals(4, resolved.size)
+        assertEquals(listOf(PaneSurface.TRACKER), resolved.filter { it.selected }.map { it.surface })
     }
 
     @Test
@@ -102,15 +184,23 @@ class PaneSelectionTest {
         // Reachable: a preferences file edited by hand, or — the real case — a future release
         // that lets a local character have a sheet, downgraded. Rendering an empty column would
         // be worse than not rendering it.
-        val stored = setOf(PaneSurface.TRACKER, PaneSurface.SHEET)
+        val stored = open(PaneSurface.TRACKER, PaneSurface.SHEET)
 
         assertEquals(listOf(PaneSurface.TRACKER), resolvePanes(stored, local))
+        assertEquals(
+            "and it is absent from the ORDER too, so no tab is drawn for it either",
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY),
+            resolvePaneLayout(stored, local).map { it.surface },
+        )
     }
 
     @Test
     fun `no stored preference is decision 8's Tracker-only default`() {
-        assertEquals(listOf(PaneSurface.TRACKER), resolvePanes(emptySet(), server))
-        assertEquals(listOf(PaneSurface.TRACKER), resolvePanes(emptySet(), local))
+        assertEquals(listOf(PaneSurface.TRACKER), resolvePanes(emptyList(), server))
+        assertEquals(listOf(PaneSurface.TRACKER), resolvePanes(emptyList(), local))
+        // ...and FR-27 decision 3's other half: no preference is also the DEFAULT ORDER.
+        assertEquals(server, resolvePaneLayout(emptyList(), server).map { it.surface })
+        assertEquals(local, resolvePaneLayout(emptyList(), local).map { it.surface })
     }
 
     @Test
@@ -118,7 +208,22 @@ class PaneSelectionTest {
         // The blank-screen case, and the reason the minimum is enforced here as well as at the
         // gesture: `resolvePanes` is the last thing between a corrupt or future-versioned
         // `pane_layout` and the screen.
-        assertEquals(listOf(PaneSurface.TRACKER), resolvePanes(setOf(PaneSurface.SHEET), local))
+        assertEquals(listOf(PaneSurface.TRACKER), resolvePanes(open(PaneSurface.SHEET), local))
+    }
+
+    @Test
+    fun `the last-resort pane is the first of the PLAYER's order, not of the default one`() {
+        // Rule 4, on a character who has both reordered and ended up with nothing open — the
+        // wizard who kept Actions as their only pane, reordered Inventory to the front, and then
+        // lost their last spell. "The first available" is still the rule; whose "first" it is is
+        // the question, and the player's own leftmost surface is the more honest answer.
+        val stored = listOf(
+            PaneLayoutEntry(PaneSurface.INVENTORY, selected = false),
+            PaneLayoutEntry(PaneSurface.TRACKER, selected = false),
+            PaneLayoutEntry(PaneSurface.ACTIONS, selected = true),
+        )
+
+        assertEquals(listOf(PaneSurface.INVENTORY), resolvePanes(stored, serverNoActions))
     }
 
     @Test
@@ -127,10 +232,14 @@ class PaneSelectionTest {
         // no duplicates out — so two columns can never key the same scroll or collapse state,
         // and `key()` is never handed the same value twice, which Compose treats as an error
         // rather than as two siblings.
-        val resolved = resolvePanes(server.toSet(), server)
+        val resolved = resolvePanes(open(*server.toTypedArray()), server)
 
         assertEquals(resolved.size, resolved.toSet().size)
         assertEquals(server, resolved)
+        // ...including when the stored value repeats one, which the codec collapses first-wins
+        // but which this must survive independently — `key()` treats a duplicate as an error.
+        val repeated = resolvePaneLayout(open(PaneSurface.SHEET, PaneSurface.SHEET), server)
+        assertEquals(repeated.size, repeated.map { it.surface }.toSet().size)
     }
 
     // ---- togglePane (decision 6) --------------------------------------------
@@ -163,53 +272,166 @@ class PaneSelectionTest {
         assertSame(only, result)
     }
 
-    // ---- nextStoredPanes (the L1 fix: persist a delta against the STORED set) ----------
+    // ---- nextStoredPanes (the L1 fix: persist against the STORED arrangement) ----------
 
     @Test
     fun `toggling a pane on a non-caster preserves a filtered-out stored preference`() {
-        // The player kept Tracker + Actions on their wizard; the STORED set still says so.
-        // Opened on a fighter, `resolvePanes` filters Actions out of what renders — that is
-        // `current` below — and toggling Inventory on must not carry that filtered view back
-        // into the store, or the wizard's Actions preference is gone for good.
-        val stored = setOf(PaneSurface.TRACKER, PaneSurface.ACTIONS)
-        val current = resolvePanes(stored, serverNoActions).toSet()
-        assertEquals("sanity: Actions is filtered from what renders", setOf(PaneSurface.TRACKER), current)
+        // The player kept Tracker + Actions on their wizard; the STORED arrangement still says
+        // so. Opened on a fighter, `resolvePaneLayout` filters Actions out — and toggling
+        // Inventory on must not carry that filtered view back into the store, or the wizard's
+        // Actions preference is gone for good.
+        val stored = open(PaneSurface.TRACKER, PaneSurface.ACTIONS)
+        val resolved = resolvePaneLayout(stored, serverNoActions)
+        assertEquals(
+            "sanity: Actions is filtered from what renders",
+            listOf(PaneSurface.TRACKER),
+            openPanes(resolved),
+        )
 
-        val next = nextStoredPanes(current, stored, PaneSurface.INVENTORY)
+        val next = nextStoredPanes(resolved, stored, PaneSurface.INVENTORY)
 
         assertEquals(
-            "Inventory is added and the filtered-out Actions preference survives",
-            setOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS),
-            next,
+            "the filtered-out Actions preference survives, AND keeps the place it had",
+            listOf(PaneSurface.TRACKER, PaneSurface.ACTIONS, PaneSurface.INVENTORY, PaneSurface.SHEET),
+            next.map { it.surface },
+        )
+        assertTrue(
+            "and it is still open, not quietly deselected",
+            next.single { it.surface == PaneSurface.ACTIONS }.selected,
         )
         assertEquals(
             "what renders is still just the resolved surfaces this character has",
             listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY),
-            next?.let { resolvePanes(it, serverNoActions) },
+            resolvePanes(next, serverNoActions),
         )
-        // On re-discovery (the player reopens the wizard) Actions is back, unharmed.
+        // On re-discovery (the player reopens the wizard) Actions is back, unharmed and in place.
         assertEquals(
-            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS),
-            next?.let { resolvePanes(it, server) },
+            listOf(PaneSurface.TRACKER, PaneSurface.ACTIONS, PaneSurface.INVENTORY),
+            resolvePanes(next, server),
         )
     }
 
     @Test
-    fun `nextStoredPanes removes a currently-visible surface from the stored set`() {
-        val stored = setOf(PaneSurface.TRACKER, PaneSurface.SHEET)
+    fun `REORDERING on a non-caster preserves a filtered-out stored preference and its position`() {
+        // FR-27 decision 5, and the reason the L1 lesson is restated in the FR: a reorder writes
+        // the WHOLE arrangement, so it is the gesture most able to erase a surface that is not on
+        // screen. The wizard's Actions pane sits second; a fighter dragging the Sheet up must
+        // leave it there.
+        val stored = open(PaneSurface.TRACKER, PaneSurface.ACTIONS, PaneSurface.INVENTORY)
+        val resolved = resolvePaneLayout(stored, serverNoActions)
         assertEquals(
-            setOf(PaneSurface.TRACKER),
-            nextStoredPanes(current = stored, stored = stored, PaneSurface.SHEET),
+            "sanity: the fighter's row has no Actions in it to move",
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.SHEET),
+            resolved.map { it.surface },
+        )
+
+        val next = movePane(resolved, stored, PaneSurface.SHEET, -1)
+
+        assertEquals(
+            "Sheet moved up past Inventory; Actions kept BOTH its entry and its place",
+            listOf(PaneSurface.TRACKER, PaneSurface.ACTIONS, PaneSurface.SHEET, PaneSurface.INVENTORY),
+            next.map { it.surface },
+        )
+        assertEquals(
+            "the fighter sees the move they made",
+            listOf(PaneSurface.TRACKER, PaneSurface.SHEET, PaneSurface.INVENTORY),
+            resolvePaneLayout(next, serverNoActions).map { it.surface },
+        )
+        assertEquals(
+            "and the wizard's row is unchanged where it was not touched",
+            listOf(PaneSurface.TRACKER, PaneSurface.ACTIONS, PaneSurface.SHEET, PaneSurface.INVENTORY),
+            resolvePaneLayout(next, server).map { it.surface },
+        )
+    }
+
+    @Test
+    fun `a reorder opens no panes`() {
+        // Decision 2's "the picker's select/deselect behavior unchanged", asserted against the
+        // gesture most likely to break it. A phone player reordering their tab row has never seen
+        // a pane; if an arrow ticked one, their tablet layout would silently grow a column.
+        val stored = open(PaneSurface.TRACKER)
+        val resolved = resolvePaneLayout(stored, server)
+
+        val next = movePane(resolved, stored, PaneSurface.SHEET, -1)
+
+        assertEquals(
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.SHEET, PaneSurface.ACTIONS),
+            next.map { it.surface },
+        )
+        assertEquals(
+            "still Tracker only, exactly as before the arrow was tapped",
+            listOf(PaneSurface.TRACKER),
+            resolvePanes(next, server),
+        )
+    }
+
+    @Test
+    fun `a bounce off either end of the order is not a write`() {
+        // `InventoryLayoutPlan.move`'s contract, and the same signal: empty is unambiguous
+        // because a real arrangement always has at least one entry.
+        val stored = open(PaneSurface.TRACKER)
+        val resolved = resolvePaneLayout(stored, server)
+
+        assertTrue(movePane(resolved, stored, PaneSurface.TRACKER, -1).isEmpty())
+        assertTrue(movePane(resolved, stored, PaneSurface.SHEET, 1).isEmpty())
+        assertTrue(movePane(resolved, stored, PaneSurface.INVENTORY, 0).isEmpty())
+        // ...and a surface this character does not have cannot be moved by a stale gesture.
+        assertTrue(
+            movePane(resolvePaneLayout(stored, serverNoActions), stored, PaneSurface.ACTIONS, -1)
+                .isEmpty(),
+        )
+    }
+
+    @Test
+    fun `moving a surface shifts it, leaving every other surface in relative order`() {
+        val stored = open(PaneSurface.TRACKER)
+        val resolved = resolvePaneLayout(stored, server)
+
+        val down = movePane(resolved, stored, PaneSurface.TRACKER, 1)
+
+        // A shift, not a swap: Tracker lands between Inventory and Actions and nothing else
+        // moves relative to anything else. See `movePane`'s KDoc for why that is the choice.
+        assertEquals(
+            listOf(PaneSurface.INVENTORY, PaneSurface.TRACKER, PaneSurface.ACTIONS, PaneSurface.SHEET),
+            down.map { it.surface },
+        )
+    }
+
+    @Test
+    fun `resolving what a gesture wrote is a fixed point`() {
+        // The app half of the spot-check's "reorder round-trip across force-stop": what comes
+        // back out of the store on the next cold open must resolve to the arrangement the player
+        // just made, not to one weave away from it. (`PaneLayoutStoreTest` owns the other half —
+        // that the string survives the file.) A resolver that was not idempotent here would drift
+        // one position per launch, which is the shape of bug nobody reproduces.
+        val stored = open(PaneSurface.TRACKER)
+        val moved = movePane(resolvePaneLayout(stored, server), stored, PaneSurface.SHEET, -2)
+
+        assertEquals(moved, resolvePaneLayout(moved, server))
+        assertEquals(moved, resolvePaneLayout(resolvePaneLayout(moved, server), server))
+    }
+
+    @Test
+    fun `nextStoredPanes closes a currently-visible surface without moving it`() {
+        val stored = open(PaneSurface.TRACKER, PaneSurface.SHEET)
+        val resolved = resolvePaneLayout(stored, server)
+
+        val next = nextStoredPanes(resolved, stored, PaneSurface.SHEET)
+
+        assertEquals(listOf(PaneSurface.TRACKER), resolvePanes(next, server))
+        assertEquals(
+            "the whole order is untouched; only the Sheet's flag changed",
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS, PaneSurface.SHEET),
+            next.map { it.surface },
         )
     }
 
     @Test
     fun `nextStoredPanes refuses to persist deselecting the last visible pane`() {
-        val stored = setOf(PaneSurface.INVENTORY)
-        assertEquals(
-            null,
-            nextStoredPanes(current = stored, stored = stored, PaneSurface.INVENTORY),
-        )
+        val stored = open(PaneSurface.INVENTORY)
+        val resolved = resolvePaneLayout(stored, server)
+
+        assertTrue(nextStoredPanes(resolved, stored, PaneSurface.INVENTORY).isEmpty())
     }
 
     @Test
@@ -227,26 +449,66 @@ class PaneSelectionTest {
     fun `a compact or medium window renders today's tab row`() {
         // Decision 5: "Medium and compact keep today's tab row untouched (this includes most
         // landscape phones — width MEDIUM)."
-        val chrome = characterHomeChrome(
+        val chrome = chromeFor(
             expandedWidth = false,
             selectedTab = CharacterHomeTab.Inventory,
-            storedPanes = setOf(PaneSurface.TRACKER, PaneSurface.SHEET),
-            available = server,
-            availableTabs = serverTabs,
+            stored = open(PaneSurface.TRACKER, PaneSurface.SHEET),
         )
 
-        // Note what is *not* here: the stored pane set is non-empty and completely ignored.
-        assertEquals(CharacterHomeChrome.Tabs(CharacterHomeTab.Inventory), chrome)
+        // Note what is *not* here: which panes are OPEN is completely ignored on this path. The
+        // stored ORDER is not — see the tab-order test below — which is FR-27 decision 1.
+        assertEquals(CharacterHomeChrome.Tabs(serverTabs, CharacterHomeTab.Inventory), chrome)
+    }
+
+    @Test
+    fun `the tab row is drawn in the player's order, and every tab is still in it`() {
+        // FR-27 decision 1's phone half. The player arranged Sheet first on a tablet (or on the
+        // order sheet, which is the same key); the tab row has to agree, or the two chromes are
+        // two features again.
+        val chrome = chromeFor(
+            expandedWidth = false,
+            selectedTab = CharacterHomeTab.Tracker,
+            stored = open(PaneSurface.SHEET, PaneSurface.TRACKER),
+        )
+
+        assertEquals(
+            // Sheet and Tracker where the player put them; Inventory and Actions woven in at
+            // their default positions, and DRAWN — a tab row shows every surface, whether or not
+            // the pane picker has ticked it.
+            listOf(
+                CharacterHomeTab.Sheet,
+                CharacterHomeTab.Tracker,
+                CharacterHomeTab.Inventory,
+                CharacterHomeTab.Actions,
+            ),
+            (chrome as CharacterHomeChrome.Tabs).tabs,
+        )
+    }
+
+    @Test
+    fun `the tab row and the pane row agree about order`() {
+        // The "ONE mechanism" claim (decision 1), stated as the property it buys: the panes are a
+        // sub-sequence of the tabs, never a differently-ordered subset of them.
+        val stored = listOf(
+            PaneLayoutEntry(PaneSurface.SHEET, selected = true),
+            PaneLayoutEntry(PaneSurface.INVENTORY, selected = false),
+            PaneLayoutEntry(PaneSurface.TRACKER, selected = true),
+        )
+        val tabs = chromeFor(false, CharacterHomeTab.Tracker, stored) as CharacterHomeChrome.Tabs
+        val panes = chromeFor(true, CharacterHomeTab.Tracker, stored) as CharacterHomeChrome.Panes
+
+        assertEquals(
+            panes.panes,
+            tabs.tabs.map { it.surface }.filter { it in panes.panes },
+        )
     }
 
     @Test
     fun `an expanded window renders the stored pane set`() {
-        val chrome = characterHomeChrome(
+        val chrome = chromeFor(
             expandedWidth = true,
             selectedTab = CharacterHomeTab.Inventory,
-            storedPanes = setOf(PaneSurface.TRACKER, PaneSurface.SHEET),
-            available = server,
-            availableTabs = serverTabs,
+            stored = open(PaneSurface.TRACKER, PaneSurface.SHEET),
         )
 
         assertEquals(
@@ -264,14 +526,14 @@ class PaneSelectionTest {
         // reads both — so the round trip below is not a *conversion* that happens to be
         // reversible, it is two values neither of which was ever touched.
         val tab = CharacterHomeTab.Sheet
-        val panes = setOf(PaneSurface.TRACKER, PaneSurface.INVENTORY)
+        val panes = open(PaneSurface.TRACKER, PaneSurface.INVENTORY)
 
-        val onPhone = characterHomeChrome(false, tab, panes, server, serverTabs)
-        val onTablet = characterHomeChrome(true, tab, panes, server, serverTabs)
-        val backOnPhone = characterHomeChrome(false, tab, panes, server, serverTabs)
-        val backOnTablet = characterHomeChrome(true, tab, panes, server, serverTabs)
+        val onPhone = chromeFor(false, tab, panes)
+        val onTablet = chromeFor(true, tab, panes)
+        val backOnPhone = chromeFor(false, tab, panes)
+        val backOnTablet = chromeFor(true, tab, panes)
 
-        assertEquals(CharacterHomeChrome.Tabs(CharacterHomeTab.Sheet), onPhone)
+        assertEquals(CharacterHomeChrome.Tabs(serverTabs, CharacterHomeTab.Sheet), onPhone)
         assertEquals(
             CharacterHomeChrome.Panes(listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY)),
             onTablet,
@@ -285,12 +547,10 @@ class PaneSelectionTest {
         // The design that *would* lose state, named so it cannot be reintroduced as a
         // convenience: if opening a wide window seeded the panes from the current tab, every
         // rotation would overwrite the arrangement the player chose for that character.
-        val chrome = characterHomeChrome(
+        val chrome = chromeFor(
             expandedWidth = true,
             selectedTab = CharacterHomeTab.Sheet,
-            storedPanes = setOf(PaneSurface.INVENTORY),
-            available = server,
-            availableTabs = serverTabs,
+            stored = open(PaneSurface.INVENTORY),
         )
 
         assertEquals(CharacterHomeChrome.Panes(listOf(PaneSurface.INVENTORY)), chrome)
@@ -302,7 +562,7 @@ class PaneSelectionTest {
     fun `in tab mode the WebView still outlives a tab switch`() {
         // Unchanged from before FR-17: `sheetEverOpened` is sticky, so switching to the Tracker
         // tab detaches the host and keeps the booted Meteor client (04 §4).
-        val tabs = CharacterHomeChrome.Tabs(CharacterHomeTab.Tracker)
+        val tabs = CharacterHomeChrome.Tabs(serverTabs, CharacterHomeTab.Tracker)
 
         assertTrue(sheetWanted(tabs, sheetEverOpened = true))
         assertFalse(sheetWanted(tabs, sheetEverOpened = false))
@@ -327,15 +587,18 @@ class PaneSelectionTest {
         // Decision 5: "Phones structurally unaffected: the tab row code path does not change."
         // That is a claim about the *shape of the composable*, which no pure function can carry,
         // so it is read out of the source — `UiScaleProviderTest`'s precedent, for its reason.
+        //
+        // FR-27 moved the row itself into `HomeTabRow`; the branch it sits in did not move, and
+        // that is what this still asserts.
         listOf("CharacterHomeScreen.kt", "LocalCharacterHomeScreen.kt").forEach { name ->
             val source = mainSourceFiles().single { it.name == name }.readText()
 
             val tabsBranch = source.indexOf("is CharacterHomeChrome.Tabs ->")
-            val tabRow = source.indexOf("PrimaryTabRow(")
+            val tabRow = source.indexOf("HomeTabRow(")
             val panesBranch = source.indexOf("is CharacterHomeChrome.Panes ->")
             val picker = source.indexOf("PanePicker(")
 
-            assertTrue("$name no longer composes a PrimaryTabRow", tabRow >= 0)
+            assertTrue("$name no longer composes a HomeTabRow", tabRow >= 0)
             assertTrue("$name no longer composes a PanePicker", picker >= 0)
             assertTrue(
                 "$name must keep the tab row inside the non-expanded branch",
@@ -345,24 +608,56 @@ class PaneSelectionTest {
                 "$name must keep the pane picker inside the expanded branch",
                 panesBranch in 0 until picker,
             )
+            assertFalse(
+                "$name must not compose its own PrimaryTabRow — BUG-4's measuring rule and " +
+                    "FR-27's ordering both live in HomeTabRow, and a second row would carry " +
+                    "neither",
+                source.contains("PrimaryTabRow("),
+            )
         }
     }
 
     /**
-     * ### The defect: a pane that rebuilds because a *different* pane appeared
+     * ### BUG-4: the operator's phone drew "Inventory" as "Inventor / y"
      *
-     * `PaneRow` walks the list with `forEachIndexed`, and Compose's default identity for that is
-     * **positional**. Panes render in a fixed display order (decision 6), so inserting one shifts
-     * every pane to its right into the next slot — and a slot whose content changed is a subtree
-     * Compose disposes and recreates. Turning on the Inventory pane while Tracker + Sheet are up
-     * therefore destroys the Sheet's WebView and re-boots Meteor in a fresh one, several seconds
-     * of blank column on the pane nobody touched, plus every scroll offset left of the insert.
+     * `PrimaryTabRow` gives every tab an equal share of the width, and FR-26's Actions tab made
+     * that share a quarter. Material's own `Tab(text = …)` then spends 32 dp of it on padding and
+     * lets the label **wrap** into the two-line tab slot, so on a 360-411 dp phone the longest
+     * label breaks mid-word — and every UI-scale step above 100 % makes it worse.
      *
-     * `key(surface)` is the whole fix, which is exactly why it is easy to delete as noise. There
-     * is no Compose test harness in `:app` (`StartDestinationNavigationTest` says why), so this
-     * is read out of the source in `UiScaleProviderTest`'s manner — structural, but structural is
-     * what the property is.
+     * The ruling was *truncation over wrapping, never mid-word wrapping*. `maxLines = 1` alone
+     * does not deliver it: the word still breaks and one line of the result is shown, which is
+     * the same bug in a smaller box. `softWrap = false` is the half that makes wrapping
+     * unrepresentable, so both are pinned, and pinned **structurally** — there is no Compose test
+     * harness in `:app` (`StartDestinationNavigationTest` says why), and a measuring rule that
+     * lives only inside a composable is a rule the next edit deletes as noise.
+     *
+     * The pane picker's segments are checked too. They are a different control with the same
+     * geometry — equal-width cells over the same four labels — so they are the same defect
+     * waiting on a tablet.
      */
+    @Test
+    fun `every equal-width chrome label is single-line and truncates rather than wrapping`() {
+        val source = mainSourceFiles().single { it.name == "PaneChrome.kt" }.readText()
+
+        listOf("HomeTabRow(", "fun PanePicker(").forEach { declaration ->
+            val start = source.indexOf(declaration)
+            assertTrue("PaneChrome.kt no longer declares $declaration", start >= 0)
+            // Bounded by the next KDoc, so one composable's label cannot satisfy the assertion
+            // for the other — every top-level declaration in this file carries one.
+            val end = source.indexOf("\n/**", start).let { if (it < 0) source.length else it }
+            val body = source.substring(start, end)
+
+            listOf("maxLines = 1", "softWrap = false", "TextOverflow.Ellipsis").forEach { rule ->
+                assertTrue(
+                    "$declaration must carry `$rule` on its label — BUG-4: a four-tab phone " +
+                        "row wrapped \"Inventory\" mid-word, and truncation is the ruling",
+                    body.contains(rule),
+                )
+            }
+        }
+    }
+
     @Test
     fun `the pane row gives each column a stable identity`() {
         val source = mainSourceFiles().single { it.name == "PaneChrome.kt" }.readText()
@@ -529,22 +824,16 @@ class PaneSelectionTest {
         // The player keeps Tracker + Actions on their wizard, then opens a fighter. The Actions
         // column must not render as an empty pane — and the preference must survive, so it is
         // still there when they go back to the wizard.
-        val stored = setOf(PaneSurface.TRACKER, PaneSurface.ACTIONS)
+        val stored = open(PaneSurface.TRACKER, PaneSurface.ACTIONS)
 
         val onFighter = characterHomeChrome(
             expandedWidth = true,
             selectedTab = CharacterHomeTab.Tracker,
-            storedPanes = stored,
-            available = serverNoActions,
+            layout = resolvePaneLayout(stored, serverNoActions),
             availableTabs = serverHomeTabs(hasActions = false),
+            surfaceOf = { it.surface },
         )
-        val onWizard = characterHomeChrome(
-            expandedWidth = true,
-            selectedTab = CharacterHomeTab.Tracker,
-            storedPanes = stored,
-            available = server,
-            availableTabs = serverTabs,
-        )
+        val onWizard = chromeFor(true, CharacterHomeTab.Tracker, stored)
 
         assertEquals(CharacterHomeChrome.Panes(listOf(PaneSurface.TRACKER)), onFighter)
         assertEquals(
@@ -560,9 +849,9 @@ class PaneSelectionTest {
         val chrome = characterHomeChrome(
             expandedWidth = true,
             selectedTab = CharacterHomeTab.Tracker,
-            storedPanes = setOf(PaneSurface.ACTIONS),
-            available = serverNoActions,
+            layout = resolvePaneLayout(open(PaneSurface.ACTIONS), serverNoActions),
             availableTabs = serverHomeTabs(hasActions = false),
+            surfaceOf = { it.surface },
         )
         assertEquals(CharacterHomeChrome.Panes(listOf(PaneSurface.TRACKER)), chrome)
     }
@@ -573,28 +862,23 @@ class PaneSelectionTest {
         // live edit removing the last spell, and EVERY cold restore onto this tab (discovery has
         // not answered yet). Without `resolveTab` the row would draw no selected tab and the
         // body would render a surface the player cannot navigate away from.
+        val noActionTabs = serverHomeTabs(hasActions = false)
         val chrome = characterHomeChrome(
             expandedWidth = false,
             selectedTab = CharacterHomeTab.Actions,
-            storedPanes = emptySet(),
-            available = serverNoActions,
-            availableTabs = serverHomeTabs(hasActions = false),
+            layout = resolvePaneLayout(emptyList(), serverNoActions),
+            availableTabs = noActionTabs,
+            surfaceOf = { it.surface },
         )
-        assertEquals(CharacterHomeChrome.Tabs(CharacterHomeTab.Tracker), chrome)
+        assertEquals(CharacterHomeChrome.Tabs(noActionTabs, CharacterHomeTab.Tracker), chrome)
     }
 
     @Test
     fun `a saved Actions tab is kept once discovery answers`() {
         // The transient case above must not be a one-way door: `resolveTab` reads, it does not
         // write, so the saved selection is still Actions when the board arrives a frame later.
-        val chrome = characterHomeChrome(
-            expandedWidth = false,
-            selectedTab = CharacterHomeTab.Actions,
-            storedPanes = emptySet(),
-            available = server,
-            availableTabs = serverTabs,
-        )
-        assertEquals(CharacterHomeChrome.Tabs(CharacterHomeTab.Actions), chrome)
+        val chrome = chromeFor(false, CharacterHomeTab.Actions, emptyList())
+        assertEquals(CharacterHomeChrome.Tabs(serverTabs, CharacterHomeTab.Actions), chrome)
     }
 
     @Test

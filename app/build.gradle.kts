@@ -60,8 +60,11 @@ android {
         // 3 shipped as 1.0.1. Both are live on Play, so both codes are spent for good —
         // a bump is part of preparing a release, not a step to remember at upload time.
         // 4 / 1.0.2 carries the WP8 pre-release review fixes.
-        versionCode = 17
-        versionName = "1.9.0"
+        // 18 / 1.9.1 carries FR-27 (configurable pane/tab order) and BUG-4 (phone tab labels
+        // wrapping mid-word). The FR row names the pair, so the bump belongs with the build
+        // rather than with the upload — see the comment above.
+        versionCode = 18
+        versionName = "1.9.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

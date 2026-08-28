@@ -9,18 +9,17 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -47,9 +46,12 @@ import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.ui.navigation.CharacterHomeTab
 import com.hashtagchow.magehand.ui.panes.CharacterHomeChrome
+import com.hashtagchow.magehand.ui.panes.HomeTabRow
+import com.hashtagchow.magehand.ui.panes.PaneOrderSheet
 import com.hashtagchow.magehand.ui.panes.PanePicker
 import com.hashtagchow.magehand.ui.panes.PaneRow
 import com.hashtagchow.magehand.ui.panes.characterHomeChrome
+import com.hashtagchow.magehand.ui.panes.resolvePaneLayout
 import com.hashtagchow.magehand.ui.panes.serverHomeTabs
 import com.hashtagchow.magehand.ui.panes.serverPaneSurfaces
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsScreen
@@ -103,8 +105,10 @@ import com.hashtagchow.magehand.ui.webview.rememberSheetWebViewState
  * [InventoryPane] and [SheetPane] purely so the two branches cannot drift apart.
  *
  * The phone path is structurally untouched (decision 5): with `LocalExpandedWidth` false — its
- * default, and every compact and medium window — this composes exactly the `PrimaryTabRow` and
- * `when` it composed before FR-17. `PaneSelectionTest` pins that.
+ * default, and every compact and medium window — this composes the same tab row and `when` it
+ * composed before FR-17. FR-27 moved the row itself into [HomeTabRow], shared with the local
+ * screen, because its order and its label measuring are now rules that have to hold on both
+ * screens; the branch it sits in is unchanged, and `PaneSelectionTest` pins that.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -122,6 +126,9 @@ fun CharacterHomeScreen(
     // the tracker's sheet: the two sheets are different controls over different state, and one
     // flag would make a rotation on the inventory tab reopen whichever sheet was last used.
     var inventoryCustomizeOpen by rememberSaveable { mutableStateOf(false) }
+    // FR-27's order sheet. A third flag rather than one shared with the two above, for their
+    // reason: three sheets, three controls, three pieces of saved state.
+    var paneOrderOpen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var hpPadOpen by rememberSaveable { mutableStateOf(false) }
     var addItemOpen by rememberSaveable { mutableStateOf(false) }
@@ -203,15 +210,19 @@ fun CharacterHomeScreen(
     // neither is derived from the other, which is what makes crossing the gate lossless in both
     // directions. See `characterHomeChrome`.
     val panes by viewModel.panes.collectAsStateWithLifecycle()
+    // FR-27: resolved ONCE, here, and handed to all three consumers — the chrome, the picker's
+    // toggle and the order sheet. Three readers of one order is the shape that cannot disagree
+    // with itself; see `characterHomeChrome`'s `layout` parameter.
+    val layout = remember(panes, availablePanes) { resolvePaneLayout(panes, availablePanes) }
     val chrome = characterHomeChrome(
         expandedWidth = LocalExpandedWidth.current,
         selectedTab = selectedTab,
-        storedPanes = panes,
-        available = availablePanes,
-        // Both gated lists, so a tab cannot be drawn without its pane or the reverse. The tab
+        layout = layout,
+        // The gated tab list, so a tab cannot be drawn without its pane or the reverse. The tab
         // branch also needs this to resolve a saved `Actions` selection on a character that has
         // none — see `resolveTab`.
         availableTabs = tabs,
+        surfaceOf = { it.surface },
     )
 
     // 14 decision 9: in pane mode the WebView's lifetime is the Sheet pane's selection, not the
@@ -315,6 +326,26 @@ fun CharacterHomeScreen(
                                 )
                             }
                         }
+                        // FR-27 decision 2's wrench → sheet, and the one app-bar action here
+                        // that belongs to the *screen* rather than to a tab — so it is drawn
+                        // unconditionally, after the per-tab group and before Settings.
+                        //
+                        // `Menu` rather than a third `Build`: the bar already carries two
+                        // wrenches (tracker, inventory) and in pane mode both can be up at
+                        // once, so a third identical glyph would be unreadable. `List` is
+                        // taken by the tracker's history in the same bar and `MoreVert`
+                        // promises an overflow menu this app does not have; ≡ is "a list of
+                        // lines", which is exactly what the sheet arranges, and this app has
+                        // no navigation drawer anywhere for it to be confused with.
+                        IconButton(
+                            onClick = { paneOrderOpen = true },
+                            modifier = Modifier.testTag("panes:order:open"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Menu,
+                                contentDescription = stringResource(R.string.panes_order_title),
+                            )
+                        }
                         IconButton(onClick = onSettingsClick) {
                             Icon(
                                 imageVector = Icons.Filled.Settings,
@@ -391,19 +422,15 @@ fun CharacterHomeScreen(
 
                 when (chrome) {
                     is CharacterHomeChrome.Tabs -> {
-                        // The index within the DRAWN list, not the enum ordinal. Those agreed
-                        // while every tab was always drawn; with the Actions tab gated they do
-                        // not, and `ordinal` would put the selection indicator under the wrong
-                        // tab for everything after the hole (i.e. the Sheet).
-                        PrimaryTabRow(selectedTabIndex = tabs.indexOf(chrome.selected)) {
-                            tabs.forEach { tab ->
-                                Tab(
-                                    selected = tab == chrome.selected,
-                                    onClick = { selectedTab = tab },
-                                    text = { Text(stringResource(tab.titleResId)) },
-                                )
-                            }
-                        }
+                        // `chrome.tabs`, not `tabs`: FR-27 puts the row in the player's order and
+                        // the chrome is what resolved it. BUG-4's single-line labels live in
+                        // `HomeTabRow`, shared with the local screen — see its KDoc.
+                        HomeTabRow(
+                            tabs = chrome.tabs,
+                            selected = chrome.selected,
+                            onSelect = { selectedTab = it },
+                            titleResId = { it.titleResId },
+                        )
 
                         when (chrome.selected) {
                             CharacterHomeTab.Tracker -> tracker()
@@ -416,12 +443,13 @@ fun CharacterHomeScreen(
                     is CharacterHomeChrome.Panes -> {
                         PanePicker(
                             panes = chrome.panes,
-                            // The same gated list the chrome resolved against. Passing the
-                            // ungated one here would draw an Actions segment for a pane
-                            // `resolvePanes` refuses to render — a control that does nothing.
-                            available = availablePanes,
-                            // The *resolved* panes, not the stored set — see `togglePane`.
-                            onToggle = { viewModel.togglePane(chrome.panes.toSet(), it) },
+                            // The resolved order, which is already gated: passing the ungated
+                            // list would draw an Actions segment for a pane `resolvePaneLayout`
+                            // refuses to render — a control that does nothing — and would put
+                            // the segments in a different order from the columns beneath them.
+                            available = layout.map { it.surface },
+                            // The *resolved* arrangement, not the stored one — see `togglePane`.
+                            onToggle = { viewModel.togglePane(layout, it) },
                         )
                         PaneRow(panes = chrome.panes) { surface ->
                             when (surface) {
@@ -518,6 +546,18 @@ fun CharacterHomeScreen(
                     onMove = viewModel::moveInventorySection,
                     onSetHidden = viewModel::setInventorySectionHidden,
                     onReset = viewModel::resetInventoryLayout,
+                )
+            }
+
+            if (paneOrderOpen) {
+                PaneOrderSheet(
+                    // The same resolved order the chrome drew, so the sheet lists what the
+                    // player is looking at — including, on a phone, the surfaces that are not
+                    // open as panes. See `PaneOrderSheet`.
+                    order = layout.map { it.surface },
+                    onDismiss = { paneOrderOpen = false },
+                    onMove = { surface, delta -> viewModel.movePane(layout, surface, delta) },
+                    onReset = viewModel::resetPaneLayout,
                 )
             }
 

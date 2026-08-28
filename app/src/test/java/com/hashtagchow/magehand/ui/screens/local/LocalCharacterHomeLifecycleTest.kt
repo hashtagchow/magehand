@@ -28,7 +28,7 @@ import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
-import com.hashtagchow.magehand.core.data.settings.PaneSurface
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.data.settings.UiScale
 
@@ -214,8 +214,8 @@ private object FakeInventoryLayoutStore : InventoryLayoutStore {
 
 /** FR-17's store, likewise: this class is about the open/close hand-off, not the pane choice. */
 private object FakePaneLayoutStore : PaneLayoutStore {
-    override fun panes(characterKey: String): Flow<Set<PaneSurface>> = flowOf(emptySet())
-    override suspend fun setPanes(characterKey: String, panes: Set<PaneSurface>) = Unit
+    override fun panes(characterKey: String): Flow<List<PaneLayoutEntry>> = flowOf(emptyList())
+    override suspend fun setPanes(characterKey: String, panes: List<PaneLayoutEntry>) = Unit
     override suspend fun clearForCharacter(characterKey: String) = Unit
     override suspend fun deleteForAccount(accountId: String) = Unit
 }

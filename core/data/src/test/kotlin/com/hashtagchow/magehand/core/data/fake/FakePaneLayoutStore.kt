@@ -3,8 +3,8 @@ package com.hashtagchow.magehand.core.data.fake
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
-import com.hashtagchow.magehand.core.data.settings.PaneSurface
 
 /**
  * An in-memory [PaneLayoutStore], for tests about something *else* that happen to construct a
@@ -18,17 +18,17 @@ import com.hashtagchow.magehand.core.data.settings.PaneSurface
  */
 class FakePaneLayoutStore : PaneLayoutStore {
 
-    private val entries = MutableStateFlow<Map<String, Set<PaneSurface>>>(emptyMap())
+    private val entries = MutableStateFlow<Map<String, List<PaneLayoutEntry>>>(emptyMap())
 
     /** Every key currently held, for assertions about what a sweep left behind. */
     val keys: Set<String> get() = entries.value.keys
 
-    override fun panes(characterKey: String): Flow<Set<PaneSurface>> =
+    override fun panes(characterKey: String): Flow<List<PaneLayoutEntry>> =
         entries.map { it[characterKey].orEmpty() }
 
-    override suspend fun setPanes(characterKey: String, panes: Set<PaneSurface>) {
+    override suspend fun setPanes(characterKey: String, panes: List<PaneLayoutEntry>) {
         entries.value = entries.value.toMutableMap().apply {
-            // The real store drops the key rather than storing an empty set; a fake that kept
+            // The real store drops the key rather than storing an empty list; a fake that kept
             // one would make `keys` disagree with the thing it stands in for.
             if (panes.isEmpty()) remove(characterKey) else put(characterKey, panes)
         }

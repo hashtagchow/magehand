@@ -14,13 +14,12 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Tab
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -51,10 +50,13 @@ import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.ui.navigation.LocalCharacterHomeTab
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.ui.panes.CharacterHomeChrome
+import com.hashtagchow.magehand.ui.panes.HomeTabRow
+import com.hashtagchow.magehand.ui.panes.PaneOrderSheet
 import com.hashtagchow.magehand.ui.panes.PanePicker
 import com.hashtagchow.magehand.ui.panes.PaneRow
 import com.hashtagchow.magehand.ui.panes.characterHomeChrome
 import com.hashtagchow.magehand.ui.panes.localPaneSurfaces
+import com.hashtagchow.magehand.ui.panes.resolvePaneLayout
 import com.hashtagchow.magehand.ui.panes.surface
 import com.hashtagchow.magehand.ui.window.LocalExpandedWidth
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
@@ -136,6 +138,8 @@ fun LocalCharacterHomeScreen(
     /** The inventory tab's own wrench (12 decisions 3 and 6). Its own flag, as on the DiceCloud
      *  screen and for the same reason: two sheets, two controls, two pieces of saved state. */
     var inventoryCustomizeOpen by rememberSaveable { mutableStateOf(false) }
+    /** FR-27's order sheet, on its own flag for the reason the two above are. */
+    var paneOrderOpen by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var hpPadOpen by rememberSaveable { mutableStateOf(false) }
     var addItemOpen by rememberSaveable { mutableStateOf(false) }
@@ -146,15 +150,18 @@ fun LocalCharacterHomeScreen(
     // 14 decisions 5 + 10, exactly as on the DiceCloud screen: both halves of the state are read
     // and one is rendered, so crossing the width gate loses neither.
     val panes by viewModel.panes.collectAsStateWithLifecycle()
+    // FR-27: resolved once and handed to the chrome, the picker's toggle and the order sheet —
+    // the DiceCloud screen's shape, over the smaller surface list (decision 4).
+    val layout = remember(panes) { resolvePaneLayout(panes, localPaneSurfaces) }
     val chrome = characterHomeChrome(
         expandedWidth = LocalExpandedWidth.current,
         selectedTab = selectedTab,
-        storedPanes = panes,
-        available = localPaneSurfaces,
+        layout = layout,
         // Every tab this screen has, always: nothing on the local path is discovery-gated. The
         // parameter exists for FR-26's Actions tab on the server screen, and passing the whole
         // list here keeps `resolveTab` a no-op rather than a branch.
         availableTabs = tabs,
+        surfaceOf = { it.surface },
     )
 
     // The undo snackbar, identical to the DiceCloud tracker's — `showSnackbar` suspends until
@@ -265,6 +272,18 @@ fun LocalCharacterHomeScreen(
                             )
                         }
                     }
+                    // FR-27 decision 2's wrench → sheet — the DiceCloud bar's, unchanged, and
+                    // in the same place relative to the screen-level action beside it. See
+                    // that screen for why the glyph is `Menu` and not a third `Build`.
+                    IconButton(
+                        onClick = { paneOrderOpen = true },
+                        modifier = Modifier.testTag("panes:order:open"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Menu,
+                            contentDescription = stringResource(R.string.panes_order_title),
+                        )
+                    }
                     IconButton(
                         onClick = { onEdit(uiState.characterId) },
                         modifier = Modifier.testTag("local:edit"),
@@ -337,15 +356,17 @@ fun LocalCharacterHomeScreen(
 
             when (chrome) {
                 is CharacterHomeChrome.Tabs -> {
-                    PrimaryTabRow(selectedTabIndex = chrome.selected.ordinal) {
-                        tabs.forEach { tab ->
-                            Tab(
-                                selected = tab == chrome.selected,
-                                onClick = { selectedTab = tab },
-                                text = { Text(stringResource(tab.titleResId)) },
-                            )
-                        }
-                    }
+                    // `chrome.tabs`, not `tabs`: FR-27 puts the row in the player's order and the
+                    // chrome is what resolved it. This screen used to index the indicator by
+                    // `ordinal`, which was true only while the row was always the declaration
+                    // order; `HomeTabRow` indexes into the drawn list instead, and carries
+                    // BUG-4's single-line labels — see its KDoc.
+                    HomeTabRow(
+                        tabs = chrome.tabs,
+                        selected = chrome.selected,
+                        onSelect = { selectedTab = it },
+                        titleResId = { it.titleResId },
+                    )
 
                     when (chrome.selected) {
                         LocalCharacterHomeTab.Tracker -> tracker()
@@ -356,8 +377,9 @@ fun LocalCharacterHomeScreen(
                 is CharacterHomeChrome.Panes -> {
                     PanePicker(
                         panes = chrome.panes,
-                        available = localPaneSurfaces,
-                        onToggle = { viewModel.togglePane(chrome.panes.toSet(), it) },
+                        // The resolved order, so the segments sit above the columns they name.
+                        available = layout.map { it.surface },
+                        onToggle = { viewModel.togglePane(layout, it) },
                     )
                     PaneRow(panes = chrome.panes) { surface ->
                         when (surface) {
@@ -442,6 +464,15 @@ fun LocalCharacterHomeScreen(
                 state = uiState.tracker,
                 onConfirm = { viewModel.rest(kind) },
                 onDismiss = { restToConfirm = null },
+            )
+        }
+
+        if (paneOrderOpen) {
+            PaneOrderSheet(
+                order = layout.map { it.surface },
+                onDismiss = { paneOrderOpen = false },
+                onMove = { surface, delta -> viewModel.movePane(layout, surface, delta) },
+                onReset = viewModel::resetPaneLayout,
             )
         }
 

@@ -35,6 +35,7 @@ import com.hashtagchow.magehand.core.data.settings.DataStorePaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
+import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import java.io.File
@@ -694,7 +695,7 @@ class LocalCharacterRepositoryTest {
         val doomed = saveOrFail(form(name = "Bracken"))
         val survivor = saveOrFail(form(name = "Sorrel"))
         val serverCharacter = PaneLayoutStore.serverKey("acct-1", "creature-1")
-        val chosen = setOf(PaneSurface.TRACKER, PaneSurface.INVENTORY)
+        val chosen = listOf(PaneLayoutEntry(PaneSurface.TRACKER), PaneLayoutEntry(PaneSurface.INVENTORY))
 
         paneLayouts.setPanes(PaneLayoutStore.localKey(doomed), chosen)
         paneLayouts.setPanes(PaneLayoutStore.localKey(survivor), chosen)
