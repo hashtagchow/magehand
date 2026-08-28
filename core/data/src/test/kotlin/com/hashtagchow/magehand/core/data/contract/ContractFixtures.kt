@@ -1,6 +1,8 @@
 package com.hashtagchow.magehand.core.data.contract
 
+import com.hashtagchow.magehand.core.data.tracker.TrackerEngine
 import com.hashtagchow.magehand.core.ddp.MeteorId
+import com.hashtagchow.magehand.core.model.DeathSaves
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -66,6 +68,7 @@ object ContractFixtures {
     val emptyResourceId: String = fakeId("resource-empty")
     val hitPointsId: String = fakeId("hit-points")
     val tempHitPointsId: String = fakeId("temp-hit-points")
+    val downedHitPointsId: String = fakeId("death-save-hit-points")
     val rageToggleId: String = fakeId("toggle-rage")
     val concentrationToggleId: String = fakeId("toggle-concentration")
     val computedToggleId: String = fakeId("toggle-computed")
@@ -132,17 +135,34 @@ object ContractFixtures {
                 id = spellSlotUnreachableId, name = "Level 9 Spell Slots", attributeType = "spellSlot",
                 total = 0, damage = 0, reset = "longRest", spellSlotLevel = 9, order = 12,
             ),
-            // Rule 1 exclusion, THE quirk: death saves are spell slots with `reset: null`.
-            // One states the field as JSON null, one omits it — both are `reset == null` and
-            // both must be excluded, and a consumer reading only one shape would ship the bug.
+            // The death-save pair (FR-23), and the two facts about it that pull in opposite
+            // directions:
+            //
+            //  - It is EXCLUDED from the slot list. These rows carry `reset == null` — one as an
+            //    explicit JSON null, one as an omitted key, because both shapes occur and a
+            //    consumer reading only one would ship the bug.
+            //  - It is DISCOVERED as death saves, by `variableName` and nothing else (decision
+            //    19). Schema 4's fixture omitted `variableName` entirely, which quietly encoded
+            //    the retired reading: it modelled a pair that MageHand's own engine would not
+            //    recognise, and the export then had no way to state what does recognise it.
+            //
+            // `reset == null` doing both jobs on one property is exactly the coincidence the
+            // probe retired — the exclusion is real, its old explanation was not.
+            //
+            // Storage is INVERTED (decision 19): `value` is the MARK count and `damage` is
+            // `MAX − value`, so `damage` is written as `MAX − marks` here and the shared
+            // builder's `value = total − damage` lands on the marks.
             attribute(
                 id = deathSaveSuccessId, name = "Succeeded Saves", attributeType = "spellSlot",
-                total = 3, damage = 1, reset = null, spellSlotLevel = null, order = 13,
-                explicitNullReset = true,
+                variableName = TrackerEngine.VAR_DEATH_SAVE_SUCCESSES,
+                total = DeathSaves.MAX, damage = DeathSaves.MAX - 1, reset = null,
+                spellSlotLevel = null, order = 13, explicitNullReset = true,
             ),
             attribute(
                 id = deathSaveFailureId, name = "Failed Saves", attributeType = "spellSlot",
-                total = 3, damage = 0, reset = null, spellSlotLevel = null, order = 14,
+                variableName = TrackerEngine.VAR_DEATH_SAVE_FAILURES,
+                total = DeathSaves.MAX, damage = DeathSaves.MAX - 2, reset = null,
+                spellSlotLevel = null, order = 14,
             ),
             // Soft-removed and inactive slots: delivered by the server, dropped by discovery.
             attribute(
@@ -180,6 +200,68 @@ object ContractFixtures {
             toggle(id = concentrationToggleId, name = "Concentration: Bless", enabled = true, order = 31),
             toggle(id = computedToggleId, name = "Bloodied", enabled = null, order = 32),
         ),
+    )
+
+    /**
+     * FR-23's death-save trigger, as a sheet that can be moved through all three cases.
+     *
+     * The block's condition has two halves and they fail in different places, so one fixture is
+     * not enough to prove either: discovery finds the pair (or does not), and the HP row reads
+     * zero (or does not). Three sheets built from this one function cover the cross-product that
+     * matters — downed with the pair, up with the pair, downed without it — and the ONLY thing
+     * that differs between the first two is `hitPointsValue`, which is what makes the vector a
+     * statement about the trigger rather than about two unrelated sheets.
+     *
+     * Deliberately minimal otherwise. A tracker fixture full of slots and toggles would prove
+     * the same thing while burying it.
+     *
+     * @param hitPointsValue what the `hitPoints` row reads. `0` is the downed case.
+     * @param withPair `false` omits BOTH halves — the Dummy's shape, and decision 18's
+     *   *"no pair, no block, no error"*.
+     * @param successes filled success pips, stored inverted; see [deathSave].
+     */
+    fun deathSaveSheetBody(
+        hitPointsValue: Int,
+        withPair: Boolean,
+        successes: Int = 1,
+        failures: Int = 2,
+    ): JsonObject = snapshotBody(
+        creature = creature(),
+        properties = listOfNotNull(
+            attribute(
+                id = downedHitPointsId, name = "Hit Points", attributeType = "healthBar",
+                variableName = TrackerEngine.VAR_HIT_POINTS,
+                total = DOWNED_HP_TOTAL, damage = DOWNED_HP_TOTAL - hitPointsValue, order = 1,
+            ),
+            if (withPair) {
+                deathSave(deathSaveSuccessId, TrackerEngine.VAR_DEATH_SAVE_SUCCESSES, successes, order = 2)
+            } else {
+                null
+            },
+            if (withPair) {
+                deathSave(deathSaveFailureId, TrackerEngine.VAR_DEATH_SAVE_FAILURES, failures, order = 3)
+            } else {
+                null
+            },
+        ),
+    )
+
+    private const val DOWNED_HP_TOTAL = 24
+
+    /**
+     * One half of the death-save pair, in the inverted storage decision 19 records.
+     *
+     * `value` is the **mark count** and `damage` is `MAX − value`. Both are written, because the
+     * identity is the thing a consumer has to believe: production reads `value` when the server
+     * published it and falls back to `total − damage`, and a fixture that stated only one of them
+     * would let a client that reads the wrong field pass.
+     *
+     * `attributeType` is `spellSlot` because that is what the probe's sheets carry — and it is
+     * deliberately **not** what discovery keys on. See `TrackerEngine.deathSaves`.
+     */
+    fun deathSave(id: String, variableName: String, marks: Int, order: Int): JsonObject = attribute(
+        id = id, name = variableName, attributeType = "spellSlot", variableName = variableName,
+        total = DeathSaves.MAX, damage = DeathSaves.MAX - marks, order = order,
     )
 
     /**

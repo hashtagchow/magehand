@@ -25,6 +25,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -69,6 +72,11 @@ fun DmViewScreen(
     viewModel: DmViewViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val feed by viewModel.feed.collectAsStateWithLifecycle()
+    // FR-25 decision 10: **default collapsed**, and not persisted — a glance during one session
+    // at a table, like this screen's own editing toggle. `rememberSaveable` so a rotation
+    // mid-read does not shut it.
+    var feedExpanded by rememberSaveable { mutableStateOf(false) }
 
     // 06 §Snapshot lifecycle step 2: "mirror → snapshot refresh on every app-background",
     // `CharacterHomeScreen`'s hook verbatim, for all the open cards at once.
@@ -127,14 +135,26 @@ fun DmViewScreen(
                     CircularProgressIndicator()
                 }
 
-                else -> DmCardGrid(
-                    cards = uiState.cards,
-                    onCardClick = onCharacterClick,
-                    onSpend = viewModel::spend,
-                    onRestore = viewModel::restore,
-                    onChangeHitPoints = viewModel::changeHitPoints,
-                    onToggleCondition = viewModel::toggleCondition,
-                )
+                // FR-25 decision 10: the grid and the feed side by side. A `Row`, not an
+                // overlay, so `DmCardGrid`'s own `BoxWithConstraints` measures the width that is
+                // actually left to it and `dmGridColumns` stays correct — an overlay would have
+                // let it keep counting columns against the full window.
+                else -> Row(Modifier.fillMaxSize()) {
+                    DmCardGrid(
+                        cards = uiState.cards,
+                        onCardClick = onCharacterClick,
+                        onSpend = viewModel::spend,
+                        onRestore = viewModel::restore,
+                        onChangeHitPoints = viewModel::changeHitPoints,
+                        onToggleCondition = viewModel::toggleCondition,
+                        modifier = Modifier.weight(1f),
+                    )
+                    DmFeedPanel(
+                        entries = feed,
+                        expanded = feedExpanded,
+                        onToggle = { feedExpanded = !feedExpanded },
+                    )
+                }
             }
         }
     }
@@ -162,8 +182,9 @@ private fun DmCardGrid(
     onRestore: (String, String, Int) -> Unit,
     onChangeHitPoints: (String, Int) -> Unit,
     onToggleCondition: (String, String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    BoxWithConstraints(modifier.fillMaxSize()) {
         val columns = dmGridColumns(maxWidth.value.toInt())
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns),

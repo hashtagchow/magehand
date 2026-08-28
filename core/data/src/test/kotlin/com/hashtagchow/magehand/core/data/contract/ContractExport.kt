@@ -20,6 +20,7 @@ import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.DamageDefense
+import com.hashtagchow.magehand.core.model.DeathSaves
 import com.hashtagchow.magehand.core.model.EquipGroup
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryContainer
@@ -56,8 +57,8 @@ import kotlin.time.Duration.Companion.milliseconds
  * The sibling **WebHand** web app targets parity with this one against the same DiceCloud
  * server, and every server fact in this repo was bought with a live probe: `description` must
  * be an object, `order` is mandatory on an insert, `equip` reparents, `damage {set}` takes the
- * *remaining* value, `adjustQuantity increment` is a consumption amount, death saves are spell
- * slots with no reset rule, soft-removed properties keep streaming. A second client
+ * *remaining* value, `adjustQuantity increment` is a consumption amount, death saves are found by
+ * `variableName` and stored inverted, soft-removed properties keep streaming. A second client
  * re-deriving those from the same server would re-learn each of them the same way MageHand did
  * — by shipping the bug first. So the contract is exported instead, and vendored
  * (webhand design 01 §6).
@@ -109,8 +110,22 @@ object ContractExport {
      * which is the silent-wrong-answer class the previous two bumps exist for. `tempMatch`
      * now names a SET, so a consumer still reading it as a single literal has a shape change
      * to trip over rather than a value it can keep mis-reading.
+     *
+     * **5** — FR-23 death saves (`domain/rules.json#discovery.deathSaves`, the three
+     * `death-save-*` discovery vectors, the `damage.markDeathSave*` and `damage.clearDeathSave*`
+     * write vectors, and `deathSaves` on every exported `trackerBoard`). Like 4 this is a bump
+     * rather than a quiet addition **because something already exported is now wrong**: schema 4
+     * said `reset == null` IS the death-save filter, and design 15's D11 retired that reading —
+     * the null is a coincidence, and death saves are discovered by `variableName ∈
+     * {deathSaveSuccesses, deathSaveFails}`. The harm is the `tempHitPoints` shape again. A
+     * consumer holding the old wording has no way to *find* the pair (it was told a shape, and
+     * the shape identifies nothing), and on a sheet whose pair is typed `attribute` rather than
+     * `spellSlot` the old rule does not even exclude them — two phantom slot rows, no error. The
+     * exclusion itself is unchanged and still required; only its stated reason is corrected, and
+     * `#discovery.spellSlots.exclusionCorrection` carries the correction in the document a
+     * consumer is already reading.
      */
-    const val SCHEMA_VERSION: Int = 4
+    const val SCHEMA_VERSION: Int = 5
 
     /** Where the export lives, relative to the repository root. */
     const val DIRECTORY: String = "contract-export"
@@ -967,6 +982,122 @@ object ContractExport {
         CreatureSheet.fromSnapshotJson(ContractFixtures.rollsSheetBody(), ContractFixtures.creatureId)
     }
 
+    // -----------------------------------------------------------------------
+    // FR-23 death saves
+    // -----------------------------------------------------------------------
+
+    /**
+     * The three death-save cases, named by the fact each one carries.
+     *
+     * @param hitPointsValue what the `hitPoints` row reads.
+     * @param withPair whether the sheet carries the `deathSaveSuccesses`/`deathSaveFails` pair.
+     */
+    internal class DeathSaveCase(
+        val name: String,
+        val purpose: String,
+        val hitPointsValue: Int,
+        val withPair: Boolean,
+    ) {
+        val body: JsonObject by lazy {
+            ContractFixtures.deathSaveSheetBody(hitPointsValue = hitPointsValue, withPair = withPair)
+        }
+        val board: TrackerBoard by lazy {
+            TrackerEngine.build(CreatureSheet.fromSnapshotJson(body, ContractFixtures.creatureId))
+        }
+    }
+
+    internal val DEATH_SAVE_CASES: List<DeathSaveCase> by lazy {
+        listOf(
+            DeathSaveCase(
+                name = "death-save-downed",
+                purpose = "Both halves of the trigger hold: the pair is discovered AND the " +
+                    "`hitPoints` row reads zero. The block renders.",
+                hitPointsValue = 0,
+                withPair = true,
+            ),
+            DeathSaveCase(
+                name = "death-save-above-zero",
+                purpose = "The SAME sheet with hit points above zero — the only field that " +
+                    "differs. Discovery still returns the pair (that is discovery's whole job " +
+                    "and it does not read the HP row), and the block does not render. A " +
+                    "consumer that gates on discovery alone shows a death-save block to a " +
+                    "healthy character.",
+                hitPointsValue = 9,
+                withPair = true,
+            ),
+            DeathSaveCase(
+                name = "death-save-no-pair",
+                purpose = "Zero hit points on a sheet that carries NO pair — the MageHand Test " +
+                    "Dummy's shape, and decision 18's *\"no pair, no block, no error\"*. " +
+                    "Discovery returns null and that is an ordinary answer, not a failure.",
+                hitPointsValue = 0,
+                withPair = false,
+            ),
+        )
+    }
+
+    /** The downed sheet's board, which the write vectors take their real property ids from. */
+    private val downedBoard: TrackerBoard by lazy {
+        DEATH_SAVE_CASES.first { it.name == "death-save-downed" }.board
+    }
+
+    private val downedSaves: DeathSaves by lazy {
+        downedBoard.deathSaves ?: error("the death-save fixture must express the pair")
+    }
+
+    /**
+     * Decision 18's trigger, **restated here and marked `generated: false` in the export.**
+     *
+     * ### Why it is restated rather than read off a constant
+     *
+     * The condition is one line of production code — `deathSavePair?.takeIf { hp?.current == 0 }`
+     * in `TrackerUiState.deathSaves` — and it lives in the `:app` module, which this exporter
+     * (in `:core:data`'s test source set) cannot see and must not be made to see. Widening a
+     * visibility or moving a UI-state gate down a layer to suit an exporter would be a product
+     * change made for a test's convenience, which is the argument [CHARACTER_LIST] already
+     * makes about a private constant and the backoff schedule makes about a private field.
+     *
+     * ### What IS pinned, and why that is the load-bearing half
+     *
+     * The half a second client gets wrong is not the comparison; it is *which* HP number to
+     * compare and *where the gate belongs*. Production deliberately does **not** put it in
+     * discovery: `TrackerEngine.build` returns the pair whatever the HP row says, because the
+     * board is built before the optimistic overlay and gating there would leave the block up
+     * through a heal and drop it on the server echo. `ContractExportTest` pins exactly that —
+     * the same pair, discovered identically at 0 HP and at 9 — which is the fact that makes a
+     * separately-stated trigger *necessary* rather than redundant.
+     *
+     * So the export states the predicate, names the production site it is copied from, flags it
+     * `false`, and proves the engine behaviour underneath it by running the engine.
+     */
+    internal fun deathSaveBlockVisible(board: TrackerBoard): Boolean =
+        board.deathSaves != null && board.hp?.value == 0
+
+    /**
+     * The `TrackedResource` a death-save write is built against, as `DefaultOpenCharacter`
+     * builds it.
+     *
+     * Restated for the same reason as the trigger: `submitDeathSave` is private, its two display
+     * names are file-private constants in `OpenCharacter.kt`, and neither is on the wire. What
+     * IS on the wire is the method choice, and that follows from [TrackerKind]: `WriteOp.setValue`
+     * routes anything that is not an [TrackerKind.ITEM] to `creatureProperties.damage`, which is
+     * the method decision 19 specifies. Naming the kind wrongly here would silently route the
+     * export's vector to `adjustQuantity` — a different method, in a different rate class,
+     * against a property that has no quantity — so `ContractExportTest` asserts the recorded
+     * frame's method rather than trusting this function.
+     *
+     * `value` is the property's CURRENT mark count, which is what makes `setValue`'s generated
+     * inverse a real inverse: UNDO puts the pip back where it was instead of clearing the row.
+     */
+    private fun deathSaveRow(propertyId: String, currentMarks: Int, name: String): TrackedResource =
+        TrackedResource(
+            propertyId = propertyId,
+            kind = TrackerKind.RESOURCE,
+            name = name,
+            value = currentMarks,
+            total = DeathSaves.MAX,
+        )
+
     /** The rows the write vectors are built from — produced by the engine, not written down. */
     private val trackerBoard: TrackerBoard by lazy { TrackerEngine.build(trackerSheet) }
 
@@ -1033,6 +1164,80 @@ object ContractExport {
                     "(`set 5` on a 20-point row produced `value: 5, damage: 15`). Following the " +
                     "old reading sets a row to its own complement, and 'heal to full' — where " +
                     "`total − desired == 0` — would drop the character to 0 HP.",
+            ),
+
+            // --- creatureProperties.damage, FR-23 death saves ------------------------
+            Vector(
+                name = "damage.markDeathSaveFailure",
+                op = WriteOp.setValue(
+                    deathSaveRow(
+                        propertyId = downedSaves.failuresPropertyId,
+                        currentMarks = downedSaves.failures,
+                        name = "Death save failures",
+                    ),
+                    downedSaves.failures + 1,
+                ),
+                note = "Mark one more failed death save. Same method and same rate class as an " +
+                    "HP tap — `creatureProperties.damage`, the 20-per-5-second lane — which is " +
+                    "what makes a run of pip taps behave. `adjustQuantity` would be the " +
+                    "5-per-5-second lane against a property that has no quantity.",
+                quirk = "An ABSOLUTE `set`, never an increment, and the value is the MARK COUNT " +
+                    "— the inverted storage in domain/rules.json#discovery.deathSaves. Two " +
+                    "consequences a second client should lean on rather than work around: the " +
+                    "call is IDEMPOTENT (re-sending `set 2` after a reply was lost leaves the " +
+                    "row at 2, where a lost `increment` would double-mark), and the server " +
+                    "CLAMPS natively at the property's `total` (probe-verified), so a client " +
+                    "does not need a pre-flight read to stay inside 0..3. Clamp on the READ " +
+                    "side anyway: a row another client drove to 4 would otherwise paint a " +
+                    "fourth pip into a row of three. CORRECTION (1.8.0 M3, unresolved): " +
+                    "`damage{operation:'set'}` has been observed to silently no-op from some " +
+                    "states (unresolved; probe pending) — consumers should read back or prefer " +
+                    "signed increment where exactness is not required. The idempotence claim " +
+                    "above still holds where the call lands at all; this is about the states " +
+                    "where it does not land.",
+            ),
+            Vector(
+                name = "damage.clearDeathSaveSuccesses",
+                op = WriteOp.setValue(
+                    deathSaveRow(
+                        propertyId = downedSaves.successesPropertyId,
+                        currentMarks = downedSaves.successes,
+                        name = "Death save successes",
+                    ),
+                    0,
+                ),
+                note = "Half of the clear PAIR. See `deathSaveClear` in this document for when " +
+                    "these two go out and — more importantly — when they must not.",
+                quirk = "`undoable: true` above describes the CALL, not this use of it. The op " +
+                    "has a perfectly good inverse — that is why the same call serves a player's " +
+                    "own pip tap — but the clear that rides a heal is submitted with NO RECEIPT: " +
+                    "no history row, no undo entry. The undo stack is LIFO and the clears are " +
+                    "sent after the heal, so a clear that pushed its inverse would make UNDO " +
+                    "reverse the clear instead of the heal the user actually made. See " +
+                    "`deathSaveClear.noReceipt`. CORRECTION (1.8.0 M3, unresolved): " +
+                    "`damage{operation:'set'}` has been observed to silently no-op from some " +
+                    "states (unresolved; probe pending) — consumers should read back or prefer " +
+                    "signed increment where exactness is not required.",
+            ),
+            Vector(
+                name = "damage.clearDeathSaveFailures",
+                op = WriteOp.setValue(
+                    deathSaveRow(
+                        propertyId = downedSaves.failuresPropertyId,
+                        currentMarks = downedSaves.failures,
+                        name = "Death save failures",
+                    ),
+                    0,
+                ),
+                note = "The other half. Both properties are cleared, and only the halves that " +
+                    "are non-zero are sent — a `set 0` on a row already at 0 is a call that " +
+                    "spends the shared bucket to change nothing.",
+                quirk = "Same receipt caveat as the successes half: `undoable: true` is a " +
+                    "property of the call, and the heal-attached clear deliberately does not " +
+                    "take it. See `deathSaveClear.noReceipt`. Same CORRECTION too (1.8.0 M3, " +
+                    "unresolved): `damage{operation:'set'}` has been observed to silently " +
+                    "no-op from some states (unresolved; probe pending) — consumers should " +
+                    "read back or prefer signed increment where exactness is not required.",
             ),
 
             // --- creatureProperties.adjustQuantity ------------------------------------
@@ -1239,6 +1444,7 @@ object ContractExport {
                 }
             },
         )
+        put("deathSaveClear", deathSaveClearRule())
         put(
             "documentedNotCalled",
             buildJsonArray {
@@ -1253,6 +1459,76 @@ object ContractExport {
                     )
                 }
             },
+        )
+    }
+
+    /**
+     * FR-23 decision 20, as the one paragraph a porting client has to read before it writes a
+     * collector.
+     *
+     * The vectors above give the two frames; nothing in a frame can say *when* it may be sent,
+     * and "when" is the whole of this decision. Stated here rather than only in
+     * `domain/rules.json` because this is the document somebody has open while wiring the write
+     * path, and the obvious implementation — observe `hp`, clear on 0 → positive — passes every
+     * local test and costs the whole table.
+     */
+    private fun deathSaveClearRule(): JsonObject = buildJsonObject {
+        put("generated", false)
+        put("clears", JsonArray(listOf("damage.clearDeathSaveSuccesses", "damage.clearDeathSaveFailures").map { JsonPrimitive(it) }))
+        put(
+            "serverNeverClears",
+            "The server does NOT clear death saves. Its reset triggers are children of the " +
+                "\"0 HP?\" toggle and event-gated, so a plain `damage` call that heals a " +
+                "character off zero fires none of them (probe D3). If the marks are to go away, " +
+                "a client has to send these two calls. Nothing else will.",
+        )
+        put(
+            "attachedToOurOwnWrite",
+            "The clear pair is attached to THIS client's own write — the `damage` call that " +
+                "takes hit points from 0 to positive, whether that is a heal or a direct entry " +
+                "— and is sent in the same gesture. Condition: `from == 0 && to > 0`, read off " +
+                "the number ON SCREEN. Not `to > 0` alone: healing 4 → 9 has no marks to clear " +
+                "and would file two no-op writes on every heal for the whole game.",
+        )
+        put(
+            "neverReactive",
+            "NEVER fire these from OBSERVED state. A collector that watches the mirror and " +
+                "clears when hit points cross 0 → positive is the forbidden implementation, and " +
+                "it is forbidden because of N: every client subscribed to that sheet sees the " +
+                "same transition and each sends the same two writes. A party of six with a DM " +
+                "dashboard open is twelve redundant calls against a 20-per-5-second bucket the " +
+                "whole table shares, every time anybody is healed off zero — and they are " +
+                "unattributable, so the rate-limit refusal lands on a write no user made. " +
+                "Attaching the clear to the write means exactly one client can ever send it: " +
+                "the one whose user tapped.",
+        )
+        put(
+            "onlyMovedHalves",
+            "Send `set 0` only for a half that is currently non-zero. Both halves at zero " +
+                "already means the heal goes out alone.",
+        )
+        put(
+            "noReceipt",
+            "The clears carry NO undo entry and NO history row of their own. They ride the " +
+                "heal's gesture, and the undo stack is LIFO — a clear that pushed its own " +
+                "inverse would make UNDO reverse the clear instead of the heal the user just " +
+                "made, and the write snackbar would read as a death-save line. UNDO reverses " +
+                "the heal; the marks stay cleared. (MageHand: `WriteQueue.submitWithoutReceipt`.)",
+        )
+        put(
+            "acceptedCost",
+            "A sheet healed off zero by ANOTHER client keeps its marks, and MageHand shows them. " +
+                "Three failure pips on a character who is up looks wrong and is TRUE — it is " +
+                "what the sheet says — and the alternative is the storm above. The pips stay " +
+                "tappable so one tap fixes it. A server `rest` that takes hit points 0 → " +
+                "positive is the same case: the client cannot know the rest's HP outcome at " +
+                "submit time, so it clears nothing (design 15 addendum 2, M2).",
+        )
+        put(
+            "noOptimisticOverlay",
+            "Pip taps render on the SERVER ECHO — alone among this app's writes, they have no " +
+                "optimistic overlay (design 15 addendum 2, M3). A consumer may choose otherwise; " +
+                "the export records what MageHand ships so a parity comparison is not a mystery.",
         )
     }
 
@@ -1375,14 +1651,33 @@ object ContractExport {
                     buildJsonArray {
                         add(
                             JsonPrimitive(
-                                "reset == null — THE death-save filter. 'Succeeded Saves' and " +
-                                    "'Failed Saves' are stored as spell slots with no reset rule. " +
-                                    "A client that misses this puts two phantom slot rows on every " +
-                                    "tracker.",
+                                "reset == null — a slot-shaped row with NO RESET RULE, which the " +
+                                    "tracker has nothing to say about: every control on a slot row " +
+                                    "is \"spend it and a rest brings it back\", and a row no rest " +
+                                    "restores would offer a promise the sheet does not keep. " +
+                                    "Applies to an omitted key and to an explicit JSON null alike. " +
+                                    "This is NOT the death-save filter — see exclusionCorrection.",
                             ),
                         )
                         add(JsonPrimitive("total == 0 — slot levels the character cannot reach yet."))
                     },
+                )
+                put(
+                    "exclusionCorrection",
+                    "**Correction to schema 4 and earlier, which called this exclusion 'THE " +
+                        "death-save filter'.** It is not, and it never identified anything: the " +
+                        "null is a COINCIDENCE. The death-save pair happens to carry no reset " +
+                        "rule, but so may any other row, and nothing on the wire says \"this " +
+                        "null means death save\". The live probe behind design 15 D11 retired " +
+                        "the reading in those words. Death saves are " +
+                        "discovered by `variableName` — see #discovery.deathSaves, which is the " +
+                        "only rule in this export that finds them. Two harms in the old wording, " +
+                        "and both are silent: a consumer told to look for a SHAPE has no way to " +
+                        "find the pair at all (so no death-save block), and on a sheet whose pair " +
+                        "is typed `attribute` rather than `spellSlot` the shape rule does not " +
+                        "even exclude them, which is the two phantom slot rows the old text " +
+                        "warned about. The exclusion above is unchanged and still required; only " +
+                        "its reason is corrected.",
                 )
                 put(
                     "resetValues",
@@ -1426,6 +1721,7 @@ object ContractExport {
                 put("note", "Found by `variableName`, NOT by `attributeType`.")
             },
         )
+        put("deathSaves", deathSavesRule())
         put("rolls", rollsRule())
         put(
             "toggles",
@@ -1457,6 +1753,197 @@ object ContractExport {
                 "value the server already stated.",
         )
     }
+
+    /**
+     * `#discovery.deathSaves` — FR-23, and the rule that replaces the retired `reset == null`
+     * reading.
+     *
+     * Every set and every number here is rendered from the production constants that implement
+     * it ([TrackerEngine.VAR_DEATH_SAVE_SUCCESSES], [TrackerEngine.VAR_DEATH_SAVE_FAILURES],
+     * [DeathSaves.MAX]), so the export cannot state a discriminator the engine does not use —
+     * which is exactly the drift that produced the `tempHitPoints` correction in schema 4.
+     *
+     * The one restated fact is the trigger's HP half; see [deathSaveBlockVisible] for why it is
+     * restated rather than read, and what is pinned in its place.
+     */
+    private fun deathSavesRule(): JsonObject = buildJsonObject {
+        put(
+            "match",
+            "type == '$TYPE_ATTRIBUTE' && variableName ∈ variableNames",
+        )
+        put(
+            "variableNames",
+            buildJsonObject {
+                put("successes", TrackerEngine.VAR_DEATH_SAVE_SUCCESSES)
+                put("failures", TrackerEngine.VAR_DEATH_SAVE_FAILURES)
+            },
+        )
+        put(
+            "variableNamesNote",
+            "`${TrackerEngine.VAR_DEATH_SAVE_FAILURES}`, not `deathSaveFailures` — DiceCloud's " +
+                "own spelling. The whole value of a variable-name rule is that it is the " +
+                "server's word rather than ours, so do not tidy it.",
+        )
+        put(
+            "attributeTypeIsNotChecked",
+            "`type` is checked and `attributeType` deliberately is NOT. The probe found the pair " +
+                "typed `spellSlot` on the sheets it saw and design 15 D11 allows either " +
+                "(*\"type attribute/spellSlot\"*), so keying on the sub-type would re-create " +
+                "exactly the fragility the variable-name rule exists to remove.",
+        )
+        put(
+            "supersedes",
+            "This rule REPLACES the `reset == null ⇒ death save` reading. See " +
+                "#discovery.spellSlots.exclusionCorrection.",
+        )
+        put(
+            "pairOrNothing",
+            "Discovery yields the pair or NULL — never half of it. A sheet carrying only " +
+                "successes is not a sheet this block can render: three failure pips would have " +
+                "nowhere to write, and half a death-save tracker at a table is worse than none. " +
+                "Sheets without the subtree exist and are ordinary (design 15 D18: *\"no pair, " +
+                "no block, no error\"*).",
+        )
+        put(
+            "storage",
+            buildJsonObject {
+                put(
+                    "inverted",
+                    "`value` is the MARK COUNT and `damage` is `${DeathSaves.MAX} − value`. This " +
+                        "is the opposite polarity to every other row in this export, where " +
+                        "`value` is what is LEFT and consumption counts up through `damage`. " +
+                        "Death saves count UP as things get worse, so the stored `value` is the " +
+                        "number of filled pips.",
+                )
+                put("max", DeathSaves.MAX)
+                put(
+                    "maxNote",
+                    "5e: three of either ends it. It is also the `total` on every sheet seen, so " +
+                        "`total` and the constant agree — read `total` and fall back to " +
+                        "${DeathSaves.MAX}.",
+                )
+                put(
+                    "marks",
+                    "`value` when the server published it, else `total − damage` — the same " +
+                        "`#discovery.remaining` rule as everything else, which is what makes the " +
+                        "inversion cost a client no extra branch. Apply it once, at discovery.",
+                )
+                put(
+                    "clampOnRead",
+                    "Clamp the result into `0..${DeathSaves.MAX}`. The server clamps natively on " +
+                        "write (probe-verified) and this is the read side of the same rule: a " +
+                        "row another client drove to 4 would otherwise paint a fourth pip into a " +
+                        "row of three.",
+                )
+            },
+        )
+        put(
+            "trigger",
+            buildJsonObject {
+                put(
+                    "rule",
+                    "Render the death-save block IFF the sheet's `${TrackerEngine.VAR_HIT_POINTS}` " +
+                        "attribute reads `value === 0` AND discovery found the pair. Both halves, " +
+                        "every frame. No pair → no block and NO ERROR; a positive HP row → no " +
+                        "block even though the pair is right there.",
+                )
+                put("generated", false)
+                put(
+                    "generatedNote",
+                    "The predicate is RESTATED from MageHand's `TrackerUiState.deathSaves`, which " +
+                        "lives in its UI layer and holds no constant an exporter can read. What " +
+                        "IS generated is everything under `#discovery.deathSaves` above and the " +
+                        "three `death-save-*` vectors in domain/discovery-vectors.json, whose " +
+                        "boards were produced by the production engine.",
+                )
+                put(
+                    "gateIsNotInDiscovery",
+                    "Discovery returns the pair WHATEVER the HP row says — the " +
+                        "`death-save-above-zero` vector exists to prove it — and that is " +
+                        "deliberate, not an oversight to correct in a port. The HP half must be " +
+                        "read from the number ON SCREEN, i.e. after any optimistic overlay a " +
+                        "client applies. Gating inside discovery reads a pre-overlay board, which " +
+                        "leaves the block up through a heal and takes it away on the server echo " +
+                        "— the one moment a player is watching it — and does not roll back with " +
+                        "the number above it when a write fails.",
+                )
+                put(
+                    "notTheToggle",
+                    "NEVER read the \"0 HP?\" toggle, and never an `inactive` flag. The probe " +
+                        "found both LAG: they are computed and only settle after a server " +
+                        "recompute, so a client reading them shows the block seconds late and " +
+                        "hides it seconds late. `${TrackerEngine.VAR_HIT_POINTS}.value` is a " +
+                        "number the server has already sent. This is the obvious-looking source " +
+                        "and it is the wrong one.",
+                )
+                put(
+                    "notCreatureDeathSave",
+                    "`creature.deathSave` exists in DiceCloud's schema. The probe found it " +
+                        "VESTIGIAL and unwritable — a client reading a 'stabilized' boolean off " +
+                        "it would be reading a field nothing maintains.",
+                )
+                put(
+                    "hiddenHitPointRow",
+                    "A client that lets the player hide the HP row has no `value === 0` to read, " +
+                        "so the condition is false and the block does not render. That is the " +
+                        "honest answer; reaching around a hide the player asked for would be the " +
+                        "app overruling them on the one screen they arrange.",
+                )
+            },
+        )
+        put(
+            "derivations",
+            buildJsonObject {
+                put("dead", "failures == ${DeathSaves.MAX}")
+                put("stable", "successes == ${DeathSaves.MAX}")
+                put(
+                    "note",
+                    "DERIVATIONS, counted from the pips — not stored flags. Design 15 D19 says " +
+                        "so in as many words, and `creature.deathSave` is the field that looks " +
+                        "like it would answer this and does not (see trigger.notCreatureDeathSave).",
+                )
+                put(
+                    "editableAtThreeAndOut",
+                    "The block stays TAPPABLE at three of either. Decision 20's *\"pips are " +
+                        "tappable; one tap fixes\"* is the remedy for a sheet another client " +
+                        "healed without clearing, and a block that locked itself at three " +
+                        "failures would be a block a player could not correct.",
+                )
+            },
+        )
+        put(
+            "overrideLayer",
+            "Not filtered by the hide/pin customisation layer. That machinery is for rows a " +
+                "player chose to manage and there is no control that can reach this pair; a " +
+                "block only on screen at 0 HP is not clutter anyone needs to hide.",
+        )
+        put(
+            "writes",
+            "`creatureProperties.damage {_id, operation: 'set', value: <marks>}`, one call per " +
+                "half, in the `damage` rate class (20 per 5 s). Vectors and the clear-pair " +
+                "semantics: ddp/method-vectors.json#vectors `damage.markDeathSaveFailure`, " +
+                "`damage.clearDeathSave*`, and #deathSaveClear.",
+        )
+        put(
+            "reset",
+            "The server never clears these. The client does, and ONLY as part of its own write " +
+                "that takes hit points 0 → positive — never reactively from observed state. The " +
+                "full argument is ddp/method-vectors.json#deathSaveClear; read it before wiring " +
+                "a collector.",
+        )
+    }
+
+    /**
+     * `attribute` — the `type` value the death-save and HP rules key on.
+     *
+     * Restated: `TrackerEngine.TYPE_ATTRIBUTE` is `private const`, and widening it so an exporter
+     * can read it would be a product change made for a test's convenience ([CHARACTER_LIST]'s
+     * argument). The pin is behavioural rather than textual — `ContractExportTest` feeds the
+     * production engine a property carrying both death-save variable names under a DIFFERENT
+     * `type` and asserts discovery returns nothing, so a `type` string that stopped matching the
+     * engine fails the suite instead of shipping.
+     */
+    private const val TYPE_ATTRIBUTE = "attribute"
 
     /**
      * FR-7 roll discovery: checks, saves and skills, plus the advantage rollup.
@@ -1757,7 +2244,11 @@ object ContractExport {
                             "prove nothing about the filter.",
                         exercises = listOf(
                             "spellSlot discovery with levels",
-                            "death-save exclusion: reset == null, as an omitted key AND as an explicit JSON null",
+                            "the reset == null slot exclusion, as an omitted key AND as an " +
+                                "explicit JSON null — and NOT as a death-save filter: the same " +
+                                "two properties are excluded from `slots` by their missing reset " +
+                                "rule AND discovered into `deathSaves` by their variableName, " +
+                                "which is the coincidence design 15 D11 retired",
                             "total == 0 slot exclusion",
                             "removed: true exclusion (the document is in the input)",
                             "inactive: true exclusion",
@@ -1847,9 +2338,63 @@ object ContractExport {
                         },
                     ),
                 )
+                for (case in DEATH_SAVE_CASES) {
+                    add(deathSaveVector(case))
+                }
                 add(
                     softRemovedVector(),
                 )
+            },
+        )
+    }
+
+    /**
+     * One death-save case: a sheet, what the production engine discovered on it, and whether the
+     * block renders.
+     *
+     * The three cases are a set, not three vectors that happen to be adjacent — `blockVisible`
+     * is only meaningful read across all of them, because the trigger's two halves fail in
+     * different places and each case falsifies a different wrong implementation. Gate on
+     * discovery alone and `death-save-above-zero` fails; gate on the HP row alone and
+     * `death-save-no-pair` fails; treat a missing pair as an error and the third case throws
+     * where MageHand renders an ordinary tracker.
+     *
+     * `deathSaves` and `blockVisible` are both computed here — the first by
+     * [TrackerEngine.build], the second by [deathSaveBlockVisible] over that board — so a
+     * discovery change moves the expectation rather than leaving a stale one behind.
+     */
+    private fun deathSaveVector(case: DeathSaveCase): JsonObject = buildJsonObject {
+        put("name", case.name)
+        put("purpose", case.purpose)
+        put("generated", true)
+        put(
+            "exercises",
+            JsonArray(
+                listOf(
+                    "death-save discovery by `variableName`, on a pair typed `spellSlot` — " +
+                        "the sub-type is in the input precisely because the rule must ignore it",
+                    "inverted storage: the input states BOTH `value` (the marks) and `damage` " +
+                        "(${DeathSaves.MAX} − marks), so a client reading either field is testable",
+                    "the trigger's two halves, separated: the pair's presence and the HP row's zero",
+                    "`isDead` / `isStable` as derivations counted off the pips",
+                ).map { JsonPrimitive(it) },
+            ),
+        )
+        put("input", case.body)
+        put(
+            "expected",
+            buildJsonObject {
+                put("hitPointsValue", case.board.hp?.value?.let { JsonPrimitive(it) } ?: JsonNull)
+                put("deathSaves", case.board.deathSaves?.toJson() ?: JsonNull)
+                put("blockVisible", deathSaveBlockVisible(case.board))
+                put("blockVisibleGenerated", false)
+                put(
+                    "blockVisibleNote",
+                    "Computed by applying #discovery.deathSaves.trigger to the board above. The " +
+                        "board is the production engine's output; the predicate is restated — " +
+                        "see that rule's `trigger.generatedNote`.",
+                )
+                put("trackerBoard", case.board.toJson())
             },
         )
     }
@@ -1967,7 +2512,28 @@ object ContractExport {
         put("defenses", JsonArray(defenses.map { it.toJson() }))
         put("rolls", JsonArray(rolls.map { it.toJson() }))
         put("concentratingOn", concentratingOn?.let { JsonPrimitive(it) } ?: JsonNull)
+        put("deathSaves", deathSaves?.toJson() ?: JsonNull)
         put("isEmpty", isEmpty)
+    }
+
+    /**
+     * The death-save pair as discovery returned it.
+     *
+     * `isStable`/`isDead` are emitted even though a consumer could compute them, and that is the
+     * point: they are *derivations* (design 15 D19), and writing them next to the counts they
+     * come from is what makes the vector able to falsify a client that went looking for a stored
+     * flag instead. `isEditable` is emitted for the opposite reason — it is `true` at three
+     * failures, which is the answer a reasonable implementation gets wrong.
+     */
+    private fun DeathSaves.toJson(): JsonObject = buildJsonObject {
+        put("successesPropertyId", successesPropertyId)
+        put("failuresPropertyId", failuresPropertyId)
+        put("successes", successes)
+        put("failures", failures)
+        put("max", DeathSaves.MAX)
+        put("isStable", isStable)
+        put("isDead", isDead)
+        put("isEditable", isEditable)
     }
 
     private fun TrackedResource.toJson(): JsonObject = buildJsonObject {
@@ -2233,8 +2799,9 @@ object ContractExport {
         appendLine("| `ddp/rate-limits.json` | The server's rate-limit classes and the client rules that stay inside them. |")
         appendLine("| `ddp/method-vectors.json` | One canonical method frame per catalogued call, plus its inverse and its rate class. |")
         appendLine(
-            "| `domain/rules.json` | Discovery (tracker rows AND rolls), soft-delete, " +
-                "equippability, carry capacity, wallet, quantity and write semantics. |",
+            "| `domain/rules.json` | Discovery (tracker rows, rolls AND death saves), " +
+                "soft-delete, equippability, carry capacity, wallet, quantity and write " +
+                "semantics. |",
         )
         appendLine("| `domain/discovery-vectors.json` | Input sheets paired with the output the production engines produced. |")
         appendLine("| `item-catalog.json` | The built-in add-item catalog and its categories. |")
@@ -2269,6 +2836,37 @@ object ContractExport {
         appendLine("loses the race is usually not the one that caused it. Space the replay, retry a")
         appendLine("refused replay **once**, and pay neither on a fresh subscription. See the notes on")
         appendLine("each field for the reasoning and the arithmetic.")
+        appendLine()
+        appendLine("## New in schema 5 — a CORRECTION, not just an addition")
+        appendLine()
+        appendLine("Schema 4 and earlier told you that a spell slot's `reset == null` was **the**")
+        appendLine("death-save filter. That was wrong, and it was wrong in the way this export exists")
+        appendLine("to prevent: silently. The null is a coincidence — the death-save pair happens to")
+        appendLine("carry no reset rule, and so may anything else. Nothing on the wire says \"this null")
+        appendLine("means death save\".")
+        appendLine()
+        appendLine("Death saves are found by **`variableName` ∈ {`deathSaveSuccesses`,")
+        appendLine("`deathSaveFails`}** and nothing else. If you ported the old wording you have two")
+        appendLine("problems, neither of which raises an error: you cannot find the pair at all, so no")
+        appendLine("death-save block ever renders; and on a sheet whose pair is typed `attribute`")
+        appendLine("rather than `spellSlot` you do not even *exclude* them, which is the two phantom")
+        appendLine("slot rows the old text was warning you about. The exclusion itself still stands and")
+        appendLine("is still required — only its stated reason changed. See")
+        appendLine("`domain/rules.json#discovery.spellSlots.exclusionCorrection`.")
+        appendLine()
+        appendLine("What is new alongside it: `domain/rules.json#discovery.deathSaves` (the pair, the")
+        appendLine("**inverted** storage where `value` is the mark count and `damage` is `3 − value`,")
+        appendLine("the two-part render trigger, and `dead`/`stable` as derivations); three")
+        appendLine("`death-save-*` discovery vectors that separate the trigger's halves; the")
+        appendLine("`damage.markDeathSaveFailure` and `damage.clearDeathSave*` write vectors; and")
+        appendLine("`ddp/method-vectors.json#deathSaveClear`. **Read that last one before you wire the")
+        appendLine("clear.** The server never clears death saves, so a client must — but a client that")
+        appendLine("clears *reactively*, by watching hit points cross 0 → positive, sends N duplicate")
+        appendLine("write pairs from the N clients watching that sheet, against a rate bucket the")
+        appendLine("whole table shares. Attach the clear to your own write or do not send it.")
+        appendLine()
+        appendLine("Every exported `trackerBoard` now carries a `deathSaves` key (null on a sheet")
+        appendLine("without the pair), so a consumer diffing boards against this export must expect it.")
         appendLine()
         appendLine("Fields named `quirk` mark behaviour established by a **live probe** against a running")
         appendLine("server, usually after shipping the obvious reading and watching it fail. Those are the")

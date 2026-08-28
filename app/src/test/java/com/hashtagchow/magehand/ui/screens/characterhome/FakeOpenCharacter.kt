@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
+import com.hashtagchow.magehand.core.model.ActionBoard
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.ExactQuantity
@@ -92,6 +93,8 @@ class FakeOpenCharacter(
     }
 
     override val inventory = MutableStateFlow(InventoryBoard.EMPTY)
+
+    override val actions = MutableStateFlow(ActionBoard.EMPTY)
 
     override fun setEquipped(
         propertyId: String,

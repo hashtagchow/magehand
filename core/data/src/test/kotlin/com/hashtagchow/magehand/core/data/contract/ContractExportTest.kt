@@ -7,8 +7,10 @@ import com.hashtagchow.magehand.core.data.write.WriteOp
 import com.hashtagchow.magehand.core.data.write.WriteQueueConfig
 import com.hashtagchow.magehand.core.ddp.DdpClientConfig
 import com.hashtagchow.magehand.core.ddp.MeteorId
+import com.hashtagchow.magehand.core.model.DeathSaves
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.ItemCatalog
+import com.hashtagchow.magehand.core.model.TrackerBoard
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -659,29 +661,459 @@ class ContractExportTest {
     // 4 — the discovery vectors say what they claim to
     // =======================================================================
 
+    /**
+     * The coincidence, held down from both sides on one fixture.
+     *
+     * These two properties are excluded from `slots` **and** discovered into `deathSaves`, and
+     * the two facts have nothing to do with each other: the exclusion is `reset == null` and the
+     * discovery is `variableName`. Asserting both here is what stops the retired reading from
+     * creeping back in as "well, the exclusion does find them, so…". It does not find them; it
+     * drops them, and something else finds them.
+     */
     @Test
-    fun `death saves are in the input and absent from the tracker output`() {
+    fun `death saves are in the input, excluded from slots, and discovered by variableName`() {
         val vector = discoveryVector("tracker-discovery")
         val input = vector["input"]!!.jsonObject["creatureProperties"]!!.jsonArray.map { it.jsonObject }
         val deathSaves = input.filter { it.str("_id") in setOf(ContractFixtures.deathSaveSuccessId, ContractFixtures.deathSaveFailureId) }
         assertEquals("both death saves must be present in the INPUT", 2, deathSaves.size)
         assertTrue(
-            // FR-23 decision 19 retired the reading this used to assert. These two *are* spell
-            // slots with no reset rule, and that is a fact about **this fixture**, not the
-            // discriminator: the pair is found by `variableName`, and "reset null means death
-            // save" was a coincidence (see `TrackerEngine.spellSlot`, where the correction
-            // lives). Kept as written because the exclusion below still depends on this shape
-            // being what the input carries — it is what makes the fixture exercise the branch.
-            "this fixture's death saves are spellSlots carrying no reset rule",
+            "this fixture's death saves are spellSlots carrying no reset rule — the shape that " +
+                "makes them exercise the slot exclusion, and NOT what identifies them",
             deathSaves.all { it.str("attributeType") == "spellSlot" && it.str("reset") == null },
         )
+        assertEquals(
+            "the input must carry the discriminator the engine actually keys on, or the vector " +
+                "quietly models the retired reading",
+            setOf(TrackerEngine.VAR_DEATH_SAVE_SUCCESSES, TrackerEngine.VAR_DEATH_SAVE_FAILURES),
+            deathSaves.mapNotNull { it.str("variableName") }.toSet(),
+        )
 
-        val slots = vector.expected()["trackerBoard"]!!.jsonObject["slots"]!!.jsonArray.map { it.jsonObject }
+        val board = vector.expected()["trackerBoard"]!!.jsonObject
+        val slots = board["slots"]!!.jsonArray.map { it.jsonObject }
         assertTrue(
             "no death save may reach the slot list",
             slots.none { it.str("propertyId") in deathSaves.mapNotNull { d -> d.str("_id") } },
         )
         assertEquals("exactly the two reachable slot levels survive", 2, slots.size)
+
+        // …and the same two properties DID get found, by the other rule.
+        val found = board["deathSaves"]!!.jsonObject
+        assertEquals(ContractFixtures.deathSaveSuccessId, found.str("successesPropertyId"))
+        assertEquals(ContractFixtures.deathSaveFailureId, found.str("failuresPropertyId"))
+    }
+
+    // =======================================================================
+    // 4b — FR-23 death saves (schema 5)
+    // =======================================================================
+
+    /**
+     * The correction itself, asserted as a *retirement* rather than as an addition.
+     *
+     * Adding `#discovery.deathSaves` while leaving the old sentence in place would have been the
+     * worst of both: a consumer reading top to bottom meets the wrong rule first, and the two
+     * documents disagree with no way to tell which is current. So this asserts the old claim is
+     * GONE from the exclusion text, and that the correction is stated where somebody who ported
+     * the old wording will actually trip over it.
+     */
+    @Test
+    fun `the spell-slot exclusion no longer claims to be the death-save filter`() {
+        val slots = documentAt("domain/rules.json")["discovery"]!!.jsonObject["spellSlots"]!!.jsonObject
+        val exclusions = slots["exclusions"]!!.jsonArray.mapNotNull { it.jsonPrimitive().contentOrNull }
+
+        val resetExclusion = exclusions.first { it.startsWith("reset == null") }
+        assertFalse(
+            "the reset == null exclusion must no longer be described as THE death-save filter",
+            resetExclusion.contains("THE death-save filter"),
+        )
+        assertTrue(
+            "…and it must point at the correction rather than leaving a consumer to notice",
+            resetExclusion.contains("exclusionCorrection"),
+        )
+        assertTrue(
+            "the exclusion must still be stated — it is unchanged and still required",
+            exclusions.any { it.startsWith("reset == null") } && exclusions.any { it.startsWith("total == 0") },
+        )
+
+        val correction = slots.str("exclusionCorrection").orEmpty()
+        assertTrue("the correction must name the schema it corrects", correction.contains("schema 4"))
+        assertTrue(
+            "the correction must say the null was a coincidence — design 15 D11's own word, and " +
+                "the whole reason the old rule identified nothing",
+            correction.contains("coincidence", ignoreCase = true),
+        )
+        assertTrue(
+            "the correction must send the reader to the rule that replaces it",
+            correction.contains("variableName") && correction.contains("#discovery.deathSaves"),
+        )
+    }
+
+    /**
+     * The new rule is rendered from the production constants, not typed alongside them.
+     *
+     * This is the assertion the `tempHitPoints` episode bought: an export that *restates* a
+     * discriminator can be wrong on its own, silently, because nothing compares it to the engine.
+     */
+    @Test
+    fun `the death-save rule states the discriminator from the production constants`() {
+        val rule = deathSaveRule()
+        val names = rule["variableNames"]!!.jsonObject
+        assertEquals(TrackerEngine.VAR_DEATH_SAVE_SUCCESSES, names.str("successes"))
+        assertEquals(TrackerEngine.VAR_DEATH_SAVE_FAILURES, names.str("failures"))
+        assertEquals(
+            "DiceCloud's own spelling — `Fails`, not `Failures`. A tidied name finds nothing.",
+            "deathSaveFails",
+            TrackerEngine.VAR_DEATH_SAVE_FAILURES,
+        )
+        assertTrue(
+            "the match must key on `variableName`, which is the whole correction",
+            rule.str("match").orEmpty().contains("variableName"),
+        )
+        assertTrue(
+            "the rule must record that `attributeType` is deliberately NOT checked",
+            rule.str("attributeTypeIsNotChecked").orEmpty().contains("NOT"),
+        )
+        assertEquals(
+            "the inverted storage must state the production maximum",
+            DeathSaves.MAX,
+            rule["storage"]!!.jsonObject["max"]?.jsonPrimitive()?.intOrNull,
+        )
+        assertTrue(
+            "the export must say `value` is the mark count — the inversion is the fact a client " +
+                "gets backwards",
+            rule["storage"]!!.jsonObject.str("inverted").orEmpty().contains("MARK COUNT"),
+        )
+        assertEquals("dead is a derivation off the failure pips", "failures == ${DeathSaves.MAX}", rule["derivations"]!!.jsonObject.str("dead"))
+        assertEquals("stable is a derivation off the success pips", "successes == ${DeathSaves.MAX}", rule["derivations"]!!.jsonObject.str("stable"))
+    }
+
+    /**
+     * The `type` discriminator, and the sub-type that is deliberately ignored — pinned against
+     * the engine rather than against the export's own sentence.
+     *
+     * `TrackerEngine.TYPE_ATTRIBUTE` is private and stays private, so `ContractExport`'s copy of
+     * the string is a restatement. This is what makes the restatement safe: the same two variable
+     * names are fed to the production engine under two different `attributeType`s (both must be
+     * found) and under a different `type` (must not be), so the exported rule's claims are
+     * checked by running the code they describe.
+     */
+    @Test
+    fun `death-save discovery keys on type and variableName, never on attributeType`() {
+        for (attributeType in listOf("spellSlot", "resource", "healthBar")) {
+            val board = boardOf(
+                deathSaveProperty(ContractFixtures.deathSaveSuccessId, TrackerEngine.VAR_DEATH_SAVE_SUCCESSES, attributeType, marks = 1),
+                deathSaveProperty(ContractFixtures.deathSaveFailureId, TrackerEngine.VAR_DEATH_SAVE_FAILURES, attributeType, marks = 2),
+            )
+            assertNotNull(
+                "a pair typed `$attributeType` must still be discovered — the rule ignores the sub-type",
+                board.deathSaves,
+            )
+        }
+
+        // The `type` half, which IS checked. A `skill` carrying both names is not the pair.
+        val notAttributes = boardOf(
+            ContractFixtures.skill(
+                id = ContractFixtures.deathSaveSuccessId, name = "Succeeded Saves", skillType = "save",
+                variableName = TrackerEngine.VAR_DEATH_SAVE_SUCCESSES, value = 1, abilityMod = 0,
+                proficiency = 0, ability = null, order = 2,
+            ),
+            ContractFixtures.skill(
+                id = ContractFixtures.deathSaveFailureId, name = "Failed Saves", skillType = "save",
+                variableName = TrackerEngine.VAR_DEATH_SAVE_FAILURES, value = 2, abilityMod = 0,
+                proficiency = 0, ability = null, order = 3,
+            ),
+        )
+        assertNull(
+            "the exported `type == 'attribute'` must be what the engine enforces; a `skill` " +
+                "carrying the same variable names is not the death-save pair",
+            notAttributes.deathSaves,
+        )
+
+        // Half a pair is no pair (decision 18): three failure pips would have nowhere to write.
+        val halfPair = boardOf(
+            deathSaveProperty(ContractFixtures.deathSaveSuccessId, TrackerEngine.VAR_DEATH_SAVE_SUCCESSES, "spellSlot", marks = 1),
+        )
+        assertNull("one half is not a pair", halfPair.deathSaves)
+    }
+
+    /**
+     * **The pin that makes a separately-stated trigger necessary.**
+     *
+     * `#discovery.deathSaves.trigger` is restated from `TrackerUiState.deathSaves`, which lives
+     * in `:app` and is not visible here — see `ContractExport.deathSaveBlockVisible`. What is
+     * provable from this module is the half that matters: production discovery does **not** read
+     * the HP row, so the pair comes back identically at 0 HP and at 9. If someone ever moved the
+     * gate into the engine, this fails — and it should, because the export would then be telling
+     * consumers to apply a condition that had already been applied.
+     */
+    @Test
+    fun `discovery returns the pair whatever the hit-point row says`() {
+        val downed = TrackerEngine.build(
+            CreatureSheet.fromSnapshotJson(
+                ContractFixtures.deathSaveSheetBody(hitPointsValue = 0, withPair = true),
+                ContractFixtures.creatureId,
+            ),
+        )
+        val up = TrackerEngine.build(
+            CreatureSheet.fromSnapshotJson(
+                ContractFixtures.deathSaveSheetBody(hitPointsValue = 9, withPair = true),
+                ContractFixtures.creatureId,
+            ),
+        )
+        assertEquals("the ONLY difference between the two sheets is the HP row", 0, downed.hp?.value)
+        assertEquals(9, up.hp?.value)
+        assertEquals(
+            "discovery is discovery: the pair must not depend on hit points",
+            downed.deathSaves,
+            up.deathSaves,
+        )
+        assertNotNull(downed.deathSaves)
+
+        // And the trigger — the thing the engine does NOT do — separates them.
+        assertTrue(ContractExport.deathSaveBlockVisible(downed))
+        assertFalse(ContractExport.deathSaveBlockVisible(up))
+    }
+
+    /**
+     * The three exported cases, read as the set they are.
+     *
+     * Each falsifies a different wrong implementation: gate on discovery alone and the
+     * above-zero case fails; gate on the HP row alone and the no-pair case fails.
+     */
+    @Test
+    fun `the death-save vectors separate the trigger's two halves`() {
+        val downed = discoveryVector("death-save-downed").expected()
+        assertEquals(0, downed["hitPointsValue"]?.jsonPrimitive()?.intOrNull)
+        assertNotNull("the downed sheet must express the pair", downed["deathSaves"] as? JsonObject)
+        assertEquals(true, downed["blockVisible"]?.jsonPrimitive()?.booleanOrNull)
+
+        val up = discoveryVector("death-save-above-zero").expected()
+        assertEquals(9, up["hitPointsValue"]?.jsonPrimitive()?.intOrNull)
+        assertNotNull(
+            "discovery still returns the pair above zero — that is the point of this vector",
+            up["deathSaves"] as? JsonObject,
+        )
+        assertEquals(
+            "a healthy character gets no death-save block, pair or no pair",
+            false,
+            up["blockVisible"]?.jsonPrimitive()?.booleanOrNull,
+        )
+
+        val none = discoveryVector("death-save-no-pair").expected()
+        assertEquals(0, none["hitPointsValue"]?.jsonPrimitive()?.intOrNull)
+        assertTrue(
+            "no pair means null, not an error — the Dummy's shape",
+            none["deathSaves"] is kotlinx.serialization.json.JsonNull,
+        )
+        assertEquals(false, none["blockVisible"]?.jsonPrimitive()?.booleanOrNull)
+
+        // The two-with-a-pair cases must genuinely be the same sheet but for the HP row, or the
+        // comparison above proves nothing about the trigger.
+        fun ids(name: String) = discoveryVector(name)["input"]!!.jsonObject["creatureProperties"]!!
+            .jsonArray.map { it.jsonObject.str("_id") }
+        assertEquals(ids("death-save-downed"), ids("death-save-above-zero"))
+
+        // The trigger is honest about its own provenance.
+        val trigger = deathSaveRule()["trigger"]!!.jsonObject
+        assertEquals(
+            "the HP half is restated from the UI layer and must not claim to be generated",
+            false,
+            trigger["generated"]?.jsonPrimitive()?.booleanOrNull,
+        )
+        assertTrue(
+            "the rule must warn off the \"0 HP?\" toggle, which is the obvious wrong source",
+            trigger.str("notTheToggle").orEmpty().contains("NEVER"),
+        )
+        assertTrue(
+            "…and off `creature.deathSave`, which looks like it would answer `stable`",
+            trigger.str("notCreatureDeathSave").orEmpty().contains("VESTIGIAL"),
+        )
+    }
+
+    /**
+     * The inversion, proved on the wire shape rather than asserted in prose.
+     *
+     * The fixture states BOTH `value` and `damage` precisely so a client reading either field is
+     * testable — and `value + damage == MAX` is the identity that makes the two readings agree.
+     */
+    @Test
+    fun `death-save storage is inverted and the engine reads marks out of it`() {
+        val input = discoveryVector("death-save-downed")["input"]!!.jsonObject["creatureProperties"]!!
+            .jsonArray.map { it.jsonObject }
+        val successes = input.first { it.str("variableName") == TrackerEngine.VAR_DEATH_SAVE_SUCCESSES }
+        val failures = input.first { it.str("variableName") == TrackerEngine.VAR_DEATH_SAVE_FAILURES }
+
+        for (property in listOf(successes, failures)) {
+            val value = property["value"]!!.jsonPrimitive().int
+            val damage = property["damage"]!!.jsonPrimitive().int
+            assertEquals("total must be the production maximum", DeathSaves.MAX, property["total"]!!.jsonPrimitive().int)
+            assertEquals(
+                "the inversion's identity: damage == MAX − value, so both readings agree",
+                DeathSaves.MAX,
+                value + damage,
+            )
+        }
+
+        val saves = discoveryVector("death-save-downed").expected()["deathSaves"]!!.jsonObject
+        assertEquals(
+            "the discovered mark count is the property's `value`, NOT what is left",
+            successes["value"]!!.jsonPrimitive().int,
+            saves["successes"]?.jsonPrimitive()?.intOrNull,
+        )
+        assertEquals(
+            failures["value"]!!.jsonPrimitive().int,
+            saves["failures"]?.jsonPrimitive()?.intOrNull,
+        )
+
+        // The read-side clamp: a row another client drove past three must not paint a fourth pip.
+        val overshoot = boardOf(
+            deathSaveProperty(ContractFixtures.deathSaveSuccessId, TrackerEngine.VAR_DEATH_SAVE_SUCCESSES, "spellSlot", marks = 1),
+            deathSaveProperty(ContractFixtures.deathSaveFailureId, TrackerEngine.VAR_DEATH_SAVE_FAILURES, "spellSlot", marks = DeathSaves.MAX + 1),
+        )
+        assertEquals(DeathSaves.MAX, overshoot.deathSaves?.failures)
+        assertTrue(
+            "clamped at the maximum still reads as dead, which is the honest answer",
+            overshoot.deathSaves!!.isDead,
+        )
+    }
+
+    /** Derivations, not stored flags: the export must carry them next to the counts. */
+    @Test
+    fun `dead and stable are derived from the pip counts`() {
+        val saves = discoveryVector("death-save-downed").expected()["deathSaves"]!!.jsonObject
+        val successes = saves["successes"]!!.jsonPrimitive().int
+        val failures = saves["failures"]!!.jsonPrimitive().int
+        assertEquals(DeathSaves.MAX, saves["max"]?.jsonPrimitive()?.intOrNull)
+        assertEquals(successes >= DeathSaves.MAX, saves["isStable"]?.jsonPrimitive()?.booleanOrNull)
+        assertEquals(failures >= DeathSaves.MAX, saves["isDead"]?.jsonPrimitive()?.booleanOrNull)
+
+        // The answer a reasonable implementation gets wrong: three-and-out is still tappable,
+        // because a block that locked itself is a block a stale-marks sheet cannot be fixed from.
+        val dead = boardOf(
+            deathSaveProperty(ContractFixtures.deathSaveSuccessId, TrackerEngine.VAR_DEATH_SAVE_SUCCESSES, "spellSlot", marks = 0),
+            deathSaveProperty(ContractFixtures.deathSaveFailureId, TrackerEngine.VAR_DEATH_SAVE_FAILURES, "spellSlot", marks = DeathSaves.MAX),
+        ).deathSaves!!
+        assertTrue(dead.isDead)
+        assertTrue("pips stay tappable at three failures", dead.isEditable)
+        assertEquals(true, saves["isEditable"]?.jsonPrimitive()?.booleanOrNull)
+    }
+
+    /**
+     * The write, and the two things about it a consumer can only get from a recorded frame: the
+     * method (`damage`, not `adjustQuantity`) and the rate class it therefore lands in.
+     */
+    @Test
+    fun `a death-save mark is an absolute damage set on the fast lane`() {
+        val mark = vector("damage.markDeathSaveFailure")
+        assertEquals(
+            "death saves are written with `damage`; `adjustQuantity` would be a different " +
+                "method, in the slow lane, against a property with no quantity",
+            "creatureProperties.damage",
+            mark.str("method"),
+        )
+        assertEquals("damage", mark.str("rateClass"))
+        assertEquals(
+            WriteOp.DAMAGE_SPACING_MILLIS,
+            mark["minSpacingMillis"]?.jsonPrimitive()?.longOrNull,
+        )
+
+        val params = mark.frame().params().first().jsonObject
+        assertEquals("an ABSOLUTE set, never an increment", "set", params.str("operation"))
+        assertEquals(
+            "the fixture's failure row carries 2 marks and the vector marks the third",
+            3,
+            params["value"]?.jsonPrimitive()?.intOrNull,
+        )
+        assertEquals(
+            "the write must address the failures property discovery returned",
+            discoveryVector("death-save-downed").expected()["deathSaves"]!!.jsonObject.str("failuresPropertyId"),
+            params.str("_id"),
+        )
+        assertTrue(
+            "the quirk must state idempotence — the reason an absolute set is the right shape " +
+                "for a call whose reply may be lost",
+            mark.str("quirk").orEmpty().contains("IDEMPOTENT"),
+        )
+        assertTrue(
+            "…and that the server clamps natively, so no pre-flight read is needed",
+            mark.str("quirk").orEmpty().contains("CLAMPS"),
+        )
+
+        // The inverse restores the pip rather than clearing the row — `setValue` builds it from
+        // the resource's CURRENT value, which is what makes an undo an undo.
+        val inverse = mark["inverseParams"]!!.jsonObject
+        assertEquals("creatureProperties.damage", inverse.str("method"))
+        assertEquals(
+            2,
+            inverse["params"]!!.jsonArray.first().jsonObject["value"]?.jsonPrimitive()?.intOrNull,
+        )
+    }
+
+    /**
+     * The clear pair, and D12's semantics — the half of FR-23 that costs the whole table if a
+     * consumer ports the obvious implementation.
+     */
+    @Test
+    fun `the clear pair sets both properties to zero and states when it may not be sent`() {
+        val saves = discoveryVector("death-save-downed").expected()["deathSaves"]!!.jsonObject
+        val clears = mapOf(
+            "damage.clearDeathSaveSuccesses" to saves.str("successesPropertyId"),
+            "damage.clearDeathSaveFailures" to saves.str("failuresPropertyId"),
+        )
+        for ((name, propertyId) in clears) {
+            val params = vector(name).frame().params().first().jsonObject
+            assertEquals("creatureProperties.damage", vector(name).str("method"))
+            assertEquals("set", params.str("operation"))
+            assertEquals("a clear is `set 0`", 0, params["value"]?.jsonPrimitive()?.intOrNull)
+            assertEquals("$name must address its own half of the pair", propertyId, params.str("_id"))
+            // The trap: the op HAS an inverse (a player's own pip tap uses the same call), but
+            // the heal-attached clear takes no receipt. A consumer reading `undoable: true` off
+            // the vector and wiring an undo entry recreates H1 — the snackbar's UNDO reversing a
+            // clear instead of the heal that produced it.
+            assertEquals(
+                "$name's inverse is a property of the CALL, and the vector says so",
+                true,
+                vector(name)["undoable"]?.jsonPrimitive()?.booleanOrNull,
+            )
+            assertTrue(
+                "$name must warn that the heal-attached clear files no receipt despite that",
+                vector(name).str("quirk").orEmpty().contains("noReceipt"),
+            )
+        }
+        assertEquals(
+            "the two clears must address DIFFERENT properties — it is a pair, not one call twice",
+            2,
+            clears.keys.map { vector(it).frame().params().first().jsonObject.str("_id") }.toSet().size,
+        )
+
+        val rule = documentAt("ddp/method-vectors.json")["deathSaveClear"]!!.jsonObject
+        assertEquals(
+            clears.keys.toList().sorted(),
+            rule["clears"]!!.jsonArray.mapNotNull { it.jsonPrimitive().contentOrNull }.sorted(),
+        )
+        assertTrue(
+            "the server never clears these — if the export does not say so, a consumer waits " +
+                "for a reset that never comes",
+            rule.str("serverNeverClears").orEmpty().contains("does NOT clear"),
+        )
+        assertTrue(
+            "the clear rides THIS client's own write",
+            rule.str("attachedToOurOwnWrite").orEmpty().contains("0 to positive"),
+        )
+        assertTrue(
+            "the observer storm must be stated in the imperative — it is the failure that costs " +
+                "the table rather than the client that ships it",
+            rule.str("neverReactive").orEmpty().contains("NEVER fire these from OBSERVED state"),
+        )
+        assertTrue(
+            "…including WHY: N clients watching one sheet each send the same pair",
+            rule.str("neverReactive").orEmpty().contains("dashboard"),
+        )
+        assertTrue(
+            "the accepted cost — stale marks after someone else's heal — must be recorded, or a " +
+                "consumer reads it as a bug and 'fixes' it reactively",
+            rule.str("acceptedCost").orEmpty().contains("ANOTHER client"),
+        )
+        assertEquals(false, rule["generated"]?.jsonPrimitive()?.booleanOrNull)
     }
 
     @Test
@@ -1049,6 +1481,28 @@ class ContractExportTest {
         documentAt("domain/discovery-vectors.json")["vectors"]!!.jsonArray
             .map { it.jsonObject }
             .first { it.str("name") == name }
+
+    private fun deathSaveRule(): JsonObject =
+        documentAt("domain/rules.json")["discovery"]!!.jsonObject["deathSaves"]!!.jsonObject
+
+    /** One half of the pair, in the inverted storage, under whatever sub-type the case needs. */
+    private fun deathSaveProperty(
+        id: String,
+        variableName: String,
+        attributeType: String,
+        marks: Int,
+    ): JsonObject = ContractFixtures.attribute(
+        id = id, name = variableName, attributeType = attributeType, variableName = variableName,
+        total = DeathSaves.MAX, damage = DeathSaves.MAX - marks, order = 1,
+    )
+
+    /** The production engine over an ad-hoc property list — the pin for a restated rule. */
+    private fun boardOf(vararg properties: JsonObject): TrackerBoard = TrackerEngine.build(
+        CreatureSheet.fromSnapshotJson(
+            ContractFixtures.snapshotBody(ContractFixtures.creature(), properties.toList()),
+            ContractFixtures.creatureId,
+        ),
+    )
 
     private fun JsonObject.expected(): JsonObject = this["expected"]!!.jsonObject
 

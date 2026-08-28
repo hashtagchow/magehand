@@ -32,9 +32,7 @@ import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
-// Aliased: this view model's own `togglePane` is the *persisting* gesture, the imported one is
-// the pure rule it applies. Same name in two layers is right; shadowing it silently is not.
-import com.hashtagchow.magehand.ui.panes.togglePane as nextPaneSet
+import com.hashtagchow.magehand.ui.panes.nextStoredPanes
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ExactQuantity
@@ -240,13 +238,14 @@ class LocalCharacterHomeViewModel @Inject constructor(
      * Decision 6's picker gesture, persisted.
      *
      * [current] is what is on screen — the resolved list, not the stored set — because
-     * `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. A gesture the rule
-     * refuses returns the input unchanged and is not written, matching `mutateInventoryLayout`'s
-     * no-op contract.
+     * `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. What gets
+     * *persisted* is `nextStoredPanes`'s delta against [panes]' current value (the raw stored
+     * set), not [current] itself — see its KDoc for why writing the resolved set directly
+     * silently erased a filtered-out preference. A gesture the rule refuses returns `null` and
+     * is not written, matching `mutateInventoryLayout`'s no-op contract.
      */
     fun togglePane(current: Set<PaneSurface>, surface: PaneSurface) {
-        val next = nextPaneSet(current, surface)
-        if (next == current) return
+        val next = nextStoredPanes(current, panes.value, surface) ?: return
         viewModelScope.launch { paneLayoutStore.setPanes(paneLayoutKey, next) }
     }
 

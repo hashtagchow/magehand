@@ -31,6 +31,8 @@ import com.hashtagchow.magehand.core.data.auth.TokenStore
 import com.hashtagchow.magehand.core.data.auth.WebViewSessionStore
 import com.hashtagchow.magehand.core.data.characters.CharacterCache
 import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
+import com.hashtagchow.magehand.core.data.feed.ActivityFeedRepository
+import com.hashtagchow.magehand.core.data.feed.DefaultActivityFeedRepository
 import com.hashtagchow.magehand.core.data.characters.DefaultCharacterListRepository
 import com.hashtagchow.magehand.core.data.characters.RoomCharacterCache
 import com.hashtagchow.magehand.core.data.connection.DdpConnectionManager
@@ -332,6 +334,21 @@ object DataModule {
         cache = cache,
         scope = newAppScope("character-list"),
     )
+
+    /**
+     * FR-25's activity feed (docs/design/16-actions-and-feed.md decisions 8–12).
+     *
+     * `@Singleton` and **scope-less** — unlike `provideCharacterListRepository` above, this one
+     * takes no `newAppScope`. It starts nothing: every flow it hands out is cold and derived
+     * from a mirror the `singleCharacter` subscriptions are already filling, so there is no
+     * collector to own and nothing to keep alive between screens. A scope here would be an
+     * object with a lifetime and no work to do in it.
+     */
+    @Provides
+    @Singleton
+    fun provideActivityFeedRepository(
+        connectionManager: DdpConnectionManager,
+    ): ActivityFeedRepository = DefaultActivityFeedRepository(connectionManager)
 
     // ---- WP6: one open character screen --------------------------------------
 

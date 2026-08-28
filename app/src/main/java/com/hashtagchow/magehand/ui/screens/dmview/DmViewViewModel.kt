@@ -21,12 +21,14 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.account.AccountRepository
 import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
+import com.hashtagchow.magehand.core.data.feed.ActivityFeedRepository
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
 import com.hashtagchow.magehand.core.data.session.OpenCharacterFactory
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.DmViewStore
 import com.hashtagchow.magehand.core.model.CharacterSummary
 import com.hashtagchow.magehand.core.model.ConnectionState
+import com.hashtagchow.magehand.core.model.FeedEntry
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerUiState
@@ -96,7 +98,9 @@ class DmViewViewModel @Inject constructor(
     private val dmViewStore: DmViewStore,
     private val openCharacterFactory: OpenCharacterFactory,
     private val appSettingsStore: AppSettingsStore,
+    private val activityFeedRepository: ActivityFeedRepository,
 ) : ViewModel() {
+
 
     /**
      * The opened characters, keyed by creature id — populated once in `init` and never added to.
@@ -110,6 +114,35 @@ class DmViewViewModel @Inject constructor(
 
     /** The resolved membership, in the live list's order. Empty until `init`'s read completes. */
     private val members = MutableStateFlow<List<String>>(emptyList())
+    /**
+     * FR-25's activity feed (docs/design/16-actions-and-feed.md decisions 8–12).
+     *
+     * ### Its own `StateFlow`, beside [uiState] rather than inside it
+     *
+     * [uiState]'s top-level `combine` is already at the five-flow typed ceiling — which is why
+     * `error` and `connection` are bundled into a `Quintuple` — so a sixth input would demote it
+     * to the untyped overload. But arity is not the real argument; independence is. The feed and
+     * the cards share no input and change on different events: an HP tick must not recompute the
+     * feed, and a log arriving must not recompute six cards. That is the same reasoning
+     * `cardFor` gives for not folding the per-card flows into one big combine, and
+     * `CharacterHomeViewModel.panes` gives for keeping chrome out of its uiState.
+     *
+     * ### No new subscription
+     *
+     * [ActivityFeedRepository] reads the `creatureLogs` map that the cards' own `singleCharacter`
+     * subscriptions are already filling. Decision 8: no extra budget spend. Decision 12's
+     * liveness then comes for free — this is the same reactive path the boards ride, so entries
+     * arrive without polling and without a refresh control.
+     *
+     * Keyed on [members], so the feed carries exactly the creatures on this table and nothing
+     * else the shared per-connection mirror happens to hold — see `ActivityFeedEngine`'s
+     * cross-creature note, which is the one deliberate exception to the mirror-partition rule.
+     */
+    val feed: StateFlow<List<FeedEntry>> = members
+        .flatMapLatest { ids ->
+            if (ids.isEmpty()) flowOf(emptyList()) else activityFeedRepository.feed(ids.toSet())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MILLIS), emptyList())
 
     /**
      * Decision 14's toggle. **Not** backed by any store, and that is the feature.

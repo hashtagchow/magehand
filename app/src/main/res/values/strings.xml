@@ -453,6 +453,82 @@
         <item quantity="other">%1$d items match</item>
     </plurals>
 
+    <!-- FR-26 (docs/design/16-actions-and-feed.md decisions 3–6): the Actions surface.
+
+         `actions_spell_level` names a spell-level section; level 0 uses `actions_spell_cantrips`
+         instead, because "Level 0" is not what any player or any rulebook calls a cantrip.
+
+         `actions_unprepared` is a badge derived from the `prepared`/`alwaysPrepared` FIELDS, never
+         from `inactive` — decision 5, and the Animate Dead case behind it. `actions_inactive` is
+         the separate, coexisting state: it says the sheet has switched the row off, and it
+         deliberately does not say why, because the wire does not.
+
+         `actions_no_damage_hint` is NOT used for a row that simply deals no damage — most do not.
+         See ActionsScreen.
+
+         `actions_dc` shows the SPELL LIST's save DC and modifier. There is deliberately no
+         per-spell hit-bonus string anywhere in this file: a spell's `attackRoll.value` reads 0 at
+         rest and must never be rendered (decision 4). If you are here looking for one, read
+         `SpellEntry`'s KDoc first. -->
+    <string name="tab_actions">Actions</string>
+    <string name="actions_spell_cantrips">Cantrips</string>
+    <string name="actions_spell_level">Level %1$d</string>
+    <string name="actions_group_attacks">Attacks</string>
+    <string name="actions_group_actions">Actions</string>
+    <string name="actions_group_bonus">Bonus actions</string>
+    <string name="actions_group_reactions">Reactions</string>
+    <string name="actions_group_other">Other</string>
+    <string name="actions_spells_header">Spells</string>
+    <string name="actions_concentration">Concentration</string>
+    <string name="actions_ritual">Ritual</string>
+    <string name="actions_unprepared">Unprepared</string>
+    <string name="actions_inactive">Switched off on the sheet</string>
+    <string name="actions_insufficient">Not enough resources</string>
+    <string name="actions_attack_bonus">%1$+d to hit</string>
+    <string name="actions_uses">%1$d / %2$d uses</string>
+    <string name="actions_uses_left">%1$d left</string>
+    <string name="actions_dc">DC %1$d</string>
+    <string name="actions_ability_mod">%1$+d</string>
+    <string name="actions_damage">%1$s %2$s</string>
+    <string name="actions_empty">Nothing to act with</string>
+    <string name="actions_empty_hint">This character\'s sheet has no spells or actions on it.</string>
+    <string name="actions_section_expand">collapsed, tap to expand</string>
+    <string name="actions_section_collapse">expanded, tap to collapse</string>
+    <string name="actions_filter_label">Search spells and actions</string>
+    <string name="actions_filter_clear">Clear the search</string>
+    <string name="actions_filter_none">Nothing matches “%1$s”</string>
+    <plurals name="actions_filter_matches">
+        <item quantity="one">%1$d result matches</item>
+        <item quantity="other">%1$d results match</item>
+    </plurals>
+    <plurals name="actions_section_count">
+        <item quantity="one">%1$d entry</item>
+        <item quantity="other">%1$d entries</item>
+    </plurals>
+
+    <!-- FR-25 (docs/design/16-actions-and-feed.md decisions 9–11): the DM activity feed.
+
+         `dm_feed_empty_hint` is the HONEST empty state decision 9 requires. It names DiceCloud
+         on purpose: this app's own writes produce no server-side log entries (probe L3), so a
+         panel that said "No activity yet" would be claiming nothing had happened while the DM
+         was watching players act in this very app. Do not "improve" it into a shorter sentence
+         that drops the attribution — the attribution is the content. -->
+    <string name="dm_feed_title">Activity</string>
+    <string name="dm_feed_empty">No activity yet</string>
+    <string name="dm_feed_empty_hint">Actions logged by DiceCloud appear here. Changes made in MageHand are not logged by the server.</string>
+    <string name="dm_feed_expand">collapsed, tap to expand</string>
+    <string name="dm_feed_collapse">expanded, tap to collapse</string>
+    <string name="dm_feed_entry_spoken">%1$s, %2$s. %3$s</string>
+    <string name="dm_feed_no_time">time unknown</string>
+    <!-- L4: a creatureLogs document that carries no creatureName. ActivityFeedEngine hands this
+         case up as a null FeedEntry.creatureName (never the empty string it used to be) so the
+         row still gets a real label instead of rendering blank. -->
+    <string name="dm_feed_unknown_creature">Unknown creature</string>
+    <plurals name="dm_feed_count">
+        <item quantity="one">%1$d entry</item>
+        <item quantity="other">%1$d entries</item>
+    </plurals>
+
     <!-- Actions -->
     <string name="action_settings">Settings</string>
     <string name="action_back">Back</string>

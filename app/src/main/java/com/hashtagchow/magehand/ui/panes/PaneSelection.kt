@@ -89,6 +89,51 @@ fun togglePane(current: Set<PaneSurface>, surface: PaneSurface): Set<PaneSurface
     }
 
 /**
+ * [togglePane]'s decision, replayed against the character's real, unfiltered [stored] set
+ * instead of against [current] — what a caller must persist, and the reason it is a second
+ * function rather than a caller writing [togglePane]'s own return value.
+ *
+ * ### The bug this closes
+ *
+ * [current] is already filtered by [resolvePanes] rule 1: a stored `actions` token does not
+ * appear in it on a character `serverPaneSurfaces` says has none. A caller that persisted
+ * `togglePane(current, surface)` directly was therefore writing a value that started from a
+ * set with `actions` already missing — the first pane tap on that screen erased the stored
+ * preference for good, which is exactly what [PaneSurfaces.serverPaneSurfaces]'s KDoc promises
+ * does **not** happen ("their preference is not rewritten").
+ *
+ * ### Why the baseline is `stored + current`, not `stored` alone
+ *
+ * [current] is not always a subset of [stored]: [resolvePanes] rule 3 falls back to a single
+ * default surface (`available.first()`) when nothing stored survives the filter — decision 8's
+ * "no preference" case — and that fallback surface is on screen without ever having been
+ * written down. Toggling against bare [stored] there would compute a delta relative to an EMPTY
+ * set and persist only the tapped surface, silently dropping the default surface the player
+ * could plainly see when they tapped. Folding [current] into the baseline covers both
+ * provenances at once — a stored surface [current] does not show (kept, filtered), and a shown
+ * surface [stored] never recorded (adopted, defaulted) — with the SAME union.
+ *
+ * ### The fix
+ *
+ * [surface] is added to or removed from `stored + current` using the SAME direction [togglePane]
+ * chose for [current] — added if it was not on screen, removed if it was. A surface [stored]
+ * carries that [current] never did (because it is unavailable right now) is never named by the
+ * gesture and is therefore never touched.
+ *
+ * @return `null` when [togglePane] refuses the gesture (its minimum-of-one), so the caller
+ *   skips the write exactly as it would have against the old, single-set contract.
+ */
+fun nextStoredPanes(
+    current: Set<PaneSurface>,
+    stored: Set<PaneSurface>,
+    surface: PaneSurface,
+): Set<PaneSurface>? {
+    if (togglePane(current, surface) == current) return null
+    val baseline = stored + current
+    return if (surface in current) baseline - surface else baseline + surface
+}
+
+/**
  * Decisions 5 and 10: which chrome a character screen draws, from the two pieces of state that
  * decide it.
  *
@@ -112,12 +157,49 @@ fun <T> characterHomeChrome(
     selectedTab: T,
     storedPanes: Set<PaneSurface>,
     available: List<PaneSurface>,
+    availableTabs: List<T>,
 ): CharacterHomeChrome<T> =
     if (expandedWidth) {
         CharacterHomeChrome.Panes(resolvePanes(storedPanes, available))
     } else {
-        CharacterHomeChrome.Tabs(selectedTab)
+        CharacterHomeChrome.Tabs(resolveTab(selectedTab, availableTabs))
     }
+
+/**
+ * [resolvePanes]' rule 1 and rule 3, for the **tab** branch (FR-26, 16 decision 1).
+ *
+ * ### Why the tab side needed this and never did before
+ *
+ * Until FR-26 every tab a screen declared, it drew — so a `rememberSaveable` selection could not
+ * name a tab that was not there. Actions is discovery-gated, which opens three ways for exactly
+ * that to happen, none of them exotic:
+ *
+ *  - the player is on the Actions tab of a spellcaster, backs out and opens a fighter;
+ *  - a live edit removes the last spell from the open sheet;
+ *  - the screen restores from process death with `Actions` saved, before the board has loaded —
+ *    which is *every* cold restore onto that tab, because `hasActions` is false until discovery
+ *    answers.
+ *
+ * Without this the selection would point at a tab the row does not draw: no tab appears
+ * selected, and the content `when` renders a surface the player cannot navigate away from
+ * because its tab is gone.
+ *
+ * Falling back to `availableTabs.first()` — the Tracker — matches `resolvePanes`' rule 3 exactly,
+ * and for the same reason it is written as "the first available" rather than as a named constant.
+ *
+ * ### It does not write anything back
+ *
+ * The caller's `rememberSaveable` keeps holding `Actions`. That is deliberate and mirrors the
+ * pane side's *"a stored `actions` token is filtered, not rewritten"*: the third case above is a
+ * **transient** — discovery answers a frame later and the tab returns — and a resolver that
+ * corrected the saved value would turn every cold restore onto the Actions tab into a silent
+ * bounce to the Tracker. Resolving on read costs nothing and is reversible; writing on read is
+ * neither.
+ */
+fun <T> resolveTab(selected: T, availableTabs: List<T>): T {
+    require(availableTabs.isNotEmpty()) { "a character screen with no tabs cannot be drawn" }
+    return if (selected in availableTabs) selected else availableTabs.first()
+}
 
 /**
  * Decision 9: whether the Sheet's WebView should exist right now.

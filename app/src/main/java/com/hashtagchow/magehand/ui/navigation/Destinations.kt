@@ -117,6 +117,17 @@ data class LocalCharacterEditor(val characterId: String? = null) : Destination
 enum class CharacterHomeTab(val titleResId: Int) {
     Tracker(com.hashtagchow.magehand.R.string.tab_tracker),
     Inventory(com.hashtagchow.magehand.R.string.tab_inventory),
+
+    /**
+     * FR-26 (docs/design/16-actions-and-feed.md decision 1), between Inventory and Sheet.
+     *
+     * The position matters and is pinned: `PaneSurface`'s ordinals and this enum's must be the
+     * same list for decision 6's "fixed display order" to mean anything, and `PaneSelectionTest`
+     * asserts the two agree. Unlike the other three, this tab is **discovery-gated** — it is
+     * dropped for a character whose sheet has no spells and no actions — which is why
+     * `serverPaneSurfaces` became a function rather than staying a constant.
+     */
+    Actions(com.hashtagchow.magehand.R.string.tab_actions),
     Sheet(com.hashtagchow.magehand.R.string.tab_sheet),
 }
 

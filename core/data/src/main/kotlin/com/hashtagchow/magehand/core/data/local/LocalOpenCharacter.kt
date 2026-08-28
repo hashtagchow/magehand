@@ -32,6 +32,7 @@ import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DeathSaves
 import com.hashtagchow.magehand.core.model.ExactQuantity
+import com.hashtagchow.magehand.core.model.ActionBoard
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.LocalRowKind
@@ -427,6 +428,26 @@ class LocalOpenCharacter(
     override val inventory: StateFlow<InventoryBoard> =
         combine(characterFlow, rowsFlow) { character, rows -> LocalInventoryBoard.build(character, rows) }
             .stateIn(scope, SharingStarted.Eagerly, InventoryBoard.EMPTY)
+
+    /**
+     * **Always empty** — an on-device character has no Actions surface in v1
+     * (docs/design/16-actions-and-feed.md decision 1: *"Local characters: no Actions surface in
+     * v1 (no local model)"*).
+     *
+     * A constant rather than a derivation, because there is nothing to derive from: the local
+     * schema has hit points, resources, conditions and gear, and no concept of a spell or an
+     * action at all. Inventing one would mean designing a local action model, which is a feature
+     * this wave does not have and the design does not ask for.
+     *
+     * This is deliberately the *weaker* of the two guarantees the app uses for a server-only
+     * surface, and it is not the one that matters. The real guarantee is structural and lives
+     * three layers up: `LocalCharacterHomeTab` has no `Actions` constant, so `localPaneSurfaces`
+     * cannot contain [PaneSurface.ACTIONS][com.hashtagchow.magehand.core.data.settings.PaneSurface]
+     * and `resolvePanes` drops a stored `actions` token — the same shape 09 decision 8 uses to
+     * keep the Sheet's WebView off this screen. This value exists only because the interface is
+     * shared; nothing on the local path reads it.
+     */
+    override val actions: StateFlow<ActionBoard> = MutableStateFlow(ActionBoard.EMPTY)
 
     /**
      * Local equip: a **plain flag** (10 decision 10).

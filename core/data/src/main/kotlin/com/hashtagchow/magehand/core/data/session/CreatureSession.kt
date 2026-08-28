@@ -22,6 +22,7 @@ import com.hashtagchow.magehand.core.data.db.TrackerPrefDao
 import com.hashtagchow.magehand.core.data.db.TrackerPrefEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.core.data.snapshot.SnapshotStore
+import com.hashtagchow.magehand.core.data.tracker.ActionEngine
 import com.hashtagchow.magehand.core.data.tracker.CreatureSheet
 import com.hashtagchow.magehand.core.data.tracker.InventoryEngine
 import com.hashtagchow.magehand.core.data.tracker.TrackerEngine
@@ -29,6 +30,7 @@ import com.hashtagchow.magehand.core.data.tracker.isTrue
 import com.hashtagchow.magehand.core.data.write.OptimisticOverlay
 import com.hashtagchow.magehand.core.data.write.WriteQueue
 import com.hashtagchow.magehand.core.data.write.WriteQueueConfig
+import com.hashtagchow.magehand.core.model.ActionBoard
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.TrackerBoard
@@ -276,6 +278,33 @@ class CreatureSession(
     val inventory: StateFlow<InventoryBoard> = sheet
         .map { InventoryEngine.build(it) }
         .stateIn(scope, SharingStarted.Eagerly, InventoryBoard.EMPTY)
+
+    /**
+     * What the Actions surface renders (docs/design/16-actions-and-feed.md, FR-26).
+     *
+     * ### `WhileSubscribed`, where [inventory] is `Eagerly`
+     *
+     * The two are not inconsistent; they have different readers. The inventory board is read by
+     * the DM dashboard's card summary as well as by the inventory tab, so it is warm on every
+     * open session. **Nothing reads this one unless an Actions surface is on screen** — the DM
+     * view has no actions column, and a character screen holds the subscription only while the
+     * tab or pane is drawn. Eager derivation would therefore run this engine on every mirror
+     * frame of all six DM sessions to produce a board no composable would ever collect.
+     *
+     * The grace period is `boardIgnoringHidden`'s, for its reason: a tab switch or a pane toggle
+     * must not drop and rebuild the board, and five seconds outlasts any of those while still
+     * releasing on a real navigation away.
+     *
+     * ### Read-only, and no override layer
+     *
+     * Unlike [board] this takes no `overrides` and no `optimistic` overlay. Neither has anything
+     * to say here: 16 decision 7 makes the surface read-only so there is no optimistic write to
+     * overlay, and the customize sheet offers no control that could hide or pin a spell — the
+     * same argument `TrackerEngine.orderRolls` makes for rolls, one surface further out.
+     */
+    val actions: StateFlow<ActionBoard> = sheet
+        .map { ActionEngine.build(it) }
+        .stateIn(scope, SharingStarted.WhileSubscribed(UNHIDDEN_BOARD_GRACE_MILLIS), ActionBoard.EMPTY)
 
     /** What the tracker renders. */
     val board: StateFlow<TrackerBoard> = combine(

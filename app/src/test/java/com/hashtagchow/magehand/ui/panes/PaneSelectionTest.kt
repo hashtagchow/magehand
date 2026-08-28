@@ -37,7 +37,12 @@ import java.io.File
  */
 class PaneSelectionTest {
 
-    private val server = serverPaneSurfaces
+    // FR-26 made availability a function of the character's data. These two are the "has
+    // spells or actions" answer and its absence — the fixtures every pre-FR-26 test below now
+    // names explicitly rather than relying on a constant.
+    private val server = serverPaneSurfaces(hasActions = true)
+    private val serverNoActions = serverPaneSurfaces(hasActions = false)
+    private val serverTabs = serverHomeTabs(hasActions = true)
     private val local = localPaneSurfaces
 
     // ---- the vocabulary agrees with the tab rows (decision 6) ----------------
@@ -47,7 +52,15 @@ class PaneSelectionTest {
         // Decision 6's display order is only "fixed" if these agree. They are two enums in two
         // modules that must stay in step, and nothing but this makes them.
         assertEquals(
-            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.SHEET),
+            listOf(
+                PaneSurface.TRACKER,
+                PaneSurface.INVENTORY,
+                // FR-26 (16 decision 1): "Tracker → Inventory → Actions → Sheet". Inserted, not
+                // appended — an appended constant would have drawn the Actions column to the
+                // right of the Sheet's WebView with nothing failing.
+                PaneSurface.ACTIONS,
+                PaneSurface.SHEET,
+            ),
             server,
         )
         assertEquals(CharacterHomeTab.entries.map { it.surface }, server)
@@ -65,6 +78,11 @@ class PaneSelectionTest {
         // the structure a future edit to `LocalCharacterHomeTab` would quietly undo.
         assertEquals(listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY), local)
         assertFalse(PaneSurface.SHEET in local)
+        // 16 decision 1: "Local characters: no Actions surface in v1 (no local model)". Same
+        // structural guarantee, one feature later — `LocalCharacterHomeTab` has no Actions
+        // constant, so this surface cannot reach the local list however `serverPaneSurfaces`
+        // is called.
+        assertFalse(PaneSurface.ACTIONS in local)
         assertEquals(LocalCharacterHomeTab.entries.map { it.surface }, local)
     }
 
@@ -145,6 +163,55 @@ class PaneSelectionTest {
         assertSame(only, result)
     }
 
+    // ---- nextStoredPanes (the L1 fix: persist a delta against the STORED set) ----------
+
+    @Test
+    fun `toggling a pane on a non-caster preserves a filtered-out stored preference`() {
+        // The player kept Tracker + Actions on their wizard; the STORED set still says so.
+        // Opened on a fighter, `resolvePanes` filters Actions out of what renders — that is
+        // `current` below — and toggling Inventory on must not carry that filtered view back
+        // into the store, or the wizard's Actions preference is gone for good.
+        val stored = setOf(PaneSurface.TRACKER, PaneSurface.ACTIONS)
+        val current = resolvePanes(stored, serverNoActions).toSet()
+        assertEquals("sanity: Actions is filtered from what renders", setOf(PaneSurface.TRACKER), current)
+
+        val next = nextStoredPanes(current, stored, PaneSurface.INVENTORY)
+
+        assertEquals(
+            "Inventory is added and the filtered-out Actions preference survives",
+            setOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS),
+            next,
+        )
+        assertEquals(
+            "what renders is still just the resolved surfaces this character has",
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY),
+            next?.let { resolvePanes(it, serverNoActions) },
+        )
+        // On re-discovery (the player reopens the wizard) Actions is back, unharmed.
+        assertEquals(
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS),
+            next?.let { resolvePanes(it, server) },
+        )
+    }
+
+    @Test
+    fun `nextStoredPanes removes a currently-visible surface from the stored set`() {
+        val stored = setOf(PaneSurface.TRACKER, PaneSurface.SHEET)
+        assertEquals(
+            setOf(PaneSurface.TRACKER),
+            nextStoredPanes(current = stored, stored = stored, PaneSurface.SHEET),
+        )
+    }
+
+    @Test
+    fun `nextStoredPanes refuses to persist deselecting the last visible pane`() {
+        val stored = setOf(PaneSurface.INVENTORY)
+        assertEquals(
+            null,
+            nextStoredPanes(current = stored, stored = stored, PaneSurface.INVENTORY),
+        )
+    }
+
     @Test
     fun `selecting every surface is allowed`() {
         // "maximum all" (decision 6) — there is no upper bound to enforce, and this is what would
@@ -165,6 +232,7 @@ class PaneSelectionTest {
             selectedTab = CharacterHomeTab.Inventory,
             storedPanes = setOf(PaneSurface.TRACKER, PaneSurface.SHEET),
             available = server,
+            availableTabs = serverTabs,
         )
 
         // Note what is *not* here: the stored pane set is non-empty and completely ignored.
@@ -178,6 +246,7 @@ class PaneSelectionTest {
             selectedTab = CharacterHomeTab.Inventory,
             storedPanes = setOf(PaneSurface.TRACKER, PaneSurface.SHEET),
             available = server,
+            availableTabs = serverTabs,
         )
 
         assertEquals(
@@ -197,10 +266,10 @@ class PaneSelectionTest {
         val tab = CharacterHomeTab.Sheet
         val panes = setOf(PaneSurface.TRACKER, PaneSurface.INVENTORY)
 
-        val onPhone = characterHomeChrome(false, tab, panes, server)
-        val onTablet = characterHomeChrome(true, tab, panes, server)
-        val backOnPhone = characterHomeChrome(false, tab, panes, server)
-        val backOnTablet = characterHomeChrome(true, tab, panes, server)
+        val onPhone = characterHomeChrome(false, tab, panes, server, serverTabs)
+        val onTablet = characterHomeChrome(true, tab, panes, server, serverTabs)
+        val backOnPhone = characterHomeChrome(false, tab, panes, server, serverTabs)
+        val backOnTablet = characterHomeChrome(true, tab, panes, server, serverTabs)
 
         assertEquals(CharacterHomeChrome.Tabs(CharacterHomeTab.Sheet), onPhone)
         assertEquals(
@@ -221,6 +290,7 @@ class PaneSelectionTest {
             selectedTab = CharacterHomeTab.Sheet,
             storedPanes = setOf(PaneSurface.INVENTORY),
             available = server,
+            availableTabs = serverTabs,
         )
 
         assertEquals(CharacterHomeChrome.Panes(listOf(PaneSurface.INVENTORY)), chrome)
@@ -420,5 +490,131 @@ class PaneSelectionTest {
             dir = dir.parentFile
         }
         throw AssertionError("could not find :app sources from ${System.getProperty("user.dir")}")
+    }
+
+    // ---- FR-26's discovery gate (16 decision 1) ------------------------------
+
+    @Test
+    fun `a character with nothing to act with has no Actions surface and no Actions tab`() {
+        // The one-tab-drop rule. Until FR-26 every surface a server character could have, it
+        // had — so `resolvePanes`' first rule only ever fired on the local screen. This is the
+        // first data-dependent surface, and both halves have to drop together.
+        assertEquals(
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.SHEET),
+            serverNoActions,
+        )
+        assertFalse(CharacterHomeTab.Actions in serverHomeTabs(hasActions = false))
+
+        // ...and reappear together.
+        assertTrue(PaneSurface.ACTIONS in server)
+        assertTrue(CharacterHomeTab.Actions in serverTabs)
+    }
+
+    @Test
+    fun `the gated tab list and the gated pane list always agree`() {
+        // A tab drawn without its pane, or a pane without its tab, is the bug this pair of
+        // functions could introduce. They are two lists over two enums; nothing but this makes
+        // them the same list.
+        for (hasActions in listOf(true, false)) {
+            assertEquals(
+                "hasActions=$hasActions",
+                serverHomeTabs(hasActions).map { it.surface },
+                serverPaneSurfaces(hasActions),
+            )
+        }
+    }
+
+    @Test
+    fun `a stored actions pane is filtered for a character without one and is not rewritten`() {
+        // The player keeps Tracker + Actions on their wizard, then opens a fighter. The Actions
+        // column must not render as an empty pane — and the preference must survive, so it is
+        // still there when they go back to the wizard.
+        val stored = setOf(PaneSurface.TRACKER, PaneSurface.ACTIONS)
+
+        val onFighter = characterHomeChrome(
+            expandedWidth = true,
+            selectedTab = CharacterHomeTab.Tracker,
+            storedPanes = stored,
+            available = serverNoActions,
+            availableTabs = serverHomeTabs(hasActions = false),
+        )
+        val onWizard = characterHomeChrome(
+            expandedWidth = true,
+            selectedTab = CharacterHomeTab.Tracker,
+            storedPanes = stored,
+            available = server,
+            availableTabs = serverTabs,
+        )
+
+        assertEquals(CharacterHomeChrome.Panes(listOf(PaneSurface.TRACKER)), onFighter)
+        assertEquals(
+            "the stored set was filtered on read, never rewritten",
+            CharacterHomeChrome.Panes(listOf(PaneSurface.TRACKER, PaneSurface.ACTIONS)),
+            onWizard,
+        )
+    }
+
+    @Test
+    fun `an actions-only stored set falls back to the tracker rather than a blank screen`() {
+        // `resolvePanes` rule 3, reached for the first time on the server path.
+        val chrome = characterHomeChrome(
+            expandedWidth = true,
+            selectedTab = CharacterHomeTab.Tracker,
+            storedPanes = setOf(PaneSurface.ACTIONS),
+            available = serverNoActions,
+            availableTabs = serverHomeTabs(hasActions = false),
+        )
+        assertEquals(CharacterHomeChrome.Panes(listOf(PaneSurface.TRACKER)), chrome)
+    }
+
+    @Test
+    fun `a saved Actions tab resolves to the tracker on a character that has none`() {
+        // Three real ways to get here, all ordinary: backing out of a caster into a fighter, a
+        // live edit removing the last spell, and EVERY cold restore onto this tab (discovery has
+        // not answered yet). Without `resolveTab` the row would draw no selected tab and the
+        // body would render a surface the player cannot navigate away from.
+        val chrome = characterHomeChrome(
+            expandedWidth = false,
+            selectedTab = CharacterHomeTab.Actions,
+            storedPanes = emptySet(),
+            available = serverNoActions,
+            availableTabs = serverHomeTabs(hasActions = false),
+        )
+        assertEquals(CharacterHomeChrome.Tabs(CharacterHomeTab.Tracker), chrome)
+    }
+
+    @Test
+    fun `a saved Actions tab is kept once discovery answers`() {
+        // The transient case above must not be a one-way door: `resolveTab` reads, it does not
+        // write, so the saved selection is still Actions when the board arrives a frame later.
+        val chrome = characterHomeChrome(
+            expandedWidth = false,
+            selectedTab = CharacterHomeTab.Actions,
+            storedPanes = emptySet(),
+            available = server,
+            availableTabs = serverTabs,
+        )
+        assertEquals(CharacterHomeChrome.Tabs(CharacterHomeTab.Actions), chrome)
+    }
+
+    @Test
+    fun `resolveTab leaves an available tab alone and falls back to the first otherwise`() {
+        assertEquals(
+            CharacterHomeTab.Sheet,
+            resolveTab(CharacterHomeTab.Sheet, serverTabs),
+        )
+        assertEquals(
+            "the fallback is 'the first available', not a named constant",
+            CharacterHomeTab.Tracker,
+            resolveTab(CharacterHomeTab.Actions, serverHomeTabs(hasActions = false)),
+        )
+    }
+
+    @Test
+    fun `the stored token for the actions surface is stable`() {
+        // It is on disk on user devices from 1.9.0 onward. `PaneLayoutCodec` is keyed on this
+        // string, not on the ordinal, which is what made inserting the constant safe.
+        assertEquals("actions", PaneSurface.ACTIONS.key)
+        assertEquals(PaneSurface.ACTIONS, PaneSurface.fromKey("actions"))
     }
 }

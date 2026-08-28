@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.core.data.characters.CharacterListRepository
@@ -32,9 +33,7 @@ import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
-// Aliased: this view model's own `togglePane` is the *persisting* gesture, the imported one is
-// the pure rule it applies. Same name in two layers is right; shadowing it silently is not.
-import com.hashtagchow.magehand.ui.panes.togglePane as nextPaneSet
+import com.hashtagchow.magehand.ui.panes.nextStoredPanes
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -49,6 +48,8 @@ import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryLayoutPlan
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsUiState
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.toActionsUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.toInventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.CustomizeSection
@@ -82,9 +83,28 @@ data class CharacterHomeUiState(
     val tracker: TrackerUiState = TrackerUiState(),
     val customize: TrackerCustomizeState = TrackerCustomizeState(),
     val inventory: InventoryUiState = InventoryUiState(),
+    /**
+     * FR-26's Actions surface (docs/design/16-actions-and-feed.md). Built from the character's
+     * own `actions` flow, like [inventory] and for the same reason — it answers a different
+     * question from the tracker board and shares none of its override layer.
+     */
+    val actions: ActionsUiState = ActionsUiState(),
 ) {
     /** The accent seeds the whole character-home subtree, both tabs (04 §Theming). */
     val accentColor: String? get() = tracker.accentColor
+
+    /**
+     * FR-26 decision 1's discovery gate: does this character have an Actions surface at all?
+     *
+     * A derived `Boolean` rather than the screen reaching into `actions.sections`, so the chrome
+     * decision reads one stable value. That matters for recomposition: `serverHomeTabs` and
+     * `serverPaneSurfaces` are `remember(hasActions)`-keyed in the screen, and keying them on a
+     * list would rebuild the tab row on every board emission.
+     *
+     * **False while loading**, which is the honest default — see `serverPaneSurfaces`' KDoc, and
+     * `resolveTab` for what keeps that from bouncing a restored Actions selection.
+     */
+    val hasActions: Boolean get() = actions.sections.isNotEmpty()
 }
 
 /**
@@ -310,14 +330,15 @@ class CharacterHomeViewModel @Inject constructor(
      * Decision 6's picker gesture, persisted.
      *
      * [current] is what is on screen — the resolved list, not the stored set — because
-     * `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. A gesture the rule
-     * refuses returns the input unchanged and is not written, matching [mutateInventoryLayout]'s
-     * no-op contract.
+     * `togglePane`'s minimum-of-one has to count visible panes; see its KDoc. What gets
+     * *persisted* is `nextStoredPanes`'s delta against [panes]' current value (the raw stored
+     * set), not [current] itself — see its KDoc for why writing the resolved set directly
+     * silently erased a filtered-out preference. A gesture the rule refuses returns `null` and
+     * is not written, matching [mutateInventoryLayout]'s no-op contract.
      */
     fun togglePane(current: Set<PaneSurface>, surface: PaneSurface) {
         val key = paneLayoutKey(open.value ?: return)
-        val next = nextPaneSet(current, surface)
-        if (next == current) return
+        val next = nextStoredPanes(current, panes.value, surface) ?: return
         viewModelScope.launch { paneLayoutStore.setPanes(key, next) }
     }
 
@@ -400,6 +421,28 @@ class CharacterHomeViewModel @Inject constructor(
     }
 
     /**
+     * FR-26's Actions surface state (docs/design/16-actions-and-feed.md decisions 3–6).
+     *
+     * ### One source, so no `combine` at all
+     *
+     * The narrowest of the four state flows, and deliberately: the surface is read-only
+     * (decision 7), so unlike [inventoryState] it needs no `canWrite`, no `isShowingSnapshot`
+     * and no preference store — none of those change what a read-only list draws. It is a `map`
+     * over one flow, which is also why it costs nothing to add here at the arity ceiling.
+     *
+     * The query and the collapse set are **not** here. They are `ActionsScreen`'s own
+     * `rememberSaveable` state, applied on top via `ActionsUiState.withView` — see that function
+     * for why the split is where it is.
+     */
+    private val actionsState: Flow<ActionsUiState> = open.flatMapLatest { character ->
+        if (character == null) {
+            flowOf(ActionsUiState(creatureId = creatureId))
+        } else {
+            character.actions.map { toActionsUiState(creatureId = creatureId, board = it) }
+        }
+    }
+
+    /**
      * The inventory tab's two DataStore-backed preferences, paired.
      *
      * The same arity fix as [Prefs] and for the same reason: `combine` tops out at five typed
@@ -428,13 +471,37 @@ class CharacterHomeViewModel @Inject constructor(
         }
     }
 
+    /**
+     * [customizeState] and [actionsState], paired — the same arity fix as [Prefs] and
+     * [InventoryPrefs], for the same reason.
+     *
+     * `combine` tops out at five typed flows before it degenerates into an `Array<Any?>` with
+     * unchecked casts, and [uiState] below was already at exactly five. FR-26 needed a sixth
+     * input, so two of them are pre-merged here rather than the whole call being demoted to the
+     * untyped overload — where a mis-ordered argument becomes a `ClassCastException` at runtime
+     * instead of a compile error.
+     *
+     * These two are the right pair to merge because neither is on the other's hot path: the
+     * customize sheet's state changes when the sheet is open, the actions list's when the sheet
+     * arrives, and nothing a player does moves both at once.
+     */
+    private data class SheetAndActions(
+        val customize: TrackerCustomizeState,
+        val actions: ActionsUiState,
+    )
+
+    private val customizeAndActions: Flow<SheetAndActions> =
+        combine(customizeState, actionsState) { customize, actions ->
+            SheetAndActions(customize, actions)
+        }
+
     val uiState: StateFlow<CharacterHomeUiState> = combine(
         characterListRepository.state,
         sheetSessionFactory.sessions { SheetSessionFactory.characterPath(creatureId) },
         trackerState,
-        customizeState,
+        customizeAndActions,
         inventoryState,
-    ) { listState, session, tracker, customize, inventory ->
+    ) { listState, session, tracker, sheetAndActions, inventory ->
         CharacterHomeUiState(
             creatureId = creatureId,
             // The name comes from the list the user just came from. The
@@ -444,8 +511,9 @@ class CharacterHomeViewModel @Inject constructor(
             connection = tracker.status.tone.toConnectionState(),
             session = session,
             tracker = tracker,
-            customize = customize,
+            customize = sheetAndActions.customize,
             inventory = inventory,
+            actions = sheetAndActions.actions,
         )
     }.stateIn(
         viewModelScope,

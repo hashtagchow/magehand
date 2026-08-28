@@ -50,7 +50,9 @@ import com.hashtagchow.magehand.ui.panes.CharacterHomeChrome
 import com.hashtagchow.magehand.ui.panes.PanePicker
 import com.hashtagchow.magehand.ui.panes.PaneRow
 import com.hashtagchow.magehand.ui.panes.characterHomeChrome
+import com.hashtagchow.magehand.ui.panes.serverHomeTabs
 import com.hashtagchow.magehand.ui.panes.serverPaneSurfaces
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsScreen
 import com.hashtagchow.magehand.ui.panes.sheetWanted
 import com.hashtagchow.magehand.ui.panes.surface
 import com.hashtagchow.magehand.ui.window.LocalExpandedWidth
@@ -132,7 +134,13 @@ fun CharacterHomeScreen(
     var restToConfirm by rememberSaveable { mutableStateOf<RestKind?>(null) }
     var shake by remember { mutableStateOf<ShakeSignal?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
-    val tabs = remember { CharacterHomeTab.entries }
+    // FR-26 decision 1's one-tab-drop: the Actions tab exists only for a character whose sheet
+    // has something to act with. `remember(hasActions)` rather than a bare `remember`, because
+    // this list now depends on data that arrives after the first composition — the old
+    // `remember { entries }` would have frozen the pre-discovery answer forever.
+    val hasActions = uiState.hasActions
+    val tabs = remember(hasActions) { serverHomeTabs(hasActions) }
+    val availablePanes = remember(hasActions) { serverPaneSurfaces(hasActions) }
 
     // 04 §3's two snackbars, from the view model's two event streams, in **two** coroutines.
     //
@@ -199,7 +207,11 @@ fun CharacterHomeScreen(
         expandedWidth = LocalExpandedWidth.current,
         selectedTab = selectedTab,
         storedPanes = panes,
-        available = serverPaneSurfaces,
+        available = availablePanes,
+        // Both gated lists, so a tab cannot be drawn without its pane or the reverse. The tab
+        // branch also needs this to resolve a saved `Actions` selection on a character that has
+        // none — see `resolveTab`.
+        availableTabs = tabs,
     )
 
     // 14 decision 9: in pane mode the WebView's lifetime is the Sheet pane's selection, not the
@@ -362,6 +374,11 @@ fun CharacterHomeScreen(
                         ),
                     )
                 }
+                // FR-26. No actions bundle: the surface is read-only (16 decision 7), so unlike
+                // the two above it takes state and nothing else.
+                val actions = @Composable {
+                    ActionsScreen(state = uiState.actions)
+                }
                 val sheet = @Composable {
                     if (sheetState == null) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -374,7 +391,11 @@ fun CharacterHomeScreen(
 
                 when (chrome) {
                     is CharacterHomeChrome.Tabs -> {
-                        PrimaryTabRow(selectedTabIndex = chrome.selected.ordinal) {
+                        // The index within the DRAWN list, not the enum ordinal. Those agreed
+                        // while every tab was always drawn; with the Actions tab gated they do
+                        // not, and `ordinal` would put the selection indicator under the wrong
+                        // tab for everything after the hole (i.e. the Sheet).
+                        PrimaryTabRow(selectedTabIndex = tabs.indexOf(chrome.selected)) {
                             tabs.forEach { tab ->
                                 Tab(
                                     selected = tab == chrome.selected,
@@ -387,6 +408,7 @@ fun CharacterHomeScreen(
                         when (chrome.selected) {
                             CharacterHomeTab.Tracker -> tracker()
                             CharacterHomeTab.Inventory -> inventory()
+                            CharacterHomeTab.Actions -> actions()
                             CharacterHomeTab.Sheet -> sheet()
                         }
                     }
@@ -394,7 +416,10 @@ fun CharacterHomeScreen(
                     is CharacterHomeChrome.Panes -> {
                         PanePicker(
                             panes = chrome.panes,
-                            available = serverPaneSurfaces,
+                            // The same gated list the chrome resolved against. Passing the
+                            // ungated one here would draw an Actions segment for a pane
+                            // `resolvePanes` refuses to render — a control that does nothing.
+                            available = availablePanes,
                             // The *resolved* panes, not the stored set — see `togglePane`.
                             onToggle = { viewModel.togglePane(chrome.panes.toSet(), it) },
                         )
@@ -402,6 +427,7 @@ fun CharacterHomeScreen(
                             when (surface) {
                                 PaneSurface.TRACKER -> tracker()
                                 PaneSurface.INVENTORY -> inventory()
+                                PaneSurface.ACTIONS -> actions()
                                 PaneSurface.SHEET -> sheet()
                             }
                         }

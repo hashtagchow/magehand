@@ -151,6 +151,10 @@ fun LocalCharacterHomeScreen(
         selectedTab = selectedTab,
         storedPanes = panes,
         available = localPaneSurfaces,
+        // Every tab this screen has, always: nothing on the local path is discovery-gated. The
+        // parameter exists for FR-26's Actions tab on the server screen, and passing the whole
+        // list here keeps `resolveTab` a no-op rather than a branch.
+        availableTabs = tabs,
     )
 
     // The undo snackbar, identical to the DiceCloud tracker's — `showSnackbar` suspends until
@@ -365,6 +369,14 @@ fun LocalCharacterHomeScreen(
                             // same posture this screen's event collector takes towards
                             // `TrackerEvent.Failed`.
                             PaneSurface.SHEET -> Unit
+
+                            // Unreachable for the same structural reason, one feature later:
+                            // 16 decision 1 gives an on-device character no Actions surface in
+                            // v1 (there is no local spell or action model), so
+                            // `LocalCharacterHomeTab` has no `Actions` constant and this surface
+                            // cannot reach `localPaneSurfaces`. `LocalOpenCharacter.actions` is
+                            // a constant empty board for the same reason.
+                            PaneSurface.ACTIONS -> Unit
                         }
                     }
                 }

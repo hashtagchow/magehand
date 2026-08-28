@@ -43,6 +43,7 @@ import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DeathSaves
 import com.hashtagchow.magehand.core.model.ExactQuantity
+import com.hashtagchow.magehand.core.model.ActionBoard
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryItem
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
@@ -95,6 +96,24 @@ interface OpenCharacter {
      * is hiding so they can be un-hidden — they are absent from [board] by construction.
      */
     val boardIgnoringHidden: StateFlow<TrackerBoard>
+
+    /**
+     * What the Actions surface renders (docs/design/16-actions-and-feed.md, FR-26).
+     *
+     * ### A read `val`, and why it costs `WritePostureTest` nothing
+     *
+     * 16 decision 7 is *"zero new writes … no `WritePostureTest` edits"*, and this addition
+     * honours it rather than skirting it. That test's name-set and signature assertions both
+     * filter `^(get|is)[A-Z].*` — a Kotlin `val` compiles to `getActions()`, so it is dropped
+     * before either assertion runs, exactly as `board`, `inventory` and the other eleven read
+     * flows already are. The catalog and its two lists are untouched by this wave.
+     *
+     * That is a property of the *shape*, not a loophole: the filter is safe precisely because no
+     * intent is named like a getter, and this is a getter carrying an immutable domain type. It
+     * adds nothing `:app` can send. The fifth assertion — no `core.ddp` type in any signature —
+     * also still holds: [ActionBoard] is `:core:model`, like every other type on this interface.
+     */
+    val actions: StateFlow<ActionBoard>
 
     /** 06's four-state model, including `OFFLINE`. Drives the status strip. */
     val connectionState: StateFlow<ConnectionState>
@@ -1212,6 +1231,8 @@ internal class DefaultOpenCharacter(
     }
 
     override val inventory: StateFlow<InventoryBoard> get() = session.inventory
+
+    override val actions: StateFlow<ActionBoard> get() = session.actions
 
     override fun setEquipped(
         propertyId: String,

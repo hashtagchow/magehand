@@ -36,6 +36,22 @@ import kotlinx.coroutines.flow.map
 enum class PaneSurface(val key: String) {
     TRACKER("tracker"),
     INVENTORY("inventory"),
+
+    /**
+     * FR-26's Actions surface (docs/design/16-actions-and-feed.md decision 1).
+     *
+     * **Inserted here, not appended**, and the position is the decision: decision 1 fixes the
+     * display order at *"Tracker → Inventory → Actions → Sheet everywhere the order exists"*, and
+     * this enum's ordinal IS that order (see the class KDoc). Appending would have put the
+     * Actions column to the right of the Sheet's WebView with no other file changing and no test
+     * failing on the order itself.
+     *
+     * Inserting is safe for data already on disk because the codec is keyed on [key], not on the
+     * ordinal — `tracker,sheet` written by 1.8.0 decodes to the same two surfaces here. The only
+     * thing the ordinal decides is the order they are drawn in, which is exactly what changed on
+     * purpose.
+     */
+    ACTIONS("actions"),
     SHEET("sheet"),
     ;
 
