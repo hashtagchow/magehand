@@ -34,6 +34,9 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.InventorySort
+import com.hashtagchow.magehand.core.data.settings.InventorySortCriterion
+import com.hashtagchow.magehand.core.data.settings.InventorySortDirection
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
@@ -511,6 +514,7 @@ class CharacterHomeViewModel @Inject constructor(
                     canWrite = canWrite,
                     equippableOverrides = prefs.equippableOverrides,
                     layout = prefs.layout,
+                    sort = prefs.sort,
                 )
             }
         }
@@ -560,18 +564,23 @@ class CharacterHomeViewModel @Inject constructor(
     }
 
     /**
-     * The inventory tab's two DataStore-backed preferences, paired.
+     * The inventory tab's DataStore-backed preferences, bundled.
      *
      * The same arity fix as [Prefs] and for the same reason: `combine` tops out at five typed
      * flows before it degenerates into an `Array<Any?>` with unchecked casts, and FR-14's layout
      * made this tab's need six. The grouping means something rather than being an arbitrary split
-     * to fit — both are stored choices about how to *draw* this character's inventory, neither is
-     * sheet data, and they are reaped by the same two paths.
+     * to fit — all of them are stored choices about how to *draw* this character's inventory, none
+     * is sheet data, and they are reaped by the same two paths.
+     *
+     * FR-35's sort joins the bundle rather than claiming a slot in [inventoryState]'s own five,
+     * and it belongs here on its own terms: it is a third read off the same two stores, keyed by
+     * the same character key, cleared by the same Reset.
      */
     private fun inventoryPrefs(character: OpenCharacter): Flow<InventoryPrefs> = combine(
         equippableOverrideStore.overrides(equippableOverrideKey(character)),
         inventoryLayoutStore.layout(inventoryLayoutKey(character)),
-    ) { overrides, layout -> InventoryPrefs(overrides, layout) }
+        inventoryLayoutStore.sort(inventoryLayoutKey(character)),
+    ) { overrides, layout, sort -> InventoryPrefs(overrides, layout, sort) }
 
     private val customizeState: Flow<TrackerCustomizeState> = open.flatMapLatest { character ->
         if (character == null) {
@@ -1197,12 +1206,67 @@ class CharacterHomeViewModel @Inject constructor(
         }
 
     /**
+     * FR-35 decision 3's criterion radio, persisted.
+     *
+     * ### Why this is not a `mutateInventoryLayout`
+     *
+     * Because the sort is not an *order*, and that is the whole reason the three layout gestures
+     * need a plan at all: an arrangement is a list, a list cannot be edited one element at a time
+     * without the caller and the store agreeing on the other elements, and the gap between them is
+     * where a cold open silently forgets four containers (see `InventoryLayoutPlan`'s KDoc). A
+     * criterion is one value of a four-value enum. There is nothing to weave, nothing to lose, and
+     * no state on screen the write has to be computed against — so it is a plain read-modify-write
+     * of the pair, and writing it as a twin of the layout gestures would have implied a hazard it
+     * does not have.
+     *
+     * The direction is read back from the store rather than from `uiState`, so a criterion tap
+     * lands on the direction that is *stored* rather than on the one a stale frame is showing.
+     */
+    fun setInventorySortCriterion(criterion: InventorySortCriterion) =
+        mutateInventorySort { it.copy(criterion = criterion) }
+
+    /**
+     * FR-35 decision 3's ascending/descending toggle, persisted.
+     *
+     * A gesture the sheet cannot even offer under [InventorySortCriterion.DEFAULT] — the control
+     * is disabled there (decision 6) — and this deliberately does **not** re-check that. The
+     * direction is a standing preference that survives a trip through sheet order (see
+     * [InventorySort.direction]), so refusing to record one while the criterion happens to be
+     * Default would throw away a choice the player would have to make again. There is no state
+     * this can reach that renders differently, because sheet order ignores the direction.
+     */
+    fun setInventorySortDirection(direction: InventorySortDirection) =
+        mutateInventorySort { it.copy(direction = direction) }
+
+    /**
+     * Reads the stored pair, applies [edit], writes it back — unless nothing changed.
+     *
+     * The no-write-on-a-no-op rule the three layout gestures keep, reached differently: they
+     * signal it with an empty list because their value *is* a list, and this compares the two
+     * values because its value is a pair of enums. Same contract, same reason — a radio tapped on
+     * the option it is already on should not wake DataStore, and every write here re-emits a flow
+     * the whole inventory tab is built from.
+     */
+    private inline fun mutateInventorySort(crossinline edit: (InventorySort) -> InventorySort) {
+        val key = inventoryLayoutKey(open.value ?: return)
+        viewModelScope.launch {
+            val current = inventoryLayoutStore.sort(key).first()
+            val next = edit(current)
+            if (next != current) inventoryLayoutStore.setSort(key, next)
+        }
+    }
+
+    /**
      * The sheet's Reset: forget this character's arrangement, so 12 decision 1's default draws.
      *
      * A key deletion rather than a write of the default order, which is decision 5's own wording
      * and is the meaningfully different one: a stored copy of the default would freeze *today's*
      * default into that character, so a later release that changed decision 1 would change the
      * order for every new character and for nobody who had ever pressed Reset.
+     *
+     * FR-35's *"Reset restores Default + ascending"* rides the same call: `clearForCharacter`
+     * drops all three of this character's keys. One Reset, one meaning — after it the tab is what
+     * a character who has never customized sees.
      */
     fun resetInventoryLayout() {
         val key = inventoryLayoutKey(open.value ?: return)
@@ -1336,6 +1400,7 @@ class CharacterHomeViewModel @Inject constructor(
     private data class InventoryPrefs(
         val equippableOverrides: Set<String>,
         val layout: List<InventoryLayoutEntry>,
+        val sort: InventorySort,
     )
 
     private companion object {

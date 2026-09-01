@@ -481,6 +481,8 @@ fun LocalCharacterHomeScreen(
                 onMove = viewModel::moveInventorySection,
                 onSetHidden = viewModel::setInventorySectionHidden,
                 onReset = viewModel::resetInventoryLayout,
+                onSetSortCriterion = viewModel::setInventorySortCriterion,
+                onSetSortDirection = viewModel::setInventorySortDirection,
             )
         }
 

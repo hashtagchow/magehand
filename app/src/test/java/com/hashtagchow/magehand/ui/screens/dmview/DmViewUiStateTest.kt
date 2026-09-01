@@ -1,6 +1,8 @@
 package com.hashtagchow.magehand.ui.screens.dmview
 
+import com.hashtagchow.magehand.code
 import com.hashtagchow.magehand.core.model.CharacterSummary
+import com.hashtagchow.magehand.mainSourceFiles
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -13,15 +15,20 @@ import java.io.File
  *
  * ### Why some of this is read out of the source
  *
- * `:app` has no Compose test harness (`StartDestinationNavigationTest` says why), so a claim
- * about the *shape of a composable* can be checked in exactly two ways: on a device, once, by a
- * human, or by reading the source. `UiScaleProviderTest` set the precedent and `PaneSelectionTest`
- * followed it; this file uses it for the three claims of FR-19 that live only in composition and
- * whose failure is silent:
+ * Some claims are about the *absence* of something from a file, or about *where* a call sits in a
+ * Hilt-wired screen. Neither can be witnessed by rendering anything, so they are read out of the
+ * source — `UiScaleProviderTest` set the precedent and `PaneSelectionTest` followed it. This file
+ * uses it for the claims of FR-19 that live only in the code and whose failure is silent:
  *
  *  1. the editing toggle is **not** persisted anywhere,
- *  2. the write controls are rendered under `showsWriteControls` and nothing else,
- *  3. the entry reads the width gate, once.
+ *  2. the entry reads the width gate, once, on the character list,
+ *  3. no file in this feature reads the width gate a second time.
+ *
+ * The claim that used to be second on that list — *"the write controls are rendered under
+ * `showsWriteControls` and nothing else"* — is a claim about a composition, and FR-34 turned it
+ * into one: `DmCardRenderTest` renders a read-only card and checks that not one control exists on
+ * it. That is a stronger statement than any scan for an `if`, on the one screen in this app that
+ * can write to five other people's sheets.
  */
 class DmViewUiStateTest {
 
@@ -166,21 +173,30 @@ class DmViewUiStateTest {
         }
     }
 
+    /**
+     * The card must not grow a **second** copy of the write gate.
+     *
+     * `DmCardRenderTest` proves the gate works — a read-only card renders no control at all — and
+     * that is the assertion that used to live here as a source scan. What a render cannot say is
+     * that the composable asks the state layer's *one* question rather than re-deriving any of the
+     * four conditions behind it, because a card carrying its own second copy would render
+     * identically today and drift from `dmCardShowsWriteControls` tomorrow. So the negative
+     * survives the upgrade and the positive moved to the composition.
+     */
     @Test
-    fun `the card composable renders write controls under exactly one condition`() {
-        // Decision 14's "controls appear only on cards where owner==me || writers.contains(me)"
-        // and decision 18's refusal, both resolved at the state layer into
-        // `showsWriteControls` — so the claim this pins is that the *composable* asks that one
-        // question and re-derives none of it. A card that grew its own `if (isEditableByMe)`
-        // would be a second copy of a four-condition rule, and the two would drift.
+    fun `the card composable re-derives none of the write gate for itself`() {
         val source = dmViewSourceFiles().single { it.name == "DmCard.kt" }.code()
 
-        val gate = source.indexOf("if (card.showsWriteControls) {")
-        val controls = source.indexOf("CardWriteControls(")
-        assertTrue("DmCard.kt no longer gates on showsWriteControls", gate >= 0)
+        // The availability clause is not a re-derivation: `availability` is decision 19's own
+        // dimension, already folded into `dmCardShowsWriteControls` at the state layer — the
+        // composable repeats it as the "whatever the toggle says" defense the Q15 render test
+        // feeds the illegal combination to. The Q13 grid golden's first recording caught the
+        // unguarded version drawing steppers on an unavailable card.
         assertTrue(
-            "the write controls must be composed inside the showsWriteControls branch",
-            gate in 0 until controls,
+            "DmCard.kt no longer gates on availability + showsWriteControls",
+            source.contains(
+                "if (card.availability == DmCardAvailability.AVAILABLE && card.showsWriteControls) {",
+            ),
         )
         // Exactly one call site, so there is no second unguarded path to the same controls.
         assertEquals(
@@ -188,7 +204,6 @@ class DmViewUiStateTest {
             1,
             Regex("CardWriteControls\\(\\s*\\n\\s*card =").findAll(source).count(),
         )
-        // And the composable must not re-ask any of the four conditions for itself.
         listOf("grantedEditing &&", "editingEnabled", "isEditableByMe").forEach {
             assertFalse(
                 "DmCard.kt must not re-derive the write gate ($it)",
@@ -234,33 +249,6 @@ class DmViewUiStateTest {
     }
 
     // --- source access -------------------------------------------------------
-
-    /**
-     * A source file with its **comments stripped**.
-     *
-     * Every assertion in this class is about what the code *does*, and this house writes KDoc
-     * that argues its decisions by naming the alternatives it rejected — `DmViewViewModel`'s
-     * toggle explains at length why it is not a `SavedStateHandle`, and `DmViewSelection` names
-     * `LocalExpandedWidth` while explaining why the width is a parameter rather than a read. A
-     * scan over raw text would fail on both, which would make the honest documentation the thing
-     * the test punishes.
-     *
-     * Deliberately crude — line comments, and block comments matched non-greedily — because the
-     * inputs are this feature's own Kotlin files and not arbitrary text. A block-comment opener
-     * inside a string literal would confuse it; none exists in those files, and a scan that
-     * quietly stopped matching anything would be caught by the positive assertion each test makes
-     * alongside its negative ones.
-     *
-     * (Kotlin block comments **nest**, which is why this paragraph says "block-comment opener"
-     * rather than showing one: a literal one here would open a comment inside this KDoc and the
-     * file would stop parsing four lines further down. That is not a hypothetical — it is what
-     * the first draft of this comment did.)
-     */
-    private fun File.code(): String = readText()
-        .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
-        .lines()
-        .filterNot { it.trimStart().startsWith("//") }
-        .joinToString("\n")
 
     /**
      * 06 step 2 reaches this screen too, and the wiring is the part that can go missing.
@@ -324,16 +312,4 @@ class DmViewUiStateTest {
     private fun dmViewSourceFiles(): List<File> =
         mainSourceFiles().filter { it.path.contains("${File.separatorChar}dmview${File.separatorChar}") }
 
-    /** `:app`'s main source tree — `PaneSelectionTest`'s walk, for its reason. */
-    private fun mainSourceFiles(): List<File> {
-        var dir: File? = File(System.getProperty("user.dir") ?: ".").absoluteFile
-        while (dir != null) {
-            val root = File(dir, "src/main/java/com/hashtagchow/magehand")
-            if (root.isDirectory) {
-                return root.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
-            }
-            dir = dir.parentFile
-        }
-        throw AssertionError("could not find :app sources from ${System.getProperty("user.dir")}")
-    }
 }

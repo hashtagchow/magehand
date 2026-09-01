@@ -30,6 +30,9 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.InventorySort
+import com.hashtagchow.magehand.core.data.settings.InventorySortCriterion
+import com.hashtagchow.magehand.core.data.settings.InventorySortDirection
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
@@ -371,7 +374,8 @@ class LocalCharacterHomeViewModel @Inject constructor(
                 local.canWrite,
                 equippableOverrideStore.overrides(equippableOverrideKey),
                 inventoryLayoutStore.layout(inventoryLayoutKey),
-            ) { board, canWrite, overrides, layout ->
+                inventoryLayoutStore.sort(inventoryLayoutKey),
+            ) { board, canWrite, overrides, layout, sort ->
                 toInventoryUiState(
                     creatureId = characterId,
                     board = board,
@@ -380,6 +384,13 @@ class LocalCharacterHomeViewModel @Inject constructor(
                     canWrite = canWrite,
                     equippableOverrides = overrides,
                     layout = layout,
+                    // FR-35, on the same terms as the arrangement above: 12 decision 6's "same
+                    // customize surface" extends to the sort control, because a local character's
+                    // items carry the same two numbers a DiceCloud item does — weight and value
+                    // are columns on `local_tracker_rows` (schema v4), collected by the same
+                    // add-item form. Nothing here is a stand-in for data this app never asked for
+                    // (the FR-10b lesson); it is the same rule over the same fields.
+                    sort = sort,
                     // 12 decisions 7 and 8, stamped onto every row: delete offers no undo here,
                     // and move is not offered at all. See `InventoryRowState.isLocal`.
                     isLocal = true,
@@ -733,7 +744,34 @@ class LocalCharacterHomeViewModel @Inject constructor(
             InventoryLayoutPlan.setCollapsed(resolved, stored, key, collapsed)
         }
 
-    /** The sheet's Reset — a key deletion, so the default is never frozen into a character. */
+    /**
+     * FR-35 decision 3's two sort gestures.
+     *
+     * The DiceCloud view model's methods over this character's own layout key, which is 12
+     * decision 6's "same customize surface" claim extended to the sort exactly as FR-16's collapse
+     * was: same enum, same store, same no-write-on-a-no-op rule. See there for why neither is a
+     * `mutateInventoryLayout`.
+     */
+    fun setInventorySortCriterion(criterion: InventorySortCriterion) =
+        mutateInventorySort { it.copy(criterion = criterion) }
+
+    fun setInventorySortDirection(direction: InventorySortDirection) =
+        mutateInventorySort { it.copy(direction = direction) }
+
+    private inline fun mutateInventorySort(crossinline edit: (InventorySort) -> InventorySort) {
+        viewModelScope.launch {
+            val current = inventoryLayoutStore.sort(inventoryLayoutKey).first()
+            val next = edit(current)
+            if (next != current) inventoryLayoutStore.setSort(inventoryLayoutKey, next)
+        }
+    }
+
+    /**
+     * The sheet's Reset — a key deletion, so the default is never frozen into a character.
+     *
+     * Drops the sort with the arrangement (FR-35 decision 4), because `clearForCharacter` drops
+     * all three of this character's keys. One Reset, one meaning, on both kinds of character.
+     */
     fun resetInventoryLayout() {
         viewModelScope.launch { inventoryLayoutStore.clearForCharacter(inventoryLayoutKey) }
     }

@@ -79,6 +79,7 @@ import com.hashtagchow.magehand.ui.components.DirectEntryKeys
 import com.hashtagchow.magehand.ui.components.DirectEntryKind
 import com.hashtagchow.magehand.ui.components.directEntry
 import com.hashtagchow.magehand.ui.theme.DisabledContent
+import com.hashtagchow.magehand.ui.theme.hyphenated
 import com.hashtagchow.magehand.ui.theme.mageHandIconButtonColors
 
 /**
@@ -1194,7 +1195,11 @@ private fun ConsumableRow(
     ) {
         Text(
             text = row.name,
-            style = MaterialTheme.typography.titleMedium,
+            // GOLDEN-1's ruling (2026-08-30), same defect class: a consumable's name is typed on
+            // the sheet, this slot is two lines beside two 48 dp steppers, and "Quarterstaff" has
+            // exactly as far to fall here as it does on the inventory row. Covered by checklist
+            // item L11 and by no golden — see `TextStyle.hyphenated` for why.
+            style = MaterialTheme.typography.titleMedium.hyphenated(),
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),

@@ -63,6 +63,7 @@ import com.hashtagchow.magehand.ui.components.directEntry
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.MINUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.PLUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.StepperButton
+import com.hashtagchow.magehand.ui.theme.hyphenated
 
 /**
  * Everything the inventory tab can ask of the ViewModel (docs/design/10-inventory.md).
@@ -701,7 +702,13 @@ private fun InventoryRow(
         Column(Modifier.weight(1f)) {
             Text(
                 text = row.name,
-                style = MaterialTheme.typography.titleMedium,
+                // GOLDEN-1 (FR-34.md §4.1): the operator's 2026-08-30 hyphenation ruling — a
+                // two-line row breaks a long word properly rather than between two arbitrary
+                // letters. Device-verified 2026-08-31; **no golden can pin it** (Robolectric has
+                // no hyphenation dictionaries, so `InventoryRow_narrow.png` still shows
+                // `Qua / rte…` and always will). Checklist item L11 is the guard, not a picture.
+                // See `TextStyle.hyphenated`.
+                style = MaterialTheme.typography.titleMedium.hyphenated(),
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )

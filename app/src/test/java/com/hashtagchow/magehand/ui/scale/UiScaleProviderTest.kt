@@ -1,23 +1,28 @@
 package com.hashtagchow.magehand.ui.scale
 
 import androidx.compose.ui.unit.Density
+import com.hashtagchow.magehand.mainSourceFiles
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.hashtagchow.magehand.core.data.settings.UiScale
-import java.io.File
 
 /**
  * FR-18's root density provider (docs/design/14-large-screen-arc.md decision 1).
  *
- * ### Two kinds of assertion, because `:app` has no Compose harness
+ * ### Two kinds of assertion, and where the third went
  *
- * The arithmetic is a pure function, so it is asserted directly. The *structural* half —
- * "the factor is applied exactly once" — is not arithmetic at all: it is a claim about where
- * `LocalDensity` is read and how many places provide it, and in a module with no Compose test
- * harness (`StartDestinationNavigationTest` explains why there is none) the honest way to
- * assert it is to read the source, in the manner of `WritePostureTest`'s bytecode scan.
+ * The arithmetic is a pure function, so it is asserted directly. What remains structural is the
+ * *whole-app* half — how many places provide `LocalDensity`, and where the one provider is
+ * mounted — which is a claim about absence and placement across every file in the module, and
+ * therefore still read out of the source in the manner of `WritePostureTest`'s bytecode scan.
+ *
+ * The third kind used to live here too: "the provider does not re-scale its own output". FR-34
+ * gave `:app` a Compose harness, so that is now **rendered** rather than read —
+ * `UiScaleProviderRenderTest` recomposes the provider ten times and measures the density on every
+ * frame, which is the actual defect (a composition correct on frame 1 and wrong on frame 10) and
+ * is something no scan can see.
  *
  * ### Why compounding is the defect worth its own tests
  *
@@ -80,22 +85,6 @@ class UiScaleProviderTest {
     }
 
     @Test
-    fun `the provider takes its base from outside itself, so recomposition cannot compound`() {
-        val source = providerSource()
-
-        val baseRead = source.indexOf("val base = LocalDensity.current")
-        val provides = source.indexOf("CompositionLocalProvider(")
-
-        assertTrue("ProvideUiScale no longer captures a base density", baseRead >= 0)
-        assertTrue("ProvideUiScale no longer provides a CompositionLocal", provides >= 0)
-        assertTrue(
-            "the base density is read INSIDE the provider — every recomposition would then " +
-                "re-scale an already-scaled density, and the app would grow without bound",
-            baseRead < provides,
-        )
-    }
-
-    @Test
     fun `exactly one place in the app provides LocalDensity`() {
         // The other half of non-compounding, and the half a future wave is likely to break:
         // 14's FR-17 panes are the obvious place somebody would provide a second density.
@@ -148,24 +137,4 @@ class UiScaleProviderTest {
         assertEquals(150, UiScale.LARGE_150.textZoom)
     }
 
-    // --- source access -------------------------------------------------------
-
-    /**
-     * `:app`'s main source tree, found by walking up from the module directory the test runs
-     * in — the same approach `InventoryUiStateTest` uses to reach `strings.xml`.
-     */
-    private fun mainSourceFiles(): List<File> {
-        var dir: File? = File(System.getProperty("user.dir") ?: ".").absoluteFile
-        while (dir != null) {
-            val root = File(dir, "src/main/java/com/hashtagchow/magehand")
-            if (root.isDirectory) {
-                return root.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
-            }
-            dir = dir.parentFile
-        }
-        throw AssertionError("could not find :app sources from ${System.getProperty("user.dir")}")
-    }
-
-    private fun providerSource(): String =
-        mainSourceFiles().single { it.name == "UiScaleProvider.kt" }.readText()
 }

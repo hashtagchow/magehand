@@ -27,6 +27,7 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.InventorySort
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutStore
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
@@ -209,6 +210,8 @@ private object FakeEquippableOverrideStore : EquippableOverrideStore {
 private object FakeInventoryLayoutStore : InventoryLayoutStore {
     override fun layout(characterKey: String): Flow<List<InventoryLayoutEntry>> = flowOf(emptyList())
     override suspend fun setLayout(characterKey: String, layout: List<InventoryLayoutEntry>) = Unit
+    override fun sort(characterKey: String): Flow<InventorySort> = flowOf(InventorySort.DEFAULT)
+    override suspend fun setSort(characterKey: String, sort: InventorySort) = Unit
     override suspend fun clearForCharacter(characterKey: String) = Unit
     override suspend fun deleteForAccount(accountId: String) = Unit
 }

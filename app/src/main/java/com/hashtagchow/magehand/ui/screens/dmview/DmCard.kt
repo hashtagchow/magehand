@@ -144,7 +144,13 @@ internal fun DmCard(
             // layer — see `dmCardShowsWriteControls`, which is where the four conditions live and
             // where each has a test. A read-only card renders no write control at all: absent,
             // not disabled, because a disabled stepper on somebody else's sheet invites the tap.
-            if (card.showsWriteControls) {
+            //
+            // The availability check is decision 19's "never a write control, whatever the toggle
+            // says": the state layer should never combine NOT_AVAILABLE with the toggle on, but a
+            // card that cannot show a creature must be safe if it ever does. Until the Q13 grid
+            // golden's first recording (2026-09-01) it was not — an unavailable card drew live
+            // steppers against a sheet the app could not see.
+            if (card.availability == DmCardAvailability.AVAILABLE && card.showsWriteControls) {
                 CardWriteControls(
                     card = card,
                     onSpend = onSpend,

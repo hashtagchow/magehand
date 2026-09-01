@@ -160,7 +160,14 @@ fun CredentialsScreen(
                 // characters happen to be masked right now.
                 modifier = Modifier
                     .fillMaxWidth()
-                    .semantics { password() },
+                    .semantics { password() }
+                    // FR-34's one inert handle on this screen. `PasswordVisibilityTest` has to
+                    // reach *this* field and not the username one above it, and the two are
+                    // otherwise distinguishable only by their label text, which is copy and would
+                    // make the test fail on a rewording rather than on the rule it pins. A test
+                    // tag changes nothing on screen and nothing in the accessibility tree the
+                    // `password()` call above already established.
+                    .testTag("credentials:password"),
                 singleLine = true,
                 enabled = !uiState.isSubmitting,
                 label = { Text(stringResource(R.string.credentials_password_label)) },

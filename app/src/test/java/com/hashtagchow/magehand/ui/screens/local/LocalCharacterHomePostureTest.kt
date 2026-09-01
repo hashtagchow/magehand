@@ -21,6 +21,19 @@ import com.hashtagchow.magehand.ui.webview.SheetSession
  * `TrackerUiStateTest`); the Sheet tab is pinned by the absence of anything to render — this
  * file asserts that absence, because "nobody added a session field" is exactly the kind of
  * claim that decays into "somebody added a session field".
+ *
+ * ### KEPT AS A REFLECTION SCAN, deliberately (FR-34, design 19 decision 5)
+ *
+ * FR-34 gave `:app` a Compose harness and converted several structural tests into renders. This
+ * one was deliberately not converted, and must not be. A render can say *"this composition drew
+ * no Sheet tab"*; reflection says *"this state has nothing a Sheet tab could be drawn from"*, and
+ * the second is the guarantee 09 decision 8 actually asks for — a WebView that is never
+ * instantiated, on every path, including the ones a test did not think to compose. Downgrading it
+ * to "we rendered it and there was no Sheet tab" would swap a proof of impossibility for an
+ * observation about one screenshot.
+ *
+ * `WritePostureTest` carries the same note for the same reason, one layer under (bytecode rather
+ * than reflection).
  */
 class LocalCharacterHomePostureTest {
 

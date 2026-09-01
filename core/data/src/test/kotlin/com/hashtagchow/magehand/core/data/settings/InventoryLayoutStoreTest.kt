@@ -298,6 +298,262 @@ class InventoryLayoutStoreTest {
         )
     }
 
+    // --- FR-35: the sort keys (decision 4) ----------------------------------------
+
+    private val byWeightDescending = InventorySort(
+        criterion = InventorySortCriterion.WEIGHT,
+        direction = InventorySortDirection.DESCENDING,
+    )
+
+    @Test
+    fun `a sort survives a restart of the store, criterion and direction together`() {
+        // The same claim the arrangement makes, for the same reason it is asserted the same way:
+        // "how I read my inventory" is a durable fact about a character, and a fake map would pass
+        // this without either value reaching a disk.
+        val file = prefsFile()
+
+        withStore(file) { it.setSort(key, byWeightDescending) }
+
+        assertEquals(byWeightDescending, withStore(file) { it.sort(key).first() })
+    }
+
+    @Test
+    fun `nothing stored reads as sheet order, ascending`() = withStore(prefsFile()) { store ->
+        // Decision 4's default, and the state every character starts in. Not nullable, for
+        // `layout`'s reason: "no preference" and "the sheet's own order" render identically, and a
+        // nullable value would put an elvis at every reader.
+        assertEquals(InventorySort.DEFAULT, store.sort(InventoryLayoutStore.localKey("fresh")).first())
+        assertEquals(InventorySortCriterion.DEFAULT, InventorySort.DEFAULT.criterion)
+        assertEquals(InventorySortDirection.ASCENDING, InventorySort.DEFAULT.direction)
+    }
+
+    @Test
+    fun `storing the default removes both keys rather than writing them`() {
+        val file = prefsFile()
+
+        withStore(file) {
+            it.setSort(key, byWeightDescending)
+            it.setSort(key, InventorySort.DEFAULT)
+        }
+
+        // Reading it back cannot tell the difference — which is exactly why the *write* has to be
+        // a removal, matching `setLayout`'s empty-list rule: a key holding the default is a slot
+        // in a file nothing prunes, occupied forever by a player who sorted once and put it back.
+        assertEquals(InventorySort.DEFAULT, withStore(file) { it.sort(key).first() })
+    }
+
+    /**
+     * Decision 4's **tolerant codec**, and the reason it is two keys rather than one packed value.
+     *
+     * A criterion from a newer build degrades to Default *on its own*, leaving a perfectly
+     * readable direction alone — which is what a single `"weight:desc"` string could not do
+     * without a parser that decided how much of a half-understood value to keep.
+     */
+    @Test
+    fun `an unknown stored value degrades to the default, one key at a time`() {
+        assertEquals(InventorySortCriterion.DEFAULT, InventorySortCriterion.fromKey("rarity"))
+        assertEquals(InventorySortCriterion.DEFAULT, InventorySortCriterion.fromKey(null))
+        assertEquals(InventorySortCriterion.DEFAULT, InventorySortCriterion.fromKey(""))
+        assertEquals(InventorySortDirection.ASCENDING, InventorySortDirection.fromKey("sideways"))
+        assertEquals(InventorySortDirection.ASCENDING, InventorySortDirection.fromKey(null))
+
+        // …and the halves are independent: an unreadable criterion beside a readable direction
+        // keeps the direction, which is the property the two-key shape exists for.
+        assertEquals(InventorySortDirection.DESCENDING, InventorySortDirection.fromKey("desc"))
+    }
+
+    @Test
+    fun `the stored strings are the documented vocabulary, both ways round`() {
+        // A **file format**, pinned for the reason the arrangement's comma-joined form is: it is
+        // read back by a build that may be older or newer than the one that wrote it, so a
+        // well-meaning rename of an enum constant is a silent preference-loss bug.
+        assertEquals(
+            listOf("default", "name", "weight", "value"),
+            InventorySortCriterion.entries.map { it.key },
+        )
+        assertEquals(listOf("asc", "desc"), InventorySortDirection.entries.map { it.key })
+
+        InventorySortCriterion.entries.forEach {
+            assertEquals(it, InventorySortCriterion.fromKey(it.key))
+        }
+        InventorySortDirection.entries.forEach {
+            assertEquals(it, InventorySortDirection.fromKey(it.key))
+        }
+    }
+
+    /**
+     * **The L1 lesson**: writing one of this store's three keys must not disturb the other two.
+     *
+     * Asserted in both directions and over a restart, because the failure is silent and total —
+     * a sort gesture that quietly dropped a player's section arrangement (or a reorder that reset
+     * their sort) would look like the app forgetting things at random, and neither half is
+     * visible in a diff of the class that caused it. The property holds because the three are
+     * separate preference keys in one DataStore rather than because care was taken at each write,
+     * and this is what would notice if that ever stopped being true.
+     */
+    @Test
+    fun `writing the sort preserves the arrangement, and writing the arrangement preserves the sort`() {
+        val file = prefsFile()
+
+        withStore(file) {
+            it.setLayout(key, arrangement)
+            it.setSort(key, byWeightDescending)
+        }
+        withStore(file) {
+            assertEquals("the sort write must not touch the order", arrangement, it.layout(key).first())
+            assertEquals(byWeightDescending, it.sort(key).first())
+        }
+
+        // The other direction: a reorder after a sort.
+        withStore(file) { it.setLayout(key, arrangement.reversed()) }
+        withStore(file) {
+            assertEquals(arrangement.reversed(), it.layout(key).first())
+            assertEquals("the order write must not touch the sort", byWeightDescending, it.sort(key).first())
+        }
+
+        // …and back to the default sort leaves the order alone as well, which is the case the
+        // *removal* branch of `setSort` walks.
+        withStore(file) { it.setSort(key, InventorySort.DEFAULT) }
+        withStore(file) {
+            assertEquals(arrangement.reversed(), it.layout(key).first())
+            assertEquals(InventorySort.DEFAULT, it.sort(key).first())
+        }
+    }
+
+    @Test
+    fun `each character keeps its own sort`() = withStore(prefsFile()) { store ->
+        val alice = InventoryLayoutStore.serverKey("acct-1", "creature-1")
+        val bob = InventoryLayoutStore.serverKey("acct-1", "creature-2")
+
+        store.setSort(alice, byWeightDescending)
+
+        assertEquals(byWeightDescending, store.sort(alice).first())
+        assertEquals(InventorySort.DEFAULT, store.sort(bob).first())
+    }
+
+    @Test
+    fun `Reset drops the sort with the arrangement, and survives a restart`() {
+        // Decision 4's *"reset restores Default + ascending"*. One call, three keys — see
+        // `clearForCharacter`. The restart is what proves it was a deletion rather than a blank
+        // value, exactly as the arrangement's own reset test does.
+        val file = prefsFile()
+
+        withStore(file) {
+            it.setLayout(key, arrangement)
+            it.setSort(key, byWeightDescending)
+        }
+        withStore(file) { it.clearForCharacter(key) }
+
+        withStore(file) {
+            assertTrue(it.layout(key).first().isEmpty())
+            assertEquals(InventorySort.DEFAULT, it.sort(key).first())
+        }
+    }
+
+    @Test
+    fun `signing out reaps the sort keys too, by the existing prefix match`() =
+        withStore(prefsFile()) { store ->
+            // The reason FR-35's keys are **suffixed onto the character key** rather than given a
+            // namespace of their own: `deleteForAccount` finds an account's characters by the
+            // shape of the key, so a suffixed key is inside that prefix and is reaped by the scan
+            // that was already there. A separate `inventory_sort:server:…` namespace would have
+            // needed the reap to know about it — and this store's KDoc calls what is left behind
+            // unreachable **forever**, because a sign-in mints a fresh account id.
+            val doomed = InventoryLayoutStore.serverKey("acct-1", "creature-1")
+            val sibling = InventoryLayoutStore.serverKey("acct-2", "creature-3")
+            val onDevice = InventoryLayoutStore.localKey("local-1")
+
+            listOf(doomed, sibling, onDevice).forEach {
+                store.setLayout(it, arrangement)
+                store.setSort(it, byWeightDescending)
+            }
+
+            store.deleteForAccount("acct-1")
+
+            assertEquals(InventorySort.DEFAULT, store.sort(doomed).first())
+            assertTrue(store.layout(doomed).first().isEmpty())
+            assertEquals("a sibling account must be untouched", byWeightDescending, store.sort(sibling).first())
+            // 09 decision 10 again: sign-out cannot reach a local character, and the namespace is
+            // what guarantees it for the sort exactly as it does for the order.
+            assertEquals(
+                "sign-out must not touch a local character's sort",
+                byWeightDescending,
+                store.sort(onDevice).first(),
+            )
+        }
+
+    /**
+     * The one hazard the suffix shape introduces, and where it is actually closed.
+     *
+     * ### What is *not* claimed, because it is not true
+     *
+     * The store cannot defend itself here. `layout(k)` reads whatever string sits under `k` and
+     * runs it through [InventoryLayoutCodec], which decodes *any* string — so
+     * `layout("$key:sort")` over a sort of `weight` really does come back as the single entry
+     * `weight`, and asserting otherwise fails. That is not a leak: it is what "the key is an
+     * opaque string all the way down" means (see the three-stores test below, which makes the same
+     * point from the other direction).
+     *
+     * ### What is claimed, and what makes it hold
+     *
+     * That the collision is **unreachable**, because no character key ever ends in a suffix — so
+     * `layout` is never called with a key holding a sort. Both key builders are asserted against
+     * the id shapes production actually produces (Meteor's alphanumeric ids, UUIDs), and this is
+     * what would notice if a suffix were ever changed to something a creature id could end with.
+     */
+    @Test
+    fun `no character key ever ends in a sort suffix, which is what makes the collision unreachable`() {
+        val suffixes = listOf(
+            InventoryLayoutStore.SORT_SUFFIX,
+            InventoryLayoutStore.SORT_DIRECTION_SUFFIX,
+        )
+        val realistic = listOf(
+            InventoryLayoutStore.serverKey("acct-1", "dgfCnHywxzmYMDtbb"),
+            InventoryLayoutStore.serverKey("3f2b8c10-0e2a-4f7d-9a11-77bd3c9e4a55", "TknmogLrZMih74Nr2"),
+            InventoryLayoutStore.localKey("3f2b8c10-0e2a-4f7d-9a11-77bd3c9e4a55"),
+        )
+
+        realistic.forEach { characterKey ->
+            suffixes.forEach { suffix ->
+                assertTrue(
+                    "'$characterKey' must not end in '$suffix'",
+                    !characterKey.endsWith(suffix),
+                )
+            }
+        }
+        // …and the three keys one character occupies are three distinct strings, which is what
+        // lets one `edit` remove all of them without any of them being each other.
+        val keys = realistic.first().let {
+            setOf(it, "$it${InventoryLayoutStore.SORT_SUFFIX}", "$it${InventoryLayoutStore.SORT_DIRECTION_SUFFIX}")
+        }
+        assertEquals("one character, three distinct keys", 3, keys.size)
+
+        // **The invariant the three examples above are only samples of.** Enumerating ids proves
+        // nothing about the id after next; these two facts do, between them, and they are the two
+        // a future edit could break:
+        //
+        //  1. every suffix begins with `:`, and
+        //  2. a character key's final segment never contains one.
+        //
+        // Together they mean a suffixed key always has strictly more `:`-segments than any
+        // character key, so no character key can ever equal or end with one. Change either — a
+        // suffix spelled `-sort`, or a key format that puts a colon inside the creature id — and
+        // this fails rather than the collision appearing silently in the field.
+        suffixes.forEach {
+            assertTrue("'$it' must start with a colon", it.startsWith(":"))
+        }
+        realistic.forEach { characterKey ->
+            assertTrue(
+                "'$characterKey' final segment must not contain a colon",
+                !characterKey.substringAfterLast(':').contains(':'),
+            )
+            assertTrue(
+                "'$characterKey' must have a non-empty final segment",
+                characterKey.substringAfterLast(':').isNotEmpty(),
+            )
+        }
+    }
+
     // --- per-character isolation --------------------------------------------------
 
     @Test

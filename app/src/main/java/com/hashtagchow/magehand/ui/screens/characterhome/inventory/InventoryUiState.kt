@@ -3,6 +3,7 @@ package com.hashtagchow.magehand.ui.screens.characterhome.inventory
 import androidx.annotation.StringRes
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
+import com.hashtagchow.magehand.core.data.settings.InventorySort
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.EquipGroup
@@ -1082,6 +1083,12 @@ const val FILTER_THRESHOLD: Int = 15
  *   stay so — the store is a flow, and the view model is where flows are combined.
  * @param layout this character's stored arrangement (12 decision 5), or empty for the default.
  *   Passed in for [equippableOverrides]' reason, whole: another flow, another view model job.
+ * @param sort FR-35's ordering **inside** each section, or [InventorySort.DEFAULT] for the
+ *   source's own order. Passed in for [layout]'s reason — it is a third flow off the same store —
+ *   and applied by [InventorySortPlan] at the two `toSection` helpers, which is every list of
+ *   items this function builds and nothing else. The wallet never reaches those helpers, so
+ *   decision 1's *"wallet exempt"* is a property of the call graph rather than of a branch;
+ *   the section *order* is [InventoryLayoutPlan]'s and is untouched by any criterion.
  * @param isLocal whether this is a local character (12 decisions 7 and 8). It decides whether
  *   delete offers an undo and whether move is offered at all, so it is stamped onto every row
  *   ([InventoryRowState.isLocal]) rather than kept at the top — see there for why. Defaulted
@@ -1097,6 +1104,7 @@ fun toInventoryUiState(
     equippableOverrides: Set<String> = emptySet(),
     layout: List<InventoryLayoutEntry> = emptyList(),
     isLocal: Boolean = false,
+    sort: InventorySort = InventorySort.DEFAULT,
 ): InventoryUiState {
     // 11 decision 3. Grouped rather than filtered three times so the partition is provably
     // total: every carried item lands in exactly one of the three, because `EquipGroup` has
@@ -1163,20 +1171,20 @@ fun toInventoryUiState(
     // which is what the sheet needs to name a row the tab is not drawing.
     fun sectionFor(key: String): InventorySectionState? = when {
         key == InventoryLayoutKeys.EQUIPPED -> board.equipped
-            .toSection(InventorySectionKind.EQUIPPED, key, equippableOverrides, isLocal)
+            .toSection(InventorySectionKind.EQUIPPED, key, equippableOverrides, isLocal, sort)
 
         key == InventoryLayoutKeys.WEAPONS -> carried[InventorySectionKind.WEAPONS].orEmpty()
-            .toSection(InventorySectionKind.WEAPONS, key, equippableOverrides, isLocal)
+            .toSection(InventorySectionKind.WEAPONS, key, equippableOverrides, isLocal, sort)
 
         key == InventoryLayoutKeys.ARMOR -> carried[InventorySectionKind.ARMOR].orEmpty()
-            .toSection(InventorySectionKind.ARMOR, key, equippableOverrides, isLocal)
+            .toSection(InventorySectionKind.ARMOR, key, equippableOverrides, isLocal, sort)
 
         key == InventoryLayoutKeys.GEAR ->
-            gearItems.toSection(InventorySectionKind.GEAR, key, equippableOverrides, isLocal)
+            gearItems.toSection(InventorySectionKind.GEAR, key, equippableOverrides, isLocal, sort)
 
         InventoryLayoutKeys.isContainer(key) -> containers
             .firstOrNull { InventoryLayoutKeys.container(it.propertyId) == key }
-            ?.toSection(equippableOverrides, isLocal)
+            ?.toSection(equippableOverrides, isLocal, sort)
 
         // A key naming nothing this build knows about. Unreachable today — `resolve` only ever
         // returns keys from `defaultKeys` — and `null` rather than an `error` so that a future
@@ -1241,7 +1249,7 @@ fun toInventoryUiState(
         creatureId = creatureId,
         wallet = walletUi,
         blocks = blocks,
-        customize = InventoryCustomizeState(customizeRows),
+        customize = InventoryCustomizeState(customizeRows, sort),
         carriedWeight = formatAmount(board.carriedWeightLb),
         capacityWeight = board.capacityLb?.let { formatAmount(it.toDouble()) },
         isOverCapacity = board.isOverCapacity,
@@ -1300,12 +1308,16 @@ private fun List<InventoryItem>.toSection(
     key: String,
     equippableOverrides: Set<String>,
     isLocal: Boolean,
+    sort: InventorySort,
 ): InventorySectionState? = takeIf { it.isNotEmpty() }?.let { items ->
     InventorySectionState(
         kind = kind,
         key = key,
+        // Summed over the section's items, which no ordering can change — so the header's figure
+        // is computed off `items` rather than off the sorted list, and a reader can see that
+        // sorting cannot move a number. FR-35 decision 1.
         weight = formatAmount(items.sumOf { it.totalWeightLb }),
-        rows = items.map { it.toRow(equippableOverrides, isLocal) },
+        rows = InventorySortPlan.sorted(items, sort).map { it.toRow(equippableOverrides, isLocal) },
     )
 }
 
@@ -1338,6 +1350,7 @@ private fun InventoryItem.toRow(
 private fun InventoryContainer.toSection(
     equippableOverrides: Set<String>,
     isLocal: Boolean,
+    sort: InventorySort,
 ): InventorySectionState =
     InventorySectionState(
         kind = InventorySectionKind.CONTAINER,
@@ -1346,5 +1359,8 @@ private fun InventoryContainer.toSection(
         // is allowed to have an unnamed property; a section with no heading is not.
         containerName = name.takeIf { it.isNotBlank() },
         weight = formatAmount(displayWeightLb),
-        rows = contents.map { it.toRow(equippableOverrides, isLocal) },
+        // FR-35 decision 1's "within each section **or container**" — a backpack's contents are
+        // sorted by the same rule its siblings on the tab are, which is what makes the criterion
+        // one setting rather than one setting plus an exception nobody documented.
+        rows = InventorySortPlan.sorted(contents, sort).map { it.toRow(equippableOverrides, isLocal) },
     )

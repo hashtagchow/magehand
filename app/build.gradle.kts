@@ -11,6 +11,11 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
+    // FR-34 layer 2: contributes `recordRoborazziDebug` / `verifyRoborazziDebug` /
+    // `compareRoborazziDebug`, which are the same `testDebugUnitTest` run with the
+    // capture flags set. Without a flag the golden tests are plain unit tests, so a
+    // default `./gradlew test` stays machine-independent.
+    alias(libs.plugins.roborazzi)
 }
 
 /**
@@ -81,8 +86,18 @@ android {
         // a device that upgrades runs the migration, and a consumer that re-syncs reads the new
         // rule. **DEPLOY IS HELD** for the operator's word per the design's own operator scope;
         // the bump belongs with the build regardless, for the reason two entries up.
-        versionCode = 20
-        versionName = "1.11.0"
+        // 22 / 1.12.1 carries BUG-6 (the `CategoryChooser` spoken sentence, unreachable since
+        // 1.4.0) plus FR-34 conversion wave 2 (area Q). A **PATCH** and not a minor, per §Versioning
+        // — no surface gains a capability, no schema moves, and the contract is untouched, so
+        // `exportContract` has nothing new to say. Stated because every entry above it is a MINOR
+        // and the run could otherwise look like a convention rather than a rule: 1.10.0 and 1.11.0
+        // are minors because surfaces gained capabilities and the contract schema moved; this
+        // release changes what a screen reader can reach and what the suite proves, and neither is
+        // a capability. (If the operator would rather this went out as 1.13.0, the only change is
+        // this line — nothing in the tree derives from the version but the contract export, which
+        // re-runs either way.)
+        versionCode = 22
+        versionName = "1.12.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -157,8 +172,20 @@ android {
             // stubs (Log, Build) on the way past. No `:app` test asserts on an
             // android.* return value.
             isReturnDefaultValues = true
+            // FR-34: Robolectric renders the real `strings.xml`/theme, so the merged
+            // resources have to be on the unit-test runtime classpath. Without this the
+            // Compose tests fail at `Resources.NotFoundException` before asserting
+            // anything.
+            isIncludeAndroidResources = true
         }
     }
+}
+
+// FR-34 layer 2 (design 19 decision 6). Goldens are committed PNGs, so they live in the
+// source tree rather than `build/` — `app/src/test/snapshots/`, next to the tests that
+// record them. See that directory's README.md for the record/verify workflow.
+roborazzi {
+    outputDir.set(layout.projectDirectory.dir("src/test/snapshots"))
 }
 
 // WP1 disabled Hilt's aggregating task because Hilt 2.58's bundled
@@ -207,4 +234,21 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.androidx.lifecycle.viewmodel.savedstate)
+
+    // FR-34 layer 1 (docs/design/19-ui-test-infrastructure.md): Robolectric gives the
+    // JVM an Android runtime, and Compose's `ui-test-junit4` gives it a composition to
+    // drive — together they are what lets `setContent` + semantics assertions run inside
+    // a plain `./gradlew test`, with no emulator and no `androidTest` source set.
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    // The host activity `createComposeRule()` launches. `debugImplementation` rather than
+    // `testImplementation` because it works by contributing an `<activity>` to the
+    // *variant's* merged manifest, which is what Robolectric reads; it ships no code, and
+    // the release variant never sees it.
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
+
+    // FR-34 layer 2: goldens captured from that same composition.
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
 }

@@ -53,6 +53,7 @@ import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.SpellListHeader
 import com.hashtagchow.magehand.core.model.UseTarget
+import com.hashtagchow.magehand.ui.theme.hyphenated
 
 /**
  * FR-26's Actions surface — a spell and action list for one DiceCloud character
@@ -339,7 +340,13 @@ private fun RowShell(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = name,
-                style = MaterialTheme.typography.bodyLarge,
+                // BUG-5 (ledger, 2026-08-30): the GOLDEN-1 defect class on this surface — an
+                // action's name is the sheet's, this slot is two lines beside a trailing label,
+                // and a word too long for the line broke between two arbitrary letters. Same
+                // instrument as the four sites the FR-35 wave applied it to, closed on the same
+                // device evidence, and guarded by the same checklist item (L11) rather than by a
+                // golden — this surface has none. See `TextStyle.hyphenated`.
+                style = MaterialTheme.typography.bodyLarge.hyphenated(),
                 color = tint,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,

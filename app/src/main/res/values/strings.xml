@@ -149,6 +149,37 @@
          it is the one place the sheet's promise above does not apply. -->
     <string name="inventory_customize_wallet_hidden">Your coins are still on the character sheet</string>
 
+    <!-- FR-35: sorting, on the same sheet because sorting is a preference and not a glance.
+         The subtitle states the two fences a player would otherwise have to discover by trying
+         it: the sections themselves do not move (that is the list above), and the wallet is not
+         touched. -->
+    <!-- The section list gained a heading when FR-35's sort block moved in above it: a list
+         with something else above it needs one, or the first container reads as part of the
+         control. Same small-caps style as "Hidden". -->
+    <string name="inventory_customize_sections">Sections</string>
+    <string name="inventory_sort_title">Sort items</string>
+    <string name="inventory_sort_subtitle">Applies inside each section and container. The section order above and your coins are unaffected.</string>
+    <!-- The four criteria. "Sheet order" rather than "Default" or "None": it names what the
+         player gets — the order their sheet is in — where "Default" names only this app's
+         opinion of it, and "None" reads as no order at all. A local character has no sheet in
+         the DiceCloud sense, but its rows are in the order the player put them in, which is the
+         same promise wearing the same word. -->
+    <string name="inventory_sort_default">Sheet order</string>
+    <string name="inventory_sort_name">Name</string>
+    <!-- Deliberately NOT reusing inventory_weight/inventory_value, which are the "%1$s lb" and
+         "%1$s gp" number formats: these are the names of two things to sort by, and a
+         translator is entitled to render a unit and a criterion differently. -->
+    <string name="inventory_sort_weight">Weight</string>
+    <string name="inventory_sort_value">Value</string>
+    <string name="inventory_sort_direction">Sort direction</string>
+    <string name="inventory_sort_ascending">Ascending</string>
+    <string name="inventory_sort_descending">Descending</string>
+    <!-- Spoken only. The direction control is disabled rather than removed under sheet order
+         (see InventoryCustomizeState.canChooseDirection), and "disabled" on its own tells a
+         screen-reader user that something is unavailable without telling them what would make it
+         available. This is that sentence. -->
+    <string name="inventory_sort_direction_unavailable">not used in sheet order, choose Name, Weight or Value first</string>
+
     <!-- Add-item flow (10 decision 6) -->
     <string name="inventory_add">Add item</string>
     <string name="inventory_add_title">Add an item</string>

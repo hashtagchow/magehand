@@ -4,6 +4,9 @@ import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.data.local.LocalInventoryBoard
 import com.hashtagchow.magehand.stringsXml
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
+import com.hashtagchow.magehand.core.data.settings.InventorySort
+import com.hashtagchow.magehand.core.data.settings.InventorySortCriterion
+import com.hashtagchow.magehand.core.data.settings.InventorySortDirection
 import com.hashtagchow.magehand.core.model.AbilityScores
 import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CoinKind
@@ -127,6 +130,10 @@ class InventoryUiStateTest {
         // property of the section this class does test.
         layout: List<InventoryLayoutEntry> = emptyList(),
         isLocal: Boolean = false,
+        // FR-35. Defaulted to the sheet's own order, which is what every assertion in this class
+        // written before FR-35 means — and the fact that none of them had to change is the
+        // feature's central claim, pinned by name further down.
+        sort: InventorySort = InventorySort.DEFAULT,
     ) = toInventoryUiState(
         creatureId = "FakeCreature23456",
         board = board,
@@ -136,6 +143,7 @@ class InventoryUiStateTest {
         equippableOverrides = equippableOverrides,
         layout = layout,
         isLocal = isLocal,
+        sort = sort,
     )
 
     // --- section composition (10 decision 2) -------------------------------------
@@ -1458,6 +1466,286 @@ class InventoryUiStateTest {
 
         assertEquals(stored, stored.filteredBy(""))
         assertTrue(stored.sections.single { it.key == "equipped" }.collapsed)
+    }
+
+    // --- FR-35: sorting inside sections (ledger decisions 1-3, 6) ------------------
+
+    /**
+     * A board whose three sections each hold rows that would sort differently — so a criterion
+     * applied to only one of them, or to the tab as a whole, fails visibly.
+     *
+     * The names are deliberately not in alphabetical order in any section, and the container's
+     * contents deliberately span the same weight range as Gear's, so a sort that leaked across
+     * section boundaries would interleave them and be caught.
+     */
+    private val sortable = InventoryBoard(
+        wallet = wallet(gp = 109, sp = 4),
+        equipped = listOf(
+            item("eq-staff", "Quarterstaff", weightLb = 4.0, valueGp = 0.2, equipped = true),
+            item("eq-amulet", "Amulet", weightLb = 0.1, valueGp = 500.0, equipped = true),
+        ),
+        containers = listOf(
+            InventoryContainer(
+                propertyId = "cont1",
+                name = "Backpack",
+                quantity = 1,
+                weightLb = 5.0,
+                valueGp = 2.0,
+                rollupWeightLb = 12.5,
+                rollupValueGp = 8.0,
+                contents = listOf(
+                    item("in-rope", "Rope", weightLb = 10.0, valueGp = 1.0),
+                    item("in-ink", "Ink", weightLb = null, valueGp = 10.0),
+                ),
+            ),
+        ),
+        carried = listOf(
+            item("c-torch", "Torch", quantity = 3, weightLb = 1.0, valueGp = 0.01),
+            item("c-anvil", "Anvil", weightLb = 50.0, valueGp = 5.0),
+            item("c-bedroll", "Bedroll", weightLb = 7.0, valueGp = 1.0),
+        ),
+        carriedWeightLb = 142.0,
+        capacityLb = 225,
+    )
+
+    private fun sortedNames(
+        criterion: InventorySortCriterion,
+        direction: InventorySortDirection = InventorySortDirection.ASCENDING,
+    ) = map(board = sortable, sort = InventorySort(criterion, direction)).allRowNames()
+
+    /**
+     * Under sheet order the tab draws the **source's own order**, section by section.
+     *
+     * ### What this does and does not prove, corrected 2026-08-31
+     *
+     * It used to open with `assertEquals(map(board), map(board, sort = DEFAULT))` and claim to be
+     * *"the claim the whole feature rests on"*. The independent review was right that it was
+     * neither: `map`'s own parameter already defaults to `InventorySort.DEFAULT`, so the two sides
+     * were the identical call and the assertion was `f(x) == f(x)`. It could not have failed, and
+     * a test that cannot fail is worse than no test because it occupies the place of one.
+     *
+     * There is no way to say the real thing from here — the signature carries no "no sort at all"
+     * value to contrast with, and inventing one would be adding a state to production code so
+     * that a test could assert against it. So this now claims only what it can see: that sheet
+     * order is the board's order, written out, which is a genuine (if smaller) pin — a
+     * `sortedWith` accidentally left running under `DEFAULT` fails it.
+     *
+     * **The "FR-35 changed nothing" property lives in two other places, and that is where to look
+     * if this feature is ever suspected of moving a row it should not have:**
+     *  - `InventorySortPlanTest.sheet order returns the very same list` — `assertSame`, which is
+     *    the strongest available statement that nothing was re-decided; and
+     *  - the golden corpus, where 17 of 18 images came back **byte-identical** after this wave.
+     *    Those pictures are the end-to-end witness a unit test cannot be.
+     */
+    @Test
+    fun `sheet order draws the board's own order, section by section`() {
+        assertEquals(
+            listOf("Quarterstaff", "Amulet", "Rope", "Ink", "Torch", "Anvil", "Bedroll"),
+            sortedNames(InventorySortCriterion.DEFAULT),
+        )
+        // …and the direction is inert under it, which is the one pairing decision 6's disabled
+        // control still allows to be stored. See `InventorySort.direction`.
+        assertEquals(
+            sortedNames(InventorySortCriterion.DEFAULT),
+            sortedNames(InventorySortCriterion.DEFAULT, InventorySortDirection.DESCENDING),
+        )
+    }
+
+    /**
+     * Decision 1: the criterion orders rows **within** each section, and never moves a row across
+     * one.
+     *
+     * The three sections are asserted separately and by key, because "sorted" and "sorted within
+     * each section" produce the same *set* of names and differ only in where the boundaries fall —
+     * a whole-tab sort would put the Amulet (0.1 lb, Equipped) above the Torch (3 lb, Gear) in one
+     * flat run, and a row-name list alone would not say which section either landed in.
+     */
+    @Test
+    fun `weight sorts inside each section and inside the container, never across them`() {
+        val state = map(board = sortable, sort = InventorySort(InventorySortCriterion.WEIGHT))
+
+        assertEquals(
+            listOf("Amulet", "Quarterstaff"),
+            state.sections.single { it.key == InventoryLayoutKeys.EQUIPPED }.rows.map { it.name },
+        )
+        // The container is decision 1's explicit second half. Ink has no weight and therefore
+        // sorts as 0, below the 10 lb rope.
+        assertEquals(
+            listOf("Ink", "Rope"),
+            state.sections.single { it.key == InventoryLayoutKeys.container("cont1") }.rows.map { it.name },
+        )
+        assertEquals(
+            listOf("Torch", "Bedroll", "Anvil"),
+            state.sections.single { it.key == InventoryLayoutKeys.GEAR }.rows.map { it.name },
+        )
+        // …and the section ORDER is untouched: that is `InventoryLayoutPlan`'s, and no criterion
+        // has anything to say about it (decision 1).
+        assertEquals(
+            listOf(InventoryLayoutKeys.EQUIPPED, InventoryLayoutKeys.container("cont1"), InventoryLayoutKeys.GEAR),
+            state.sections.map { it.key },
+        )
+    }
+
+    @Test
+    fun `name and value sort each section, and the direction reverses them`() {
+        assertEquals(
+            listOf("Amulet", "Quarterstaff", "Ink", "Rope", "Anvil", "Bedroll", "Torch"),
+            sortedNames(InventorySortCriterion.NAME),
+        )
+        assertEquals(
+            listOf("Quarterstaff", "Amulet", "Rope", "Ink", "Torch", "Bedroll", "Anvil"),
+            sortedNames(InventorySortCriterion.NAME, InventorySortDirection.DESCENDING),
+        )
+        // Value is the stack's, so three torches at 0.01 gp come to 0.03 and still sort last.
+        assertEquals(
+            listOf("Quarterstaff", "Amulet", "Rope", "Ink", "Torch", "Bedroll", "Anvil"),
+            sortedNames(InventorySortCriterion.VALUE),
+        )
+        assertEquals(
+            listOf("Amulet", "Quarterstaff", "Ink", "Rope", "Anvil", "Bedroll", "Torch"),
+            sortedNames(InventorySortCriterion.VALUE, InventorySortDirection.DESCENDING),
+        )
+    }
+
+    /**
+     * Decision 1's **wallet exemption**, asserted over every criterion and direction.
+     *
+     * The wallet is exempt by construction — its rows are built by `Wallet.toUiState`, which the
+     * sort never reaches — so this is a test that the call graph stays that shape. A future edit
+     * that "helpfully" sorted every block would put copper above platinum under Value ascending,
+     * and the coin row order is the one thing on this tab a player reads by position.
+     */
+    @Test
+    fun `the wallet is never sorted, whatever the criterion`() {
+        InventorySortCriterion.entries.forEach { criterion ->
+            InventorySortDirection.entries.forEach { direction ->
+                val state = map(board = sortable, sort = InventorySort(criterion, direction))
+                assertEquals(
+                    "$criterion $direction must not touch the wallet",
+                    CoinKind.inWalletOrder,
+                    state.wallet.rows.map { it.coin },
+                )
+            }
+        }
+    }
+
+    /**
+     * Sorting must not move a number. Section weights are summed over the section's items, and a
+     * permutation cannot change a sum — so this pins that the header figures are computed off the
+     * unsorted list and that no row was lost or duplicated on the way through the comparator.
+     */
+    @Test
+    fun `sorting changes the order and nothing else — same rows, same weights, same totals`() {
+        val unsorted = map(board = sortable)
+
+        InventorySortCriterion.entries.forEach { criterion ->
+            InventorySortDirection.entries.forEach { direction ->
+                val sorted = map(board = sortable, sort = InventorySort(criterion, direction))
+                assertEquals(
+                    "$criterion $direction must keep every row exactly once",
+                    unsorted.allRowNames().sorted(),
+                    sorted.allRowNames().sorted(),
+                )
+                assertEquals(
+                    "$criterion $direction must not move a section weight",
+                    unsorted.sections.map { it.key to it.weight },
+                    sorted.sections.map { it.key to it.weight },
+                )
+                assertEquals(unsorted.carriedWeight, sorted.carriedWeight)
+                assertEquals(unsorted.capacityWeight, sorted.capacityWeight)
+            }
+        }
+    }
+
+    /**
+     * 12 decision 3's fold invariant composed with FR-35: rows folded into Gear are sorted
+     * *together with* Gear's own.
+     *
+     * That is the designed answer rather than an accident of ordering — `toInventoryUiState`
+     * appends folded rows after Gear's own so an untouched section does not reshuffle when an
+     * unrelated one is folded, but once the player has asked for an explicit order they have
+     * asked for it over everything in the section. Under sheet order the append order stands,
+     * which is the second half of this test.
+     */
+    @Test
+    fun `rows folded into Gear sort with Gear's own, and only when a criterion is set`() {
+        val folded = listOf(InventoryLayoutEntry(InventoryLayoutKeys.container("cont1"), hidden = true))
+
+        assertEquals(
+            "sheet order keeps the fold's append order",
+            listOf("Torch", "Anvil", "Bedroll", "Rope", "Ink"),
+            map(board = sortable, layout = folded).sections
+                .single { it.key == InventoryLayoutKeys.GEAR }.rows.map { it.name },
+        )
+        assertEquals(
+            listOf("Anvil", "Bedroll", "Ink", "Rope", "Torch"),
+            map(board = sortable, layout = folded, sort = InventorySort(InventorySortCriterion.NAME))
+                .sections.single { it.key == InventoryLayoutKeys.GEAR }.rows.map { it.name },
+        )
+    }
+
+    @Test
+    fun `the customize sheet is handed the sort the tab was built with`() {
+        // The sheet's radio and the order on the tab come off one pass over one board, which is
+        // what makes "the control shows what the tab is doing" true by construction rather than
+        // by two mappers agreeing. See `InventoryCustomizeState.sort`.
+        val sort = InventorySort(InventorySortCriterion.VALUE, InventorySortDirection.DESCENDING)
+
+        assertEquals(sort, map(board = sortable, sort = sort).customize.sort)
+        assertEquals(InventorySort.DEFAULT, map(board = sortable).customize.sort)
+    }
+
+    // --- FR-35 decision 6 and the spoken sentences ---------------------------------
+
+    @Test
+    fun `the direction control is available for every criterion but sheet order`() {
+        // Decision 6. The composable draws it *disabled* rather than absent — that choice is
+        // argued at `canChooseDirection` — and this is the rule the composable branches on.
+        InventorySortCriterion.entries.forEach { criterion ->
+            assertEquals(
+                "$criterion",
+                criterion != InventorySortCriterion.DEFAULT,
+                InventoryCustomizeState(sort = InventorySort(criterion)).canChooseDirection,
+            )
+        }
+    }
+
+    /**
+     * The direction segment's spoken sentence, and the half that makes decision 6 honest.
+     *
+     * A segmented control that is merely inert announces "disabled" and nothing else, which tells
+     * a screen-reader user that something is unavailable without telling them what would make it
+     * available. This is that sentence, and it is why the control could be disabled rather than
+     * removed without costing anybody the explanation.
+     *
+     * The rule pinned here is the **asymmetry**: the unavailable clause appears only while it is
+     * true, matching `spokenEquipLabel`'s dropped "Equipped". *Where* the sentence is mounted —
+     * on each segment, so focus reaches it — is `InventorySortControlTest`'s claim, and it has to
+     * be, because reachability is a property of the composition and not of this string.
+     *
+     * The case of the fragments is the shipped case: `strings.xml` spells them "Ascending" and
+     * "Descending", and this function joins rather than transforms.
+     */
+    @Test
+    fun `a direction segment says which option it is, and what would turn it on`() {
+        assertEquals(
+            "Sort direction, Descending",
+            InventoryCustomizeState(sort = InventorySort(InventorySortCriterion.NAME))
+                .spokenDirectionOptionLabel("Sort direction", "Descending", "not used in sheet order"),
+        )
+        assertEquals(
+            "the reason must be spoken while, and only while, it is true",
+            "Sort direction, Descending, not used in sheet order",
+            InventoryCustomizeState(sort = InventorySort.DEFAULT)
+                .spokenDirectionOptionLabel("Sort direction", "Descending", "not used in sheet order"),
+        )
+        // Each segment names *itself*, not the current selection — so the two differ under one
+        // state, which is what lets a user tell the two stops apart.
+        val disabled = InventoryCustomizeState(sort = InventorySort.DEFAULT)
+        assertEquals(
+            "Sort direction, Ascending, not used in sheet order",
+            disabled.spokenDirectionOptionLabel("Sort direction", "Ascending", "not used in sheet order"),
+        )
     }
 
     /** Every row the tab would draw, in order — the filter's observable output. */

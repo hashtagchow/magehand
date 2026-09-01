@@ -127,6 +127,49 @@ interface InventoryLayoutStore {
     suspend fun setLayout(characterKey: String, layout: List<InventoryLayoutEntry>)
 
     /**
+     * How this character's rows are ordered inside each section (FR-35 decision 4), or
+     * [InventorySort.DEFAULT] when they have never chosen.
+     *
+     * ### Why this is on the layout store and not a fourth per-character store
+     *
+     * The class KDoc above refuses to generalise three stores into one because they share a
+     * *lifecycle* and not a *contract*. This is the other case: it shares the contract too. It is
+     * a preference about how the inventory tab draws **this** character, keyed by the same
+     * character key, reaped by the same two paths, written by gestures in the same sheet, and
+     * cleared by the same Reset. A fourth store would have been a fourth copy of the two reaping
+     * paths — two more call sites in `DefaultAccountRepository.signOut` and
+     * `LocalCharacterRepository.delete` that have to stay in step with the other three — bought
+     * for nothing.
+     *
+     * ### Two keys, not one, and both beside the order rather than inside it
+     *
+     * The criterion and the direction are stored as **two separate preference keys**, suffixed
+     * onto [characterKey] (see `DataStoreInventoryLayoutStore`). Two rather than one packed
+     * string because each then degrades on its own: a criterion this build has never heard of
+     * falls back to Default *without* taking a perfectly readable direction with it. And beside
+     * the order rather than inside [InventoryLayoutCodec]'s string because the order is a list of
+     * opaque section keys — the codec's delimiters are safe precisely because every token starts
+     * with a letter or digit, and a `sort=weight` token in the same string would either break that
+     * property or need escaping.
+     */
+    fun sort(characterKey: String): Flow<InventorySort>
+
+    /**
+     * Records how this character's rows are ordered (FR-35 decision 4).
+     *
+     * [InventorySort.DEFAULT] **removes both keys** rather than writing them, matching
+     * [setLayout]'s empty-list rule and for the same reason: a stored default reads identically
+     * to no preference at all, so writing one would leave a slot in a file nothing prunes,
+     * occupied forever by a character who sorted once and put it back.
+     *
+     * Writing this **never touches the section order**, and vice versa. That is a property of
+     * them being separate preference keys in one DataStore rather than care taken here — but it
+     * is the property `InventoryLayoutStoreTest` pins in both directions, because the failure
+     * mode (a sort gesture silently resetting a player's arrangement) is total and silent.
+     */
+    suspend fun setSort(characterKey: String, sort: InventorySort)
+
+    /**
      * Drops this character's arrangement — the sheet's **Reset**, and the local-delete reap.
      *
      * Deliberately one method for both, because they are the same write and the same intent:
@@ -138,6 +181,11 @@ interface InventoryLayoutStore {
      * branch: collapse is a flag on the same entries, in the same key, so removing the key
      * removes it. A separate collapse store would have needed a second call here, and a Reset
      * that left every section shut is exactly the failure a second store would have shipped.
+     *
+     * FR-35's *"Reset restores Default + ascending"* does **not** fall out for free, because the
+     * sort lives in two keys of its own — so this removes all three. That is deliberate and is
+     * what makes Reset mean one thing: after it, the tab draws 12 decision 1's default order with
+     * the source's own row order inside it, which is what every character starts as.
      */
     suspend fun clearForCharacter(characterKey: String)
 
@@ -168,6 +216,26 @@ interface InventoryLayoutStore {
         internal const val KEY_PREFIX = "inventory_layout:"
         internal const val SERVER_PREFIX = "${KEY_PREFIX}server:"
         internal const val LOCAL_PREFIX = "${KEY_PREFIX}local:"
+
+        /**
+         * FR-35's two keys, as **suffixes on the character key** rather than a namespace of
+         * their own.
+         *
+         * That shape is doing one specific job: [deleteForAccount] finds an account's characters
+         * by the shape of the key (`inventory_layout:server:<acct>:`), so anything suffixed onto
+         * a character key is inside that prefix and is reaped by the *existing* scan, with no
+         * second pass and no second prefix that could be forgotten. A separate
+         * `inventory_sort:server:…` namespace would have needed the reap to know about it, and
+         * the failure mode of forgetting is the one this store's KDoc calls unreachable
+         * **forever** — a fresh account id per sign-in means an orphaned key is never revisited.
+         *
+         * Nothing can collide with a character key: a server key ends in a `creatureProperties`
+         * creature id and a local key in a UUID, and Meteor's id alphabet is alphanumeric — so no
+         * character key ever ends in `:sort` or `:sort-direction`, and no suffixed key is ever
+         * read as somebody's arrangement.
+         */
+        internal const val SORT_SUFFIX = ":sort"
+        internal const val SORT_DIRECTION_SUFFIX = ":sort-direction"
     }
 }
 
@@ -286,8 +354,49 @@ class DataStoreInventoryLayoutStore(
         }
     }
 
+    /**
+     * The two sort keys, read together into one value.
+     *
+     * `map` over one `dataStore.data` emission rather than two flows combined, so the criterion
+     * and the direction are always read from the **same** snapshot of the file. Two flows would
+     * have made a single `setSort` emit twice — once with the new criterion beside the old
+     * direction — and the tab would have re-sorted through a state nobody chose.
+     */
+    override fun sort(characterKey: String): Flow<InventorySort> = dataStore.data.map { prefs ->
+        InventorySort(
+            criterion = InventorySortCriterion.fromKey(prefs[sortKey(characterKey)]),
+            direction = InventorySortDirection.fromKey(prefs[sortDirectionKey(characterKey)]),
+        )
+    }
+
+    override suspend fun setSort(characterKey: String, sort: InventorySort) {
+        dataStore.edit { prefs ->
+            // Absent, not "default" — see the interface. One `edit` for both keys so the pair is
+            // never observed half-written, which is the same guarantee `sort`'s single `map`
+            // makes on the way out.
+            if (sort.isDefault) {
+                prefs.remove(sortKey(characterKey))
+                prefs.remove(sortDirectionKey(characterKey))
+            } else {
+                prefs[sortKey(characterKey)] = sort.criterion.key
+                prefs[sortDirectionKey(characterKey)] = sort.direction.key
+            }
+        }
+    }
+
+    /**
+     * Reset, and the local-delete reap: all **three** of this character's keys.
+     *
+     * Not two edits, and not a call to [setSort] — one atomic `edit` removing everything keyed to
+     * this character, so a Reset interrupted by a process death cannot leave a sort behind on an
+     * order that is gone.
+     */
     override suspend fun clearForCharacter(characterKey: String) {
-        dataStore.edit { it.remove(key(characterKey)) }
+        dataStore.edit {
+            it.remove(key(characterKey))
+            it.remove(sortKey(characterKey))
+            it.remove(sortDirectionKey(characterKey))
+        }
     }
 
     /**
@@ -310,4 +419,10 @@ class DataStoreInventoryLayoutStore(
     }
 
     private fun key(characterKey: String) = stringPreferencesKey(characterKey)
+
+    private fun sortKey(characterKey: String) =
+        stringPreferencesKey("$characterKey${InventoryLayoutStore.SORT_SUFFIX}")
+
+    private fun sortDirectionKey(characterKey: String) =
+        stringPreferencesKey("$characterKey${InventoryLayoutStore.SORT_DIRECTION_SUFFIX}")
 }

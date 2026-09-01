@@ -37,6 +37,7 @@ import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.data.settings.EquippableOverrideStore
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.InventoryLayoutStore
+import com.hashtagchow.magehand.core.data.settings.InventorySort
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.ui.panes.resolvePaneLayout
 import com.hashtagchow.magehand.ui.panes.resolvePanes
@@ -1554,7 +1555,16 @@ private fun CharacterHomeViewModel.callOnCleared() {
  * [requested] records which creature set was asked for, so the "one creature, not the party"
  * claim is asserted rather than assumed.
  */
-private class FakeActivityFeedRepository : ActivityFeedRepository {
+// --- the collaborators a CharacterHomeViewModel needs ------------------------------------
+//
+// These were `private` to this file until FR-34. They are package-visible now because
+// `TrackerTabIntentTest` — layer 1's click→intent exemplar (design 19 decision 4) — builds the
+// *real* view model behind a rendered `TrackerTab`, and it needs the same ten collaborators this
+// file already had fitted to that seam. Copying them would have made two sets of fakes for one
+// class, which is the duplication decision 3 declined a whole `:core:testing` module to avoid.
+// Nothing else changed: every fake below is the one these tests have always used.
+
+class FakeActivityFeedRepository : ActivityFeedRepository {
     val entries = MutableStateFlow<List<FeedEntry>>(emptyList())
     val requested = mutableListOf<Set<String>>()
 
@@ -1564,7 +1574,7 @@ private class FakeActivityFeedRepository : ActivityFeedRepository {
     }
 }
 
-private class RecordingConnectionManager : DdpConnectionManager {
+class RecordingConnectionManager : DdpConnectionManager {
     var restarts = 0
         private set
 
@@ -1575,7 +1585,7 @@ private class RecordingConnectionManager : DdpConnectionManager {
     }
 }
 
-private class FakeCharacterListRepository(state: CharacterListState) : CharacterListRepository {
+class FakeCharacterListRepository(state: CharacterListState) : CharacterListRepository {
     override val state: StateFlow<CharacterListState> = MutableStateFlow(state)
     override fun refresh() = Unit
 }
@@ -1585,7 +1595,7 @@ private class FakeCharacterListRepository(state: CharacterListState) : Character
  * an account store with nothing in it — `sessions()` then emits `null` and the Sheet tab
  * would show its spinner.
  */
-private object StubAccountRepository : AccountRepository {
+object StubAccountRepository : AccountRepository {
     override val accounts: Flow<List<Account>> = flowOf(emptyList())
     override val activeAccountId: Flow<String?> = flowOf(null)
     override val activeAccount: Flow<Account?> = flowOf(null)
@@ -1616,7 +1626,7 @@ private object StubAccountRepository : AccountRepository {
  * FR-7's store. Recording rather than constant: what this class asserts about the feature is
  * that the view model writes the *account-scoped* key, which a constant could not show.
  */
-private class FakeSelectedRollStore : SelectedRollStore {
+class FakeSelectedRollStore : SelectedRollStore {
     private val entries = MutableStateFlow<Map<String, String>>(emptyMap())
 
     val keys: Set<String> get() = entries.value.keys
@@ -1638,13 +1648,19 @@ private class FakeSelectedRollStore : SelectedRollStore {
  * is that the view model writes the *account-scoped* key and the arrangement the plan produced,
  * neither of which a constant could show.
  */
-private class FakeInventoryLayoutStore : InventoryLayoutStore {
+class FakeInventoryLayoutStore : InventoryLayoutStore {
     private val entries = MutableStateFlow<Map<String, List<InventoryLayoutEntry>>>(emptyMap())
 
-    val keys: Set<String> get() = entries.value.keys
+    /** FR-35's two keys, held apart from the order so a test can see one survive the other. */
+    private val sorts = MutableStateFlow<Map<String, InventorySort>>(emptyMap())
+
+    val keys: Set<String> get() = entries.value.keys + sorts.value.keys
 
     fun layoutFor(characterKey: String): List<InventoryLayoutEntry> =
         entries.value[characterKey].orEmpty()
+
+    fun sortFor(characterKey: String): InventorySort =
+        sorts.value[characterKey] ?: InventorySort.DEFAULT
 
     override fun layout(characterKey: String): Flow<List<InventoryLayoutEntry>> =
         entries.map { it[characterKey].orEmpty() }
@@ -1655,8 +1671,18 @@ private class FakeInventoryLayoutStore : InventoryLayoutStore {
         }
     }
 
+    override fun sort(characterKey: String): Flow<InventorySort> =
+        sorts.map { it[characterKey] ?: InventorySort.DEFAULT }
+
+    override suspend fun setSort(characterKey: String, sort: InventorySort) {
+        sorts.value = sorts.value.toMutableMap().apply {
+            if (sort.isDefault) remove(characterKey) else put(characterKey, sort)
+        }
+    }
+
     override suspend fun clearForCharacter(characterKey: String) {
         entries.value = entries.value - characterKey
+        sorts.value = sorts.value - characterKey
     }
 
     override suspend fun deleteForAccount(accountId: String) = Unit
@@ -1667,7 +1693,7 @@ private class FakeInventoryLayoutStore : InventoryLayoutStore {
  * worth asserting are that the view model writes the *account-scoped* key and that a gesture the
  * minimum-of-one rule refuses is not written at all — neither of which a constant could show.
  */
-private class FakePaneLayoutStore : PaneLayoutStore {
+class FakePaneLayoutStore : PaneLayoutStore {
     private val entries = MutableStateFlow<Map<String, List<PaneLayoutEntry>>>(emptyMap())
 
     val keys: Set<String> get() = entries.value.keys
@@ -1699,7 +1725,7 @@ private class FakePaneLayoutStore : PaneLayoutStore {
  * FR-10's store. Recording for the same reason as the one above: the claim worth asserting is
  * that the view model writes the *account-scoped* key, which a constant could not show.
  */
-private class FakeEquippableOverrideStore : EquippableOverrideStore {
+class FakeEquippableOverrideStore : EquippableOverrideStore {
     private val entries = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
 
     val keys: Set<String> get() = entries.value.keys
@@ -1734,14 +1760,14 @@ private class FakeEquippableOverrideStore : EquippableOverrideStore {
  * pinned at the default because no view model reads it — it reaches the UI through the root
  * density provider.
  */
-private class FakeAppSettingsStore(showToggles: Boolean) : AppSettingsStore {
+class FakeAppSettingsStore(showToggles: Boolean) : AppSettingsStore {
     override val showToggles: Flow<Boolean> = flowOf(showToggles)
     override suspend fun setShowToggles(value: Boolean) = Unit
     override val uiScale: Flow<UiScale> = flowOf(UiScale.DEFAULT)
     override suspend fun setUiScale(value: UiScale) = Unit
 }
 
-private object StubTokenStore : TokenStore {
+object StubTokenStore : TokenStore {
     override suspend fun save(accountId: String, token: StoredToken) = Unit
     override suspend fun read(accountId: String): StoredToken? = null
     override suspend fun delete(accountId: String) = Unit

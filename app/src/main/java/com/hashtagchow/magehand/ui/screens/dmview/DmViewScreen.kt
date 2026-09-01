@@ -212,7 +212,7 @@ fun DmViewScreen(
  * therefore fewer of them, rather than the same six squeezed.
  */
 @Composable
-private fun DmCardGrid(
+internal fun DmCardGrid(
     cards: List<DmCardUiState>,
     onCardClick: (String) -> Unit,
     onSpend: (String, String, Int) -> Unit,

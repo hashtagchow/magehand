@@ -44,6 +44,19 @@ import java.lang.reflect.Method
  *    `ExactQuantity` episode — and widen what `:app` can express with no edit assertion 3
  *    would catch. This is the same positive-assertion discipline, one erased signature
  *    finer.
+ *
+ * ### KEPT AS A BYTECODE SCAN, deliberately (FR-34, design 19 decision 5)
+ *
+ * FR-34 gave `:app` a Compose harness and converted several source-reading tests into renders.
+ * **This one was deliberately not converted, and must not be**: it proves the UI *cannot* express
+ * a raw write, not that it currently does not. A render test can only exercise the paths it
+ * thinks to click; this reads every string and every type reference in the compiled module, so it
+ * fails on a write nobody remembered to write a test for — which is the only kind that ever
+ * ships. Replacing it with "click everything and see if a method call escapes" would trade a
+ * proof for a sample.
+ *
+ * `LocalCharacterHomePostureTest` carries the same note for the same reason, one layer over
+ * (reflection rather than bytecode).
  */
 class WritePostureTest {
 

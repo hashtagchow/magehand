@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.ui.panes
 
 import com.hashtagchow.magehand.core.data.settings.PaneLayoutEntry
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
+import com.hashtagchow.magehand.mainSourceFiles
 import com.hashtagchow.magehand.ui.navigation.CharacterHomeTab
 import com.hashtagchow.magehand.ui.navigation.LocalCharacterHomeTab
 import org.junit.Assert.assertEquals
@@ -9,19 +10,22 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 
 /**
  * FR-17's chrome rules (docs/design/14-large-screen-arc.md decisions 5-10).
  *
  * ### Why these are pure functions with a test, rather than an `if` in a composable
  *
- * `:app` has no Compose test harness — `StartDestinationNavigationTest` says why there is none —
- * so a rule that lives only inside a `@Composable` can be checked in exactly two ways: on a
- * device, once, by a human; or by reading the source. Extracting the rules into
- * `PaneSelection.kt` is what makes decisions 6, 9 and 10 ordinary assertions. What genuinely
- * *cannot* be extracted — that the phone path still composes the tab row it always did — is
- * asserted by reading the source, in the manner of `UiScaleProviderTest` and `WritePostureTest`.
+ * Extracting the rules into `PaneSelection.kt` is what makes decisions 6, 9 and 10 ordinary
+ * assertions on pure functions. What cannot be extracted is asserted by reading the source, in the
+ * manner of `UiScaleProviderTest` and `WritePostureTest`.
+ *
+ * FR-34 moved part of that residue into a real composition: `HomeTabRowTest` now renders the tab
+ * row and asserts what it draws, selects and dispatches. What is left here is the claim a render
+ * of the row cannot make — that each *home screen* composes the row inside its non-expanded branch
+ * and the picker inside its expanded one, which would need the whole Hilt-wired screen — plus the
+ * measuring rule below, which stays a scan because a rule that today's pixels happen to satisfy is
+ * still a rule the next edit deletes as noise.
  *
  * ### The defect each group is about
  *
@@ -41,7 +45,9 @@ import java.io.File
  *   "select/deselect unchanged"). Both are silent, permanent, and impossible to notice on the
  *   screen that caused them.
  * - **HomeTabRow** (BUG-4): a tab label that wraps mid-word. Not a rule a pure function can
- *   carry, so it is read out of the source in `UiScaleProviderTest`'s manner.
+ *   carry, so it is read out of the source in `UiScaleProviderTest`'s manner — and, since FR-34,
+ *   also photographed: `HomeTabRowGoldenTest` captures the 3- and 4-tab rows at 100 % and 150 %,
+ *   which is what makes a re-wrap visible rather than merely absent from a scan.
  */
 class PaneSelectionTest {
 
@@ -624,8 +630,10 @@ class PaneSelectionTest {
     @Test
     fun `both home screens still compose the tab row, under the non-expanded branch`() {
         // Decision 5: "Phones structurally unaffected: the tab row code path does not change."
-        // That is a claim about the *shape of the composable*, which no pure function can carry,
-        // so it is read out of the source — `UiScaleProviderTest`'s precedent, for its reason.
+        // That is a claim about *which branch of which screen* composes the row, and the screens
+        // are Hilt-wired — so it stays a source read (`UiScaleProviderTest`'s precedent) even now
+        // that `:app` has a Compose harness. What the row itself *does* once composed moved to
+        // `HomeTabRowTest` under FR-34; this is the half that could not go with it.
         //
         // FR-27 moved the row itself into `HomeTabRow`; the branch it sits in did not move, and
         // that is what this still asserts.
@@ -809,21 +817,6 @@ class PaneSelectionTest {
                 code.contains(forbidden),
             )
         }
-    }
-
-    // --- source access -------------------------------------------------------
-
-    /** `:app`'s main source tree — `UiScaleProviderTest`'s walk, for its reason. */
-    private fun mainSourceFiles(): List<File> {
-        var dir: File? = File(System.getProperty("user.dir") ?: ".").absoluteFile
-        while (dir != null) {
-            val root = File(dir, "src/main/java/com/hashtagchow/magehand")
-            if (root.isDirectory) {
-                return root.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
-            }
-            dir = dir.parentFile
-        }
-        throw AssertionError("could not find :app sources from ${System.getProperty("user.dir")}")
     }
 
     // ---- FR-26's discovery gate (16 decision 1) ------------------------------
