@@ -7,11 +7,16 @@ import com.hashtagchow.magehand.core.data.settings.UiScale
 import java.io.File
 
 /**
- * FR-18's settings control (docs/design/14-large-screen-arc.md decisions 2-4), as far as a
- * module with no Compose test harness can assert it: the state the control renders from, the
- * label each step gets, and the strings themselves. The *rendering* — segmented buttons,
- * TalkBack announcements, tap targets at 150% — is checklist area Q on the device sweep,
- * which is where 14's acceptance shape puts it.
+ * FR-18's settings control (docs/design/14-large-screen-arc.md decisions 2-4, addendum 3), as far
+ * as a JUnit test with no composition can assert it: the state the control renders from, the label
+ * each step gets, and the strings themselves.
+ *
+ * The *rendering* moved. When this file was written, "does TalkBack reach every option" was a
+ * device-sweep item; `SettingsUiScaleRenderTest` now owns it in a real composition, which is what
+ * FR-38 ruling 6 asks for — the chips' reachability is a claim about a semantics tree, and a
+ * semantics tree is something a JVM test can have. Tap targets at 150% on real hardware stay on
+ * the sweep (checklist Q2), because whether a thumb can hit 48 dp is not something any test here
+ * can answer.
  */
 class SettingsUiScaleTest {
 
@@ -42,8 +47,13 @@ class SettingsUiScaleTest {
     fun `the labels and the description are the words 14 decisions 3 and 4 specify`() {
         val strings = stringsXml()
 
-        // Decision 4: "segmented buttons labeled with percentages". The percentages are the
-        // decision — a label reading "Large" would hide that this multiplies the system scale.
+        // Decision 4: options "labeled with percentages". The percentages are the decision — a
+        // label reading "Large" would hide that this multiplies the system scale. FR-38 adds the
+        // three below 100%, which have to read as percentages for the same reason: "Small" would
+        // say nothing about how much smaller.
+        assertTrue(strings.contains(">70%<"))
+        assertTrue(strings.contains(">80%<"))
+        assertTrue(strings.contains(">90%<"))
         assertTrue(strings.contains(">Default<"))
         assertTrue(strings.contains(">110%<"))
         assertTrue(strings.contains(">125%<"))

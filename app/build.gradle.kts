@@ -103,8 +103,16 @@ android {
         // the rule is finally pinned against the capture). A **PATCH** for 1.12.1's reason and
         // more plainly: no surface gains a capability, no schema moves, the contract is
         // untouched — this is 1.13.0's one row's data, said correctly.
-        versionCode = 24
-        versionName = "1.13.1"
+        // 25 / 1.14.0 carries FR-38: the UI-size setting gains 70/80/90% below Default, and its
+        // control becomes a wrapping chip row because seven segments do not fit a phone width
+        // (14 addendum 3). A **MINOR** and not a patch, and the boundary is worth naming since
+        // the last two entries were both patches for "no surface gained a capability": this one
+        // did. The setting could only ever make the app bigger; it can now make it smaller, which
+        // is a new thing a user can do rather than a correction to an old one — and it writes
+        // stored keys (`"70"`/`"80"`/`"90"`) that no earlier build has ever seen, so a rollback
+        // reads a value it must degrade. The contract is still untouched.
+        versionCode = 25
+        versionName = "1.14.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

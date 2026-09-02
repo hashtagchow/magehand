@@ -54,9 +54,13 @@ fun scaledDensity(base: Density, scale: UiScale): Density =
  * `LocalDensity.current` on this line is whatever the platform handed the Activity: the
  * device's density *including* the user's system font-size and display-size accessibility
  * settings. 14 decision 1 wants the app factor to multiply those, and this is the line where
- * that happens — the user's 1.3 system font scale and a 125% app scale compose to 1.625, and
- * the app scale can never drag the effective scale below what accessibility settings asked
- * for, because every factor is ≥ 1.0.
+ * that happens — the user's 1.3 system font scale and a 125% app scale compose to 1.625.
+ *
+ * The multiplication runs in **both directions** (14 addendum 3, FR-38 ruling 2): the same 1.3
+ * system font scale with the 70% app step composes to 0.91, which is smaller than the system
+ * settings alone asked for. That is the point of the step, not a hazard it slipped past — the
+ * user chose it here, in this app, under a label saying what it does, exactly as they would
+ * choose a smaller display size in Android's own screen.
  *
  * Read it *inside* the `CompositionLocalProvider` instead — or nest a second
  * [ProvideUiScale] anywhere under this one — and the base becomes the already-scaled value,

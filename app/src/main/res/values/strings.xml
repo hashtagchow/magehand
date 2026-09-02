@@ -364,14 +364,36 @@
          decision 3's sentence verbatim: the sheet is a WebView, so it can only scale its
          text, and saying so is cheaper than a user discovering it and calling it a bug.
          The option labels are percentages because the setting is a multiplier of whatever
-         the system font/display size already is, not an absolute size. -->
+         the system font/display size already is, not an absolute size.
+         FR-38 (addendum 3) adds the three steps below 100%: the multiplier runs in both
+         directions, and 70% is the floor. The percentage labels below are now the stepper's
+         value line and the destination named by each of its buttons. -->
     <string name="settings_display">Display</string>
     <string name="settings_ui_scale">UI size</string>
     <string name="settings_ui_scale_note">Applies across the app; the character sheet scales its text.</string>
+    <string name="settings_ui_scale_70">70%</string>
+    <string name="settings_ui_scale_80">80%</string>
+    <string name="settings_ui_scale_90">90%</string>
     <string name="settings_ui_scale_default">Default</string>
     <string name="settings_ui_scale_110">110%</string>
     <string name="settings_ui_scale_125">125%</string>
     <string name="settings_ui_scale_150">150%</string>
+    <!-- FR-38 (operator amendment): the stepper. The value line spells Default out as its
+         percentage as well, because "Default" alone is the one step whose size the label does
+         not say. Parenthesised rather than separated by a middle dot (the amendment's literal
+         "100% · Default"): at 150% on a 360 dp phone this string cannot fit one line beside two
+         48 dp buttons at any legible size, so it wraps — and a wrapped middle dot leaves a
+         separator dangling, where "100%" / "(Default)" reads correctly on either line count. Each button's description names where the tap lands rather than what the
+         button is (BUG-6: the sentence lives on the node focus stops at), and the two limit
+         strings exist because a disabled button is still focusable and must say why it will
+         not move. -->
+    <string name="settings_ui_scale_default_value" formatted="false">100% (Default)</string>
+    <string name="settings_ui_scale_smaller">Smaller, to %1$s</string>
+    <string name="settings_ui_scale_larger">Larger, to %1$s</string>
+    <string name="settings_ui_scale_smaller_limit">Smaller, already at the smallest size</string>
+    <string name="settings_ui_scale_larger_limit">Larger, already at the largest size</string>
+    <string name="settings_ui_scale_value_description">UI size, %1$s</string>
+    <string name="settings_ui_scale_value_description_default" formatted="false">UI size, 100%, default</string>
 
     <!-- FR-5: local characters (docs/design/09-local-characters.md) -->
     <string name="local_field_name">Name</string>

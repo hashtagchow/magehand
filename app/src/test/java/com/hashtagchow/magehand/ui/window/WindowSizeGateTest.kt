@@ -21,8 +21,9 @@ import org.junit.Test
  * Getting the gate wrong is invisible in code review and obvious on a device — the wrong half of
  * the population gets the wrong chrome, and neither half crashes. Three specific ways to get it
  * wrong: picking a threshold that is not Material's; asking `== EXPANDED` on a device wide enough
- * to be LARGE; and feeding the size class a density that is not the device's, which is B1 and the
- * last test here.
+ * to be LARGE; and feeding the size class a density that is not the device's, which is B1 and has
+ * a test here in each direction — a scaled-up density demoting a tablet, and (FR-38 ruling 3) a
+ * scaled-down one promoting a phone.
  */
 class WindowSizeGateTest {
 
@@ -105,8 +106,11 @@ class WindowSizeGateTest {
             isExpandedWidth(window(apparentDp(UiScale.DEFAULT))),
         )
 
-        // Every step the user can actually choose, including the smallest.
-        UiScale.entries.filter { it != UiScale.DEFAULT }.forEach { scale ->
+        // Every step *above* Default, including the smallest of them. The sub-1.0 steps FR-38
+        // adds run this arithmetic the other way — they make the window look wider, not
+        // narrower — so they are a demotion this test cannot show and are pinned as their own
+        // case below.
+        UiScale.entries.filter { it.factor > 1.0f }.forEach { scale ->
             assertFalse(
                 "at ${scale.key}% the same window measures ${apparentDp(scale)} dp — a gate " +
                     "composed under ProvideUiScale would drop this device to the phone tab row",
@@ -120,6 +124,64 @@ class WindowSizeGateTest {
         val top = UiScale.LARGE_150.factor
         assertFalse("1259 dp at 150% must fall under the breakpoint", isExpandedWidth(window((1259 / top).toInt())))
         assertTrue("1260 dp at 150% must survive it", isExpandedWidth(window((1260 / top).toInt())))
+    }
+
+    /**
+     * ### B1's mirror (14 addendum 3, FR-38 ruling 3)
+     *
+     * The test above walks the factor *up* and watches a tablet fall out of pane mode. FR-38's
+     * sub-1.0 steps run the same arithmetic the other way: dividing by a factor below 1 makes the
+     * window measure **wider** in dp than it is, so a scaled gate would promote a device *into*
+     * pane mode — two columns and an FR-19 DM entry on hardware that has room for neither.
+     *
+     * ### Where the promotion actually bites, which is not on a phone
+     *
+     * A 360 dp phone at 0.7 apparently measures 514 dp, which is still under the 840 dp
+     * breakpoint — so a phone is safe by arithmetic, not by contract, and the first version of
+     * this test asserted that it stays compact in a way that could not have failed. Ruling 3 asks
+     * for the phone case and it is kept below as a single literal, but the case with teeth is a
+     * window **just under** the breakpoint: 839 dp is one dp short of panes at Default and sails
+     * past it at every step below. That is a large foldable's inner screen, or a split-screen
+     * window on a tablet — devices where the promotion produces a two-pane layout in a window
+     * that measures 839 dp, which is the defect and not merely the wrong chrome.
+     *
+     * The gate reads the device's own density by contract (`ProvideWindowSizeGate` above
+     * `ProvideUiScale` in `MainActivity`, pinned structurally by `PaneSelectionTest`). What this
+     * test shows is what the wrong ordering would have produced, by feeding the gate the scaled
+     * widths directly: 932, 1048 and 1198 dp from one 839 dp window.
+     */
+    @Test
+    fun `a shrunken density would widen a sub-breakpoint window into pane mode`() {
+        // Ruling 3's literal ask, as one assertion that stands on its own: an ordinary phone is
+        // compact, and no arithmetic in this test can make it anything else.
+        assertFalse("a 360 dp phone is compact", isExpandedWidth(window(360)))
+
+        // 2517 px at 3.0 (480 dpi) is 839 dp — one dp under the breakpoint, where a promotion
+        // costs the most and is hardest to spot.
+        val widthPx = 2517
+        val deviceDensity = 3.0f
+        fun apparentDp(scale: UiScale) = (widthPx / (deviceDensity * scale.factor)).toInt()
+
+        assertEquals(
+            "the fixture must sit one dp under the breakpoint, or this proves nothing",
+            WindowSizeClass.WIDTH_DP_EXPANDED_LOWER_BOUND - 1,
+            apparentDp(UiScale.DEFAULT),
+        )
+        assertFalse(
+            "measured against the device's own density this window keeps the tab row",
+            isExpandedWidth(window(apparentDp(UiScale.DEFAULT))),
+        )
+
+        // Every step below Default, with the *scaled* width handed to the gate — which is what a
+        // gate composed under ProvideUiScale would receive.
+        UiScale.entries.filter { it.factor < 1.0f }.forEach { scale ->
+            assertTrue(
+                "at ${scale.key}% this 839 dp window apparently measures ${apparentDp(scale)} dp " +
+                    "— a gate composed under ProvideUiScale would hand it the tablet pane layout, " +
+                    "which is decision 5's rule inverted",
+                isExpandedWidth(window(apparentDp(scale))),
+            )
+        }
     }
 
     @Test

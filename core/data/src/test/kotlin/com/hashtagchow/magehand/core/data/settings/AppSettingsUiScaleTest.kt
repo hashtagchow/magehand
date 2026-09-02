@@ -27,8 +27,10 @@ import java.io.File
  *
  * The unknown-value test is the one that could not be written any other way. It writes a
  * string this build has never heard of *directly into the preferences file*, which is exactly
- * what a downgrade from a future version with a fifth step leaves behind, and then asserts the
- * app still opens at the size every previous build rendered at.
+ * what a downgrade from a future version with one more step leaves behind, and then asserts the
+ * app still opens at the size every previous build rendered at. FR-38 makes that hypothetical
+ * concrete in the other direction: `"70"` is on disk for anyone who picks the new floor and is
+ * then rolled back to 1.13.1, and that build must open at 100%.
  */
 class AppSettingsUiScaleTest {
 
@@ -137,28 +139,87 @@ class AppSettingsUiScaleTest {
     }
 
     @Test
-    fun `the four steps are 14 decision 2's four steps, with decision 3's text zoom`() {
-        // The factors are the feature. A fifth step, or a changed factor, is a design change
-        // and fails here first.
+    fun `the seven steps are addendum 3's seven steps, with decision 3's text zoom`() {
+        // The factors are the feature. Another step, or a changed factor, is a design change
+        // and fails here first. FR-38 ruling 1 adds the three below 1.0.
         assertEquals(
-            listOf(1.0f, 1.1f, 1.25f, 1.5f),
+            listOf("70", "80", "90", "default", "110", "125", "150"),
+            UiScale.entries.map { it.key },
+        )
+        assertEquals(
+            listOf(0.7f, 0.8f, 0.9f, 1.0f, 1.1f, 1.25f, 1.5f),
             UiScale.entries.map { it.factor },
         )
         // 14 decision 3: `(100 * f).toInt()`. Float truncation is why these are asserted as
         // values rather than trusted as arithmetic — 1.1f * 100 is 110.000002, and a `toInt()`
-        // on the wrong side of a rounding change would ship 109% to the sheet.
-        assertEquals(listOf(100, 110, 125, 150), UiScale.entries.map { it.textZoom })
+        // on the wrong side of a rounding change would ship 109% to the sheet. The sub-1.0
+        // steps are the same hazard from the other side: 0.7f * 100 is 69.999999 in binary,
+        // and a `toInt()` truncation there would send the sheet 69%.
+        assertEquals(listOf(70, 80, 90, 100, 110, 125, 150), UiScale.entries.map { it.textZoom })
     }
 
+    /**
+     * **Ascending order is part of the contract, not a coincidence of declaration.**
+     *
+     * The settings control renders `entries` in declaration order and adds nothing of its own
+     * (FR-38 ruling 1: *"the control renders `entries` in order"*), so a step inserted in the
+     * wrong place ships a chip row reading 70 / 80 / Default / 90 / 110 — which no test that
+     * only checks membership would catch.
+     */
     @Test
-    fun `no step can shrink the app below the accessibility settings the user chose`() {
-        // 14 decision 1: the factor multiplies the system scale, so f >= 1.0 is what keeps an
-        // app setting from quietly undoing Android's own font-size setting.
+    fun `the steps are declared ascending, because the control renders them in that order`() {
+        val factors = UiScale.entries.map { it.factor }
+        assertEquals("the steps must be declared in ascending order", factors.sorted(), factors)
+        assertEquals("no two steps may share a factor", factors.size, factors.toSet().size)
+        assertEquals(
+            "no two steps may share a stored key",
+            UiScale.entries.size,
+            UiScale.entries.map { it.key }.toSet().size,
+        )
+    }
+
+    /**
+     * **The floor is 0.7 and the ceiling is 1.5**, and both are stated rather than left to the
+     * list above to imply.
+     *
+     * 14 decision 1 originally required `f >= 1.0`, and this file used to assert it. Addendum 3
+     * withdraws that clause (FR-38 ruling 2): the factor is the user's explicit choice and
+     * multiplies the system settings in both directions. What survives is the *floor* — at 0.7
+     * a 48 dp target measures about 34 dp, and a step below that would be an app that cannot be
+     * operated rather than one that is merely dense.
+     */
+    @Test
+    fun `no step goes below the 0_7 floor addendum 3 sets`() {
         UiScale.entries.forEach { scale ->
             assertTrue(
-                "${scale.key} would shrink the UI below the system scale: ${scale.factor}",
-                scale.factor >= 1.0f,
+                "${scale.key} is below addendum 3's floor: ${scale.factor}",
+                scale.factor >= 0.7f,
+            )
+            assertTrue(
+                "${scale.key} is above the top step: ${scale.factor}",
+                scale.factor <= 1.5f,
             )
         }
+        assertEquals(0.7f, UiScale.entries.first().factor, 0f)
+    }
+
+    /**
+     * `fromKey` on the new keys, and on a key from a build that does not exist.
+     *
+     * FR-38 ruling 1 asks for this by name: a user on 1.14.0 who picks 70% and is then rolled
+     * back to 1.13.1 has `"70"` on disk, and 1.13.1 has never heard of it. That build opens at
+     * 100% — which is the whole reason `fromKey` degrades instead of failing, and is asserted
+     * here from the other direction: this build must *not* degrade a key it does know.
+     */
+    @Test
+    fun `fromKey knows the new keys and still degrades one it does not`() {
+        assertEquals(UiScale.SMALL_70, UiScale.fromKey("70"))
+        assertEquals(UiScale.SMALL_80, UiScale.fromKey("80"))
+        assertEquals(UiScale.SMALL_90, UiScale.fromKey("90"))
+        // Every step, so the round trip through the stored form is total rather than sampled.
+        UiScale.entries.forEach { assertEquals(it, UiScale.fromKey(it.key)) }
+
+        assertEquals(UiScale.DEFAULT, UiScale.fromKey("999"))
+        assertEquals(UiScale.DEFAULT, UiScale.fromKey(null))
     }
 }
