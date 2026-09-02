@@ -248,10 +248,20 @@ private fun ActionFacts(row: ActionRow.Action) {
 /**
  * One damage line and, under it, every rider the server attached — folded or not — by name
  * (FR-36 decision 3). The row shows the folded headline; this is where a player checks it.
+ *
+ * ### The sheet headlines `base`, not `amount` (review finding 5)
+ *
+ * The row's headline already carries the folded riders (`d8 + 3`); repeating them underneath it
+ * as *"+3 Finesse Modifiers"* made the sheet read `d8 + 3 + 3 + 2d6` — the same modifier counted
+ * twice, in the one place a player comes to *audit* the fold. So the sheet headlines the server's
+ * verbatim [DamageLine.base] and lists **every** rider as an addend beneath it: the sheet is the
+ * long form of the row's sum, term by term, and the two can be compared without either one
+ * over-stating the hit. Which riders the row folded is not repeated here — that is the row's
+ * business, and marking it would put a second, subtler claim on the screen.
  */
 @Composable
 private fun DamageFacts(line: DamageLine) {
-    Fact(stringResource(R.string.actions_damage, line.amount, line.damageType), "")
+    Fact(stringResource(R.string.actions_damage, line.base, line.damageType), "")
     line.riders.forEach { rider ->
         Text(
             text = damageRiderLabel(rider),

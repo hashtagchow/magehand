@@ -136,7 +136,32 @@ enum class ActionGroup {
  * a normal hit. [riders] is the full list, for the detail sheet to itemise so the fold is
  * auditable.
  *
+ * ### A zero `add` rider has exactly one surface, and it is the detail sheet
+ *
+ * There is a third case, and it is neither of the two above (architect ruling, 2026-09-02, on
+ * the FR-36 fix wave): an `add` resolving to **0** does not fold *and does not chip*. DiceCloud's
+ * stock ability-modifier effects attach to every weapon row, so a character with a 10 in the
+ * governing ability publishes `add 0` on every attack they own — 1.13.0 folded that into
+ * `d6 + 0`, and merely un-folding it would have replaced one wrong row with a worse one:
+ * *"+0 Ability Modifiers"* is a chip drawn beside every weapon on the list, saying at length
+ * that nothing happens. The 16 addendum gives these riders one home — *"zero riders remain in
+ * the detail sheet's itemised list so the sheet's own effect is still visible"* — so [chips]
+ * reads as **not folded and not zero**, and the sheet's itemisation of [riders] is where a
+ * player sees that the effect exists at all. See [DamageRider.isZeroAdd].
+ *
+ * ### Build one with [of], never with the constructor
+ *
+ * [amount] is *derived* from [base] and [riders] and there is no state in which it is anything
+ * else — but a `data class` with four `val`s can be handed any four unrelated strings, and the
+ * FR-36 review found exactly that (finding 12): a hand-built line in a render test asserting a
+ * headline no production code path could have produced. [of] is the one production path and the
+ * one place the fold is written down. The constructor stays public because Kotlin `data`
+ * classes cannot hide it without losing `copy`, and because a test that wants to pin an
+ * *impossible* line still has to be able to build one; nothing in `:core:data` or `:app` may
+ * call it.
+ *
  * @property amount the headline dice string — [base] plus the folded riders, e.g. `"d8 + 3"`.
+ *   Derived by [of]; never set independently.
  * @property damageType the server's own word — `"slashing"`, `"necrotic"`. Lower-case on the
  *   wire; the UI capitalises for display rather than this type storing a second spelling.
  * @property base `amount.value` verbatim, e.g. `"d8"`. Equals [amount] when nothing folds.
@@ -148,8 +173,50 @@ data class DamageLine(
     val base: String = amount,
     val riders: List<DamageRider> = emptyList(),
 ) {
-    /** The riders the headline does not carry — rendered beside it, each under its own name. */
-    val chips: List<DamageRider> get() = riders.filterNot { it.foldsIntoHeadline }
+    /**
+     * The riders the row renders beside the headline, each under its own name: **not folded and
+     * not zero**.
+     *
+     * The second half is the architect's ruling and not an optimisation. A zero `add` is not
+     * part of the headline (it would print `d6 + 0`) and it is not a chip either (it would print
+     * *"+0 Ability Modifiers"* beside every weapon a Str-10 or Dex-10 character owns, which is
+     * the same untruth said louder). It stays in [riders], and the detail sheet's itemised list
+     * is its one surface — see the class KDoc and [DamageRider.isZeroAdd].
+     *
+     * A rider whose [DamageRider.label] comes out blank is declined too (pre-release review M4).
+     * `ActionEngine` already refuses to build one — an effect with no operation and no resolved
+     * amount states nothing and never becomes a rider — and this is the second latch on the same
+     * door, because the failure it prevents is silent: an empty chip is a drawn border with
+     * nothing in it and an empty string inside the row's merged sentence, which a screen reader
+     * renders as a pause nobody can account for.
+     */
+    val chips: List<DamageRider>
+        get() = riders.filterNot { it.foldsIntoHeadline || it.isZeroAdd || it.label.isBlank() }
+
+    companion object {
+        /**
+         * The only way production code makes a [DamageLine]: the server's verbatim [base], its
+         * damage type, and the riders it published — [amount] follows from those three.
+         *
+         * `d8` + `[+3]` → `"d8 + 3"`; `d6` + `[-1]` → `"d6 - 1"`; two folding riders →
+         * `"d4 + 1 - 1"`. Concatenation in server order, never a sum, and the term printed is
+         * the rider's **own text** with a leading `-` moved into the separator
+         * ([DamageRider.headlineTerm]) — not an `Int` re-rendered, which is how the first cut
+         * managed to overflow on `Int.MIN_VALUE` (review finding 11). This function's whole
+         * knowledge of arithmetic is "a minus sign means the word 'minus'".
+         */
+        fun of(
+            base: String,
+            damageType: String,
+            riders: List<DamageRider> = emptyList(),
+        ): DamageLine = DamageLine(
+            amount = riders.filter { it.foldsIntoHeadline }
+                .fold(base) { acc, rider -> "$acc ${rider.headlineTerm}" },
+            damageType = damageType,
+            base = base,
+            riders = riders,
+        )
+    }
 }
 
 /**
@@ -158,7 +225,11 @@ data class DamageLine(
  * @property name the effect's own name on the sheet; may be blank on an unnamed effect.
  * @property operation DiceCloud's word — `"add"` on every effect in the live capture. Anything
  *   else is rendered as text and never combined with the die.
- * @property amount the effect's `amount.value` as text — `"3"`, `"-1"`, `"2d6"`.
+ * @property amount the effect's `amount.value` as the server's own text — `"3"`, `"-1"`,
+ *   `"1.5"`, `"2d6"`. **Never a number this app re-rendered**: the engine reads the JSON
+ *   primitive's `content` rather than parsing it, so `1.5` arrives as `"1.5"` and chips with
+ *   the value the sheet published instead of being truncated to `1` (review finding 1). Blank
+ *   on an operation the server sent with no amount at all — see [label].
  */
 data class DamageRider(
     val name: String,
@@ -166,14 +237,90 @@ data class DamageRider(
     val amount: String,
 ) {
     /**
-     * A plain integer `add` is part of the headline (`d8 + 3`); a dice string or any other
-     * operation is a chip. The integer test is the whole rule — it is what separates *"this is
-     * what the roll gets"* from *"this is what the roll gets when the rider applies"*.
+     * A **non-zero whole-integer** `add` is part of the headline (`d8 + 3`); a dice string, a
+     * fraction, a zero and any other operation are chips. The test separates *"this is what the
+     * roll gets"* from *"this is what the roll gets when the rider applies"*.
+     *
+     * Zero is excluded (review finding 2, architect-approved): DiceCloud's stock *Strength
+     * Modifiers* / *Finesse Modifiers* effects attach to every weapon row and resolve to the raw
+     * modifier, so an ability score of 10 would otherwise print `d6 + 0` on every attack a
+     * character owns. Declining to print an identity term is not arithmetic — nothing is
+     * combined, one term is simply not said — and the rider still appears in the detail sheet's
+     * itemised list, so the sheet's own effect stays visible. It is [isZeroAdd], not a chip.
      */
-    val foldsIntoHeadline: Boolean get() = operation == OPERATION_ADD && amount.toIntOrNull() != null
+    val foldsIntoHeadline: Boolean
+        get() = operation == OPERATION_ADD && amount.toIntOrNull().let { it != null && it != 0 }
+
+    /**
+     * An `add` the server resolved to exactly **0** — the rider that is neither folded nor
+     * chipped (architect ruling, 2026-09-02).
+     *
+     * It is a real effect on the sheet and it contributes nothing to this roll, and those two
+     * facts want different treatment on different surfaces: the row says what the roll is, so it
+     * says nothing about this rider; the detail sheet itemises what the sheet attached, so it
+     * lists it. Chipping it instead would put *"+0 Ability Modifiers"* on every weapon row of
+     * any character whose governing ability is 10 — louder than 1.13.0's `d6 + 0` and no truer.
+     * [DamageLine.chips] is the only reader.
+     */
+    val isZeroAdd: Boolean get() = operation == OPERATION_ADD && amount.toIntOrNull() == 0
+
+    /**
+     * This rider's contribution to the headline, sign included: `"+ 3"`, `"- 1"`.
+     *
+     * The magnitude is [amount]'s own text with the sign character stripped, not `-n` on a
+     * parsed `Int` — which is why `Int.MIN_VALUE` prints rather than overflowing back to itself
+     * (finding 11). **Both** signs are stripped, not just `-`: `toIntOrNull` accepts a leading
+     * `+`, so a server value of `"+3"` folds, and stripping only the minus printed `d8 + +3`
+     * (pre-release review M1). Only meaningful when [foldsIntoHeadline]; [DamageLine.of] is its
+     * only caller.
+     */
+    internal val headlineTerm: String
+        get() = if (amount.startsWith("-")) {
+            "- ${amount.removePrefix("-")}"
+        } else {
+            "+ ${amount.removePrefix("+")}"
+        }
+
+    /**
+     * What a chip and the detail sheet's itemised line both say — *"+2d6 Sneak Attack"*,
+     * *"-1d4 Bane"*, *"Undead · conditional"*.
+     *
+     * ### One function, because two call sites drifted
+     *
+     * The row's chip and the detail sheet's line are the same statement about the same rider and
+     * the FR-36 review found them built from two format strings whose edge cases nobody had
+     * lined up (findings 3 and 7): a hard-coded `+` printed `+-1d4 Bane` on a signed amount and
+     * `++2d6` on a pre-signed one, a blank name left a trailing space that TalkBack reads as a
+     * dangling word, and a blank operation left a bare `·`. The rules, in one place:
+     *
+     *  - **`add`** — [amount] already carrying a sign is printed as it stands; an unsigned one
+     *    gets a `+`. The sign is the server's or it is the absence of one; nothing is inverted.
+     *  - **anything else** — *name · operation amount*, so an operation this build has never
+     *    heard of is **stated in words** and never combined with the die.
+     *  - **blank parts vanish with their separator**: no name → the amount (or the operation and
+     *    amount) alone; no amount → *name · operation*, which is how an amount-less
+     *    `conditional` rider still tells a player the row is conditional.
+     */
+    val label: String
+        get() = if (operation == OPERATION_ADD) {
+            joinNonBlank(" ", signedAmount, name)
+        } else {
+            joinNonBlank(" · ", name, joinNonBlank(" ", operation, amount))
+        }
+
+    /** [amount] with a `+` added only when the server did not already sign it. */
+    private val signedAmount: String
+        get() = when {
+            amount.isBlank() -> ""
+            amount.startsWith("+") || amount.startsWith("-") -> amount
+            else -> "+$amount"
+        }
 
     companion object {
         const val OPERATION_ADD = "add"
+
+        private fun joinNonBlank(separator: String, vararg parts: String): String =
+            parts.filter { it.isNotBlank() }.joinToString(separator)
     }
 }
 

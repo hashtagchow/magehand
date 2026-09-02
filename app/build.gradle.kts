@@ -96,8 +96,15 @@ android {
         // a capability. (If the operator would rather this went out as 1.13.0, the only change is
         // this line — nothing in the tree derives from the version but the contract export, which
         // re-runs either way.)
-        versionCode = 23
-        versionName = "1.13.0"
+        // 24 / 1.13.1 carries the FR-36 **fix wave**: the post-release review's findings 1–7, 9,
+        // 11 and 12 (BUG-8's truncated fractional rider and BUG-9's zero rider both fold no
+        // more; the chip label is one function instead of two format strings; an amount-less
+        // operation is stated rather than dropped; the detail sheet headlines the verbatim base;
+        // the rule is finally pinned against the capture). A **PATCH** for 1.12.1's reason and
+        // more plainly: no surface gains a capability, no schema moves, the contract is
+        // untouched — this is 1.13.0's one row's data, said correctly.
+        versionCode = 24
+        versionName = "1.13.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

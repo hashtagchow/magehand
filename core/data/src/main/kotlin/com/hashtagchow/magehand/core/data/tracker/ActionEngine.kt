@@ -1,7 +1,9 @@
 package com.hashtagchow.magehand.core.data.tracker
 
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import com.hashtagchow.magehand.core.model.ActionBoard
 import com.hashtagchow.magehand.core.model.ActionCost
 import com.hashtagchow.magehand.core.model.ActionEntry
@@ -465,12 +467,10 @@ object ActionEngine {
      */
     private fun JsonObject.toDamageLine(): DamageLine? {
         val base = text("amount")?.takeIf { it.isNotBlank() } ?: return null
-        val riders = ridersOn(this["amount"] as? JsonObject)
-        return DamageLine(
-            amount = headlineOf(base, riders),
-            damageType = string("damageType").orEmpty(),
+        return DamageLine.of(
             base = base,
-            riders = riders,
+            damageType = string("damageType").orEmpty(),
+            riders = ridersOn(this["amount"] as? JsonObject),
         )
     }
 
@@ -485,36 +485,87 @@ object ActionEngine {
      * attack roll folds its own `effects` into `attackRoll.value` (a Rogue's finesse Rapier on a live sheet: 0 + 3 + 2 =
      * 5); the damage roll does **not**, so `value` reads `d8` while the roll DiceCloud makes is
      * `1d8 + 3 + 2d6`. Reading the array is reading a server answer, the same as reading `value`.
-     * Nothing here evaluates a calculation — an effect whose amount did not resolve to anything
-     * is dropped, not guessed at.
+     * Nothing here evaluates a calculation.
      *
-     * Each rider's `amount` goes through [text], so an integer `3` and a dice string `"2d6"`
-     * both arrive as text; [DamageRider.foldsIntoHeadline] is where the two part ways.
+     * ### An amount-less effect is dropped only when it is an `add`
+     *
+     * Review finding 4: the first cut dropped **every** effect whose amount did not resolve,
+     * which silently deleted the operations that legitimately carry no amount. A
+     * `{operation: "conditional", text: "undead"}` on a damage row means the damage is
+     * conditional, and a row that renders it as nothing is a row asserting the damage is
+     * unconditional — the one thing the 16 addendum's *"an unknown operation is stated in
+     * words"* was written to prevent. So: an `add` with nothing to add contributes nothing and
+     * goes; a *named* operation with no amount survives with a blank [DamageRider.amount] and
+     * chips as *name · operation*.
+     *
+     * ### An effect with neither an operation nor an amount says nothing, so it is dropped
+     *
+     * Pre-release review M4. The rule above, read literally, kept `{"_id": "e1"}` — no operation,
+     * no amount — as a rider whose label is the empty string, which the row then drew as an
+     * empty chip and TalkBack read as a pause in the middle of the sentence. The survivor case
+     * exists because *"conditional"* is a fact worth stating; an effect that names no operation
+     * and resolves to no amount states nothing at all, and a blank operation is exactly the
+     * shape whose meaning this build cannot even guess at. Dropped when the amount is
+     * unresolved and the operation is blank or `add`; [DamageLine.chips] declines a blank label
+     * as well, so no other route to an empty chip survives either.
+     *
+     * Each rider's amount is read by [riderAmount] — the primitive's own text, not [text] and
+     * emphatically not [number] — and [DamageRider.foldsIntoHeadline] is where a foldable one
+     * parts ways from a chip.
      */
     private fun ridersOn(amount: JsonObject?): List<DamageRider> {
         val effects = amount?.get("effects") as? JsonArray ?: return emptyList()
         return effects.filterIsInstance<JsonObject>().mapNotNull { effect ->
-            val value = effect.text("amount") ?: return@mapNotNull null
+            val operation = effect.string("operation").orEmpty()
+            val value = effect.riderAmount()
+            val statesNothing = operation.isBlank() || operation == DamageRider.OPERATION_ADD
+            if (value == null && statesNothing) return@mapNotNull null
             DamageRider(
                 name = effect.string("name").orEmpty(),
-                operation = effect.string("operation").orEmpty(),
-                amount = value,
+                operation = operation,
+                amount = value.orEmpty(),
             )
         }
     }
 
     /**
-     * `d8` + `[+3]` → `"d8 + 3"`; `d6` + `[-1]` → `"d6 - 1"`; two numeric riders → `"d4 + 1 - 1"`.
+     * One effect's `amount.value` as **the server's own characters** — `"3"`, `"-1"`, `"1.5"`,
+     * `"2d6"` — or `null` when it did not resolve.
      *
-     * Concatenation in server order, never a sum: the sign is read off the number's own text and
-     * the magnitude printed after it, which is the whole of what this function knows about
-     * arithmetic. Riders that do not fold are left for the row to chip.
+     * ### Why this does not reuse [text] (review finding 1, BUG-8)
+     *
+     * [text] falls through to [number] for a numeric `value`, and [number] is an `Int` reader
+     * whose `toDoubleOrNull()?.toInt()` truncates: a `1.5` rider arrived as `"1"` and **folded**,
+     * so the row printed `d8 + 1` for a bonus the sheet says is one-and-a-half. That is the app
+     * publishing its own number, which is the single thing 16 decision 4 forbids, and it is the
+     * hazard `CreatureSheet.decimal`'s KDoc already exists to name. Taking the [JsonPrimitive]'s
+     * `content` keeps every shape verbatim: `1.5` fails `toIntOrNull()` in
+     * [DamageRider.foldsIntoHeadline] and chips with the true value beside its name.
+     *
+     * `value` and only `value`, and this is a **deliberate behaviour change from 1.13.0**: [text]
+     * preferred `text` over `value`, so an effect published as `{"amount": {"text": "3"}}` used
+     * to resolve; here it reads as unresolved and the `add` carrying it is dropped. A
+     * `_calculation`'s `text` is the un-substituted source and this is the one field where the
+     * *resolved* answer is the whole point — folding a source expression into a damage headline
+     * would print a formula at a player. Recorded in BUG-8's ledger cell. A bare `"amount": 3` —
+     * no wrapper — is accepted, because a primitive is a primitive.
+     *
+     * Surrounding whitespace is trimmed (review L1): `{"value": " 3"}` is the server saying
+     * three, and a rider that chips instead of folding because of a space would be this app
+     * reporting a formatting artefact as a fact about the roll. Only the padding goes; the
+     * characters are the server's.
      */
-    private fun headlineOf(base: String, riders: List<DamageRider>): String =
-        riders.filter { it.foldsIntoHeadline }.fold(base) { acc, rider ->
-            val n = rider.amount.toInt()
-            if (n < 0) "$acc - ${-n}" else "$acc + $n"
+    private fun JsonObject.riderAmount(): String? {
+        val element = when (val amount = this["amount"]) {
+            is JsonObject -> amount["value"]
+            else -> amount
         }
+        return (element as? JsonPrimitive)
+            ?.takeIf { it !is JsonNull }
+            ?.content
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
 
     // -----------------------------------------------------------------------
     // Shared readers
@@ -535,8 +586,30 @@ object ActionEngine {
      *    `_calculation`, whose answer is under `value`.
      *
      * `text` is preferred over `value` because where both exist (`description`, `summary`) `text`
-     * is the rendered string and `value` is the un-substituted source. Numbers are accepted and
-     * stringified so a `range` the server happened to compute as `60` still prints.
+     * is the rendered string and `value` is the un-substituted source.
+     *
+     * ### Numbers are stringified only INSIDE a wrapper — and that is deliberate
+     *
+     * Review finding 9 caught this KDoc claiming more than the code does. What is true: a
+     * **wrapped** number stringifies (`{"value": 60}` → `"60"`), and that path is live — two of
+     * the capture's seventeen damage rows publish `amount.value` as a JSON number rather than a
+     * dice string. What is not true is that a **bare** `"range": 60` does the same: the `else`
+     * branch is [string], which requires an actual JSON string, so an unwrapped number reads as
+     * absent.
+     *
+     * The asymmetry is recorded rather than "fixed". Every one of the seven call sites here
+     * (`castingTime`, `range`, `description` ×2, `summary` ×2, `damage.amount`) is a text field
+     * on the wire *or* a `_calculation` wrapper, the unwrapped-number shape has never been seen
+     * on a capture, and widening the `else` branch would change what all seven render on
+     * evidence nobody has. If a sheet ever publishes one, this is the note saying where the
+     * one-line change goes.
+     *
+     * The wrapped-number path has a defect of its own, and it is **not** fixed here: [number] is
+     * an `Int` reader, so a wrapped `2.5` becomes `"2"` and the row prints a number the server
+     * never published — BUG-8's hazard, on the *base* rather than on a rider. Ledgered as
+     * BUG-10 for the next wave, which is where a verbatim/`decimal` reader for the base belongs.
+     * `ActionEngine`'s damage **riders** do not depend on any of this any more: they read their
+     * own primitive (see `riderAmount`).
      *
      * Blank is normalised to `null` so every caller's "absent reads as absent" holds without each
      * one repeating a `takeIf`.

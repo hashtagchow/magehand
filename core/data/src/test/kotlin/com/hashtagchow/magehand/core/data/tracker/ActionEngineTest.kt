@@ -11,6 +11,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import com.hashtagchow.magehand.core.model.DamageRider
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Test
 import com.hashtagchow.magehand.core.model.ActionGroup
@@ -513,12 +514,18 @@ class ActionEngineTest {
     }
 
     /**
-     * No `effects` (or an effect whose amount never resolved) leaves the line exactly as the
-     * 2026-08-24 verbatim ruling had it: `amount == base`, no riders. The four partial forms in
-     * the test above this section are therefore unchanged by FR-36.
+     * No `effects` leaves the line exactly as the 2026-08-24 verbatim ruling had it —
+     * `amount == base`, no riders — and **an `add` with an unresolved amount is dropped**, which
+     * is the only drop this engine performs.
+     *
+     * The second half is the pin review finding 4 re-aimed. It used to read as *"an effect with
+     * no amount is dropped"*, full stop, which made the bug look like the specification: an
+     * `add` with nothing to add contributes nothing and its absence says nothing false, but a
+     * `conditional` with no amount is a fact about the row, and dropping that one asserted the
+     * damage is unconditional. See the test below for the surviving case.
      */
     @Test
-    fun `no effects means the line is the verbatim value and nothing else`() {
+    fun `no effects means the line is the verbatim value and an add with an unresolved amount is dropped`() {
         val board = ActionEngine.build(
             sheetOf(
                 prop("a", "action") { put("name", "Plain"); put("actionType", "attack") },
@@ -536,6 +543,252 @@ class ActionEngineTest {
         assertEquals(listOf("2d6", "d6"), lines.map { it.amount })
         assertEquals(lines.map { it.base }, lines.map { it.amount })
         assertEquals(emptyList<DamageRider>(), lines.flatMap { it.riders })
+    }
+
+    /**
+     * An amount-less **non-`add`** operation survives and chips as *name · operation* (review
+     * finding 4).
+     *
+     * `{operation: "conditional", text: "undead"}` on a damage amount is the server saying this
+     * damage applies only sometimes. Rendered as nothing, the row claims the opposite — and it
+     * claims it silently, on the row a player reads mid-turn. The chip has no number in it
+     * because the server sent none; it has the operation, in words, which is 16's *"an unknown
+     * operation is stated in words and never combined"* applied to the case where there is
+     * nothing to combine.
+     */
+    @Test
+    fun `an amount-less non-add operation survives as a chip stated in words`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Conditional"); put("actionType", "attack") },
+                prop("dmg", "damage", parent = "a") {
+                    calcWithEffects(
+                        "1d8", "d8",
+                        buildJsonObject {
+                            put("name", "Undead")
+                            put("operation", "conditional")
+                            put("text", "undead")
+                        },
+                    )
+                    put("damageType", "radiant")
+                },
+            ),
+        )
+
+        val line = board.actions.single().damage.single()
+        assertEquals("d8", line.amount)
+        assertEquals(listOf(DamageRider("Undead", "conditional", "")), line.riders)
+        assertEquals(line.riders, line.chips)
+        assertEquals("Undead · conditional", line.chips.single().label)
+    }
+
+    /**
+     * **A zero rider does not fold** (review finding 2, BUG-9, architect-approved amendment).
+     *
+     * DiceCloud's stock ability-modifier effects attach to every weapon row and resolve to the
+     * raw modifier, so a character with a 10 in the governing ability publishes `add 0` on every
+     * attack they own. Folded, that prints `d6 + 0` on the whole weapon list — the capture
+     * missed it by a single ability point. The rider is still on the line, so the detail sheet
+     * shows the sheet's own effect; it is simply not said in the headline, which is an omission
+     * and not an arithmetic step.
+     *
+     * And it is **not a chip either** (architect ruling, 2026-09-02): the detail sheet's itemised
+     * list is a zero rider's one surface, because a *"+0 Ability Modifiers"* chip beside every
+     * weapon the character owns is the same untruth as `d6 + 0`, said at greater length.
+     */
+    @Test
+    fun `a zero rider is not folded and stays on the line for the detail sheet`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Unarmed") ; put("actionType", "attack") },
+                prop("dmg", "damage", parent = "a") {
+                    calcWithEffects(
+                        "1d6", "d6",
+                        effect("Ability Modifiers", "add", JsonPrimitive(0)),
+                    )
+                    put("damageType", "bludgeoning")
+                },
+            ),
+        )
+
+        val line = board.actions.single().damage.single()
+        assertEquals("d6", line.amount)
+        assertEquals(line.base, line.amount)
+        assertEquals(listOf(DamageRider("Ability Modifiers", "add", "0")), line.riders)
+        assertEquals(
+            "a zero rider is the one rider with no presence on the row at all",
+            emptyList<DamageRider>(),
+            line.chips,
+        )
+    }
+
+    /**
+     * **A fractional rider arrives whole and chips** (review finding 1, BUG-8).
+     *
+     * The first cut read the rider through `text()` → `number()`, an `Int` reader whose
+     * `toDoubleOrNull()?.toInt()` truncates toward zero: `1.5` became `"1"` and then *folded*,
+     * so the row printed `d8 + 1` for a bonus the sheet says is one and a half — a number the
+     * server never published, which is the one thing 16 decision 4 forbids. Read as the
+     * primitive's own content it stays `"1.5"`, fails `toIntOrNull()`, and chips with the true
+     * value beside its name. `-2.5` likewise, sign intact.
+     */
+    @Test
+    fun `a fractional rider keeps the server's own text and chips instead of folding`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Half") ; put("actionType", "attack") },
+                prop("dmg", "damage", parent = "a") {
+                    calcWithEffects(
+                        "1d8", "d8",
+                        effect("Half Bonus", "add", JsonPrimitive(1.5)),
+                        effect("Half Penalty", "add", JsonPrimitive(-2.5)),
+                    )
+                    put("damageType", "piercing")
+                },
+            ),
+        )
+
+        val line = board.actions.single().damage.single()
+        assertEquals("d8", line.amount)
+        assertEquals(
+            listOf(
+                DamageRider("Half Bonus", "add", "1.5"),
+                DamageRider("Half Penalty", "add", "-2.5"),
+            ),
+            line.riders,
+        )
+        assertEquals(listOf("+1.5 Half Bonus", "-2.5 Half Penalty"), line.chips.map { it.label })
+    }
+
+    /**
+     * **An effect that states nothing is dropped** (pre-release review M4).
+     *
+     * The finding-4 rule — *drop only an `add` with no amount* — kept `{"_id": "e1"}` as a rider
+     * whose every field is blank, and the row drew it: an empty bordered chip, and an empty
+     * string inside the merged sentence that TalkBack reads as an unexplained pause. A
+     * `conditional` with no amount is a fact worth stating; an effect naming no operation and
+     * resolving to no amount is not a fact at all, and a name on its own is not one either — it
+     * says a thing exists without saying what it does to this roll.
+     */
+    @Test
+    fun `an effect with no operation and no amount is dropped, named or not`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Silent"); put("actionType", "attack") },
+                prop("dmg", "damage", parent = "a") {
+                    calcWithEffects(
+                        "1d6", "d6",
+                        buildJsonObject { put("_id", "e1") },
+                        buildJsonObject { put("name", "Foo") },
+                    )
+                    put("damageType", "fire")
+                },
+            ),
+        )
+
+        val line = board.actions.single().damage.single()
+        assertEquals("d6", line.amount)
+        assertEquals(emptyList<DamageRider>(), line.riders)
+        assertEquals(emptyList<DamageRider>(), line.chips)
+    }
+
+    /**
+     * Padding around the server's number is padding, not meaning (review L1). `" 3"` is the
+     * sheet saying three; a rider that chipped instead of folding because of a leading space
+     * would be this app reporting a formatting artefact as a fact about the roll. Only the
+     * whitespace goes — the characters between are the server's.
+     */
+    @Test
+    fun `a padded amount is trimmed and still folds`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Padded"); put("actionType", "attack") },
+                prop("dmg", "damage", parent = "a") {
+                    calcWithEffects("1d8", "d8", effect("Spaced", "add", JsonPrimitive(" 3 ")))
+                    put("damageType", "piercing")
+                },
+            ),
+        )
+
+        val line = board.actions.single().damage.single()
+        assertEquals("d8 + 3", line.amount)
+        assertEquals(listOf(DamageRider("Spaced", "add", "3")), line.riders)
+    }
+
+    /**
+     * **`riderAmount`'s shapes, one row each** (review L3). The reader is four lines long and
+     * every one of them is load-bearing, so each is named here rather than left to the two
+     * happy-path tests above.
+     *
+     * The last row is a **deliberate behaviour change from 1.13.0** and the one worth arguing
+     * about: `text()` preferred a wrapper's `text` over its `value`, so `{"amount": {"text":
+     * "3"}}` used to resolve. `text` on a `_calculation` is the *un-substituted source*, and
+     * folding a source expression into a damage headline prints a formula at a player. `value`
+     * and only `value` — recorded in BUG-8's ledger cell.
+     */
+    @Test
+    fun `rider amounts are read from the value primitive alone`() {
+        fun riderFor(amount: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit): List<DamageRider> = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Shapes"); put("actionType", "attack") },
+                prop("dmg", "damage", parent = "a") {
+                    calcWithEffects(
+                        "1d8", "d8",
+                        buildJsonObject {
+                            put("name", "Shape")
+                            put("operation", "add")
+                            amount()
+                        },
+                    )
+                    put("damageType", "force")
+                },
+            ),
+        ).actions.single().damage.single().riders
+
+        assertEquals(
+            "a bare primitive is a primitive — no wrapper required",
+            listOf(DamageRider("Shape", "add", "3")),
+            riderFor { put("amount", JsonPrimitive(3)) },
+        )
+        assertEquals(
+            "a null value did not resolve, and an add with nothing to add is dropped",
+            emptyList<DamageRider>(),
+            riderFor { put("amount", buildJsonObject { put("value", JsonNull) }) },
+        )
+        assertEquals(
+            "an empty string did not resolve either",
+            emptyList<DamageRider>(),
+            riderFor { put("amount", buildJsonObject { put("value", "") }) },
+        )
+        assertEquals(
+            "text is the un-substituted source, never the answer — 1.13.0 read it, this does not",
+            emptyList<DamageRider>(),
+            riderFor { put("amount", buildJsonObject { put("text", "3") }) },
+        )
+    }
+
+    /**
+     * The magnitude printed in the headline is the rider's **own text**, not an `Int` negated
+     * (review finding 11): `-n` on `Int.MIN_VALUE` is `Int.MIN_VALUE` again, so the row read
+     * `d8 - -2147483648`. Absurd as a modifier and unreachable from a real sheet — which is
+     * exactly why it is pinned here rather than trusted to never happen.
+     */
+    @Test
+    fun `the most negative integer prints its own digits rather than overflowing`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Absurd") ; put("actionType", "attack") },
+                prop("dmg", "damage", parent = "a") {
+                    calcWithEffects(
+                        "1d8", "d8",
+                        effect("Overflow", "add", JsonPrimitive(Int.MIN_VALUE)),
+                    )
+                    put("damageType", "force")
+                },
+            ),
+        )
+
+        assertEquals("d8 - 2147483648", board.actions.single().damage.single().amount)
     }
 
     // -----------------------------------------------------------------------
@@ -1075,6 +1328,92 @@ class ActionEngineTest {
             direct + viaHit,
             rendered,
         )
+    }
+
+    /**
+     * **FR-36 against the capture** (review finding 6): every effect-bearing damage row on the
+     * real sheet, folded from the server's own signed numbers.
+     *
+     * The wave shipped with only synthetic rider tests, and the review's verdict on that was
+     * blunt: a `headlineOf` regression changed no assertion against real data. This is the
+     * missing half. It derives the expectation from the raw capture — each damage property's
+     * `amount.value` and the `amount.value` of each of its `add` effects, read as the text the
+     * server sent — and compares it with what the engine rendered, so the only way it passes is
+     * if every number printed on a real row is a number the sheet published, in the order the
+     * sheet published it.
+     *
+     * The count assertion is the other half of finding 6: an effect-less re-capture makes this
+     * test fail loudly rather than pass vacuously.
+     *
+     * Derived, never declared — no property id, no feature name, no character name here.
+     */
+    @Test
+    fun `every effect-bearing damage row in the capture folds the server's own signed values`() {
+        val properties = Fixtures.sabrielSheet().livePropertyList
+
+        fun effectsOf(property: JsonObject): List<JsonObject> =
+            ((property["amount"] as? JsonObject)?.get("effects") as? kotlinx.serialization.json.JsonArray)
+                ?.filterIsInstance<JsonObject>()
+                .orEmpty()
+
+        /** The effect's `amount.value` as the server's characters — the reader FR-36's fix uses. */
+        fun amountTextOf(effect: JsonObject): String? =
+            ((effect["amount"] as? JsonObject)?.get("value") as? JsonPrimitive)?.content
+
+        val effectBearing = properties.filter {
+            it.string("type") == "damage" && effectsOf(it).isNotEmpty()
+        }
+        assertTrue(
+            "the capture must carry damage rows with effects or this test proves nothing — " +
+                "a re-capture without them is a signal, not a pass",
+            effectBearing.isNotEmpty(),
+        )
+
+        // What the server said, assembled from the raw documents: the verbatim value, then one
+        // signed term per non-zero whole-integer `add`, in array order. Everything else chips.
+        //
+        // `base` follows production's own rule for the field — a string `value` if there is one,
+        // otherwise a wrapped number stringified (review L2). Every effect-bearing row in the
+        // 2026-08-17 capture is a dice string, but two of its seventeen damage rows publish a
+        // NUMERIC `amount.value`, so a re-capture where one of those grows an effect would
+        // otherwise fail here with a diff about the base rather than about the fold — a red that
+        // points at the wrong thing. (That the engine reads a numeric base through an `Int`
+        // reader, and so truncates `2.5`, is BUG-10 and not this test's claim.)
+        val expected = effectBearing.map { property ->
+            val amount = property["amount"] as? JsonObject
+            val base = amount?.string("value") ?: amount?.number("value")?.toString().orEmpty()
+            val terms = effectsOf(property)
+                .filter { it.string("operation") == "add" }
+                .mapNotNull { amountTextOf(it) }
+                .filter { text -> text.toIntOrNull().let { it != null && it != 0 } }
+                .map { if (it.startsWith("-")) "- ${it.substring(1)}" else "+ $it" }
+            (listOf(base) + terms).joinToString(" ")
+        }.sorted()
+
+        val board = ActionEngine.build(Fixtures.sabrielSheet())
+        val rendered = (board.actions.flatMap { it.damage } + board.spells.flatMap { it.damage })
+            .filter { it.riders.isNotEmpty() }
+
+        assertEquals(
+            "every effect-bearing damage property reaches a rendered line carrying its riders",
+            effectBearing.size,
+            rendered.size,
+        )
+        // `.sorted()` on both sides deliberately: this asserts the MULTISET of headlines, not
+        // which row got which. Pairing a rendered line back to its source property would mean
+        // re-deriving the walk the engine just performed, and the claim under test is about the
+        // numbers, not about the ordering the other capture tests already pin.
+        assertEquals(
+            "each headline is the server's value followed by the server's own signed integers",
+            expected,
+            rendered.map { it.amount }.sorted(),
+        )
+        rendered.forEach { line ->
+            assertTrue(
+                "a headline never loses or rewrites the verbatim value it was built from",
+                line.amount == line.base || line.amount.startsWith("${line.base} "),
+            )
+        }
     }
 
     /** The engine is pure: same sheet, same board. */

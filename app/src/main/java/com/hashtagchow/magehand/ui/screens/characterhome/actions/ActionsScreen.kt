@@ -285,12 +285,15 @@ private fun ActionEntryRow(entry: ActionEntry, onClick: () -> Unit, modifier: Mo
 }
 
 /**
- * The damage rollups, one line each, plus the riders the headline does not fold (FR-36).
+ * The damage rollups, one line each, plus the riders that neither fold nor are zero (FR-36).
  *
  * Server strings verbatim — see `ActionEngine.toDamageLine`, which also records that
  * `amount.value` is not always fully resolved at rest. Nothing is computed here: the headline
  * arrives already folded (`d8 + 3`), and each chip is one server-resolved effect under its own
- * name (*+2d6 Sneak Attack*). The chips sit inside the row's merging shell, so TalkBack reads
+ * name (*+2d6 Sneak Attack*). A rider resolving to `add 0` draws nothing at all here — the
+ * detail sheet's itemised list is its one surface (architect ruling, 2026-09-02), because a
+ * *"+0"* chip on every weapon row of a character with a 10 in the governing ability is the same
+ * untruth as the `d6 + 0` this wave removed. The chips sit inside the row's merging shell, so TalkBack reads
  * them as part of the row's one sentence — asserted through the merged node in
  * `ActionsScreenRenderTest`, not by existence (BUG-6's lesson).
  */
@@ -339,14 +342,18 @@ private fun RiderChip(label: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** *"+2d6 Sneak Attack"* for an `add`; *"Sneak Attack · mul 2"* for anything the app has not seen. */
+/**
+ * *"+2d6 Sneak Attack"* for an `add`; *"Sneak Attack · mul 2"* for anything the app has not seen.
+ *
+ * The wording is [DamageRider.label]'s, not this function's (review findings 3 and 7): the row's
+ * chip and the detail sheet's line are the same statement, and while each built its own from a
+ * format string they disagreed about a pre-signed amount (`+-1d4 Bane`) and about what a blank
+ * name leaves behind. What survives here is the resource lookup, so the string still comes out of
+ * the localisable table.
+ */
 @Composable
 internal fun damageRiderLabel(rider: DamageRider): String =
-    if (rider.operation == DamageRider.OPERATION_ADD) {
-        stringResource(R.string.actions_damage_rider_add, rider.amount, rider.name)
-    } else {
-        stringResource(R.string.actions_damage_rider_other, rider.name, rider.operation, rider.amount)
-    }
+    stringResource(R.string.actions_damage_rider, rider.label)
 
 /**
  * The shared frame of both row kinds: name, an optional trailing number, and a body.
