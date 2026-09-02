@@ -9,6 +9,7 @@ import com.hashtagchow.magehand.core.model.ActionType
 import com.hashtagchow.magehand.core.model.ActionUses
 import com.hashtagchow.magehand.core.model.CostLine
 import com.hashtagchow.magehand.core.model.DamageLine
+import com.hashtagchow.magehand.core.model.DamageRider
 import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.SpellListHeader
 
@@ -463,9 +464,57 @@ object ActionEngine {
      * decision above this engine's pay grade.
      */
     private fun JsonObject.toDamageLine(): DamageLine? {
-        val amount = text("amount")?.takeIf { it.isNotBlank() } ?: return null
-        return DamageLine(amount = amount, damageType = string("damageType").orEmpty())
+        val base = text("amount")?.takeIf { it.isNotBlank() } ?: return null
+        val riders = ridersOn(this["amount"] as? JsonObject)
+        return DamageLine(
+            amount = headlineOf(base, riders),
+            damageType = string("damageType").orEmpty(),
+            base = base,
+            riders = riders,
+        )
     }
+
+    /**
+     * The effects the server attached to one damage `amount` (FR-36).
+     *
+     * ### This is the rollup the verbatim ruling was missing
+     *
+     * Beside `amount.value`, a damage `_calculation` carries `effects`: every `effect` property on
+     * the sheet whose `targetTags` match this damage row, each already resolved against the
+     * character — `{name: "Finesse Modifiers", operation: "add", amount: {value: 3}}`. The
+     * attack roll folds its own `effects` into `attackRoll.value` (a Rogue's finesse Rapier on a live sheet: 0 + 3 + 2 =
+     * 5); the damage roll does **not**, so `value` reads `d8` while the roll DiceCloud makes is
+     * `1d8 + 3 + 2d6`. Reading the array is reading a server answer, the same as reading `value`.
+     * Nothing here evaluates a calculation — an effect whose amount did not resolve to anything
+     * is dropped, not guessed at.
+     *
+     * Each rider's `amount` goes through [text], so an integer `3` and a dice string `"2d6"`
+     * both arrive as text; [DamageRider.foldsIntoHeadline] is where the two part ways.
+     */
+    private fun ridersOn(amount: JsonObject?): List<DamageRider> {
+        val effects = amount?.get("effects") as? JsonArray ?: return emptyList()
+        return effects.filterIsInstance<JsonObject>().mapNotNull { effect ->
+            val value = effect.text("amount") ?: return@mapNotNull null
+            DamageRider(
+                name = effect.string("name").orEmpty(),
+                operation = effect.string("operation").orEmpty(),
+                amount = value,
+            )
+        }
+    }
+
+    /**
+     * `d8` + `[+3]` → `"d8 + 3"`; `d6` + `[-1]` → `"d6 - 1"`; two numeric riders → `"d4 + 1 - 1"`.
+     *
+     * Concatenation in server order, never a sum: the sign is read off the number's own text and
+     * the magnitude printed after it, which is the whole of what this function knows about
+     * arithmetic. Riders that do not fold are left for the row to chip.
+     */
+    private fun headlineOf(base: String, riders: List<DamageRider>): String =
+        riders.filter { it.foldsIntoHeadline }.fold(base) { acc, rider ->
+            val n = rider.amount.toInt()
+            if (n < 0) "$acc - ${-n}" else "$acc + $n"
+        }
 
     // -----------------------------------------------------------------------
     // Shared readers

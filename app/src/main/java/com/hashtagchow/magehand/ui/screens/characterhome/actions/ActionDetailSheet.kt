@@ -41,6 +41,7 @@ import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.ActionCost
 import com.hashtagchow.magehand.core.model.CostLine
 import com.hashtagchow.magehand.core.model.UseTarget
@@ -224,9 +225,7 @@ private fun SpellFacts(row: ActionRow.Spell) {
         )
         entry.castingTime?.let { Fact(stringResource(R.string.action_detail_casting_time), it) }
         entry.range?.let { Fact(stringResource(R.string.action_detail_range), it) }
-        entry.damage.forEach {
-            Fact(stringResource(R.string.actions_damage, it.amount, it.damageType), "")
-        }
+        entry.damage.forEach { DamageFacts(it) }
     }
 }
 
@@ -242,9 +241,24 @@ private fun ActionFacts(row: ActionRow.Action) {
                 color = MaterialTheme.colorScheme.primary,
             )
         }
-        entry.damage.forEach {
-            Fact(stringResource(R.string.actions_damage, it.amount, it.damageType), "")
-        }
+        entry.damage.forEach { DamageFacts(it) }
+    }
+}
+
+/**
+ * One damage line and, under it, every rider the server attached — folded or not — by name
+ * (FR-36 decision 3). The row shows the folded headline; this is where a player checks it.
+ */
+@Composable
+private fun DamageFacts(line: DamageLine) {
+    Fact(stringResource(R.string.actions_damage, line.amount, line.damageType), "")
+    line.riders.forEach { rider ->
+        Text(
+            text = damageRiderLabel(rider),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 12.dp),
+        )
     }
 }
 

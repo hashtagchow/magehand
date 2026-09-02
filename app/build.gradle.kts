@@ -96,8 +96,8 @@ android {
         // a capability. (If the operator would rather this went out as 1.13.0, the only change is
         // this line — nothing in the tree derives from the version but the contract export, which
         // re-runs either way.)
-        versionCode = 22
-        versionName = "1.12.1"
+        versionCode = 23
+        versionName = "1.13.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

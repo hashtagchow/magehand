@@ -105,25 +105,77 @@ enum class ActionGroup {
 }
 
 /**
- * One `damage` rollup hanging off an action or a spell — *"2d6 slashing"*.
+ * One `damage` rollup hanging off an action or a spell — *"2d6 slashing"*, *"d8 + 3 piercing"*.
  *
- * ### The dice string is the server's, verbatim
+ * ### The dice string is the server's, verbatim — and so is every modifier on it
  *
- * [amount] is `amount.value` as DiceCloud computed it. **No client dice math** (16 decision 4):
+ * [base] is `amount.value` as DiceCloud computed it. **No client dice math** (16 decision 4):
  * the underlying `amount.calculation` on a real sheet reads things like
  * `(floor((level+1)/6)+1)d8`, and an app that evaluated that expression itself would be a second
  * implementation of the sheet's rules engine — one that disagrees with the sheet the moment a
  * feature contributes anything the expression does not mention. The server has already done this
  * arithmetic and publishes the answer; this row prints it.
  *
- * @property amount the computed dice string, e.g. `"2d6"` or `"1d8+3"`.
+ * ### FR-36: the modifiers were always there, beside the value
+ *
+ * A damage property's `amount` carries a second server rollup next to `value`: an `effects`
+ * array — every effect on the sheet whose target tags match this damage row, each with its own
+ * `amount.value` already resolved against the character. On a Rogue's finesse Rapier that is
+ * *Finesse Modifiers* (`add`, `3`) and *Sneak Attack* (`add`, `"2d6"`). The attack roll folds its
+ * effects into `attackRoll.value`; the damage roll does **not** — `value` is the bare die and the
+ * effects ride alongside — which is why the official card and this app both read `1d8` for a hit
+ * that DiceCloud rolls as `1d8 + 3 + 2d6`.
+ *
+ * [amount] is the headline: [base] with every [DamageRider.foldsIntoHeadline] rider appended in
+ * server order — `d8 + 3`, `d6 - 1`. That is concatenation of server-resolved numbers, not
+ * arithmetic: two numeric riders print as `d4 + 1 - 1`, never as `d4`, because summing them would
+ * be the first line of the rules engine this type exists not to be. Riders that do not fold
+ * ([chips]) are dice strings and any operation other than `add`; the UI renders those as a
+ * labelled chip — *"+2d6 Sneak Attack"* — because Sneak Attack is once per turn at the table
+ * even though the sheet adds it to every roll, and a headline of `d8 + 3 + 2d6` would overstate
+ * a normal hit. [riders] is the full list, for the detail sheet to itemise so the fold is
+ * auditable.
+ *
+ * @property amount the headline dice string — [base] plus the folded riders, e.g. `"d8 + 3"`.
  * @property damageType the server's own word — `"slashing"`, `"necrotic"`. Lower-case on the
  *   wire; the UI capitalises for display rather than this type storing a second spelling.
+ * @property base `amount.value` verbatim, e.g. `"d8"`. Equals [amount] when nothing folds.
+ * @property riders every effect the server attached, in server order, folded or not.
  */
 data class DamageLine(
     val amount: String,
     val damageType: String,
-)
+    val base: String = amount,
+    val riders: List<DamageRider> = emptyList(),
+) {
+    /** The riders the headline does not carry — rendered beside it, each under its own name. */
+    val chips: List<DamageRider> get() = riders.filterNot { it.foldsIntoHeadline }
+}
+
+/**
+ * One server-resolved effect on a [DamageLine] — *Finesse Modifiers +3*, *Sneak Attack +2d6*.
+ *
+ * @property name the effect's own name on the sheet; may be blank on an unnamed effect.
+ * @property operation DiceCloud's word — `"add"` on every effect in the live capture. Anything
+ *   else is rendered as text and never combined with the die.
+ * @property amount the effect's `amount.value` as text — `"3"`, `"-1"`, `"2d6"`.
+ */
+data class DamageRider(
+    val name: String,
+    val operation: String,
+    val amount: String,
+) {
+    /**
+     * A plain integer `add` is part of the headline (`d8 + 3`); a dice string or any other
+     * operation is a chip. The integer test is the whole rule — it is what separates *"this is
+     * what the roll gets"* from *"this is what the roll gets when the rider applies"*.
+     */
+    val foldsIntoHeadline: Boolean get() = operation == OPERATION_ADD && amount.toIntOrNull() != null
+
+    companion object {
+        const val OPERATION_ADD = "add"
+    }
+}
 
 /**
  * One line of what a Use will spend — *"Rage: 1"*, *"Arrows: 2"* (17 decision 1's **Cost**).

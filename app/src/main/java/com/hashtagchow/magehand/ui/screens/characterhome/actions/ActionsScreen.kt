@@ -1,5 +1,6 @@
 package com.hashtagchow.magehand.ui.screens.characterhome.actions
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -50,6 +51,7 @@ import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.ActionEntry
 import com.hashtagchow.magehand.core.model.ActionGroup
 import com.hashtagchow.magehand.core.model.DamageLine
+import com.hashtagchow.magehand.core.model.DamageRider
 import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.SpellListHeader
 import com.hashtagchow.magehand.core.model.UseTarget
@@ -283,11 +285,16 @@ private fun ActionEntryRow(entry: ActionEntry, onClick: () -> Unit, modifier: Mo
 }
 
 /**
- * The damage rollups, one line each.
+ * The damage rollups, one line each, plus the riders the headline does not fold (FR-36).
  *
  * Server strings verbatim — see `ActionEngine.toDamageLine`, which also records that
- * `amount.value` is not always fully resolved at rest. Nothing is computed here.
+ * `amount.value` is not always fully resolved at rest. Nothing is computed here: the headline
+ * arrives already folded (`d8 + 3`), and each chip is one server-resolved effect under its own
+ * name (*+2d6 Sneak Attack*). The chips sit inside the row's merging shell, so TalkBack reads
+ * them as part of the row's one sentence — asserted through the merged node in
+ * `ActionsScreenRenderTest`, not by existence (BUG-6's lesson).
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DamageLines(damage: List<DamageLine>, modifier: Modifier = Modifier) {
     damage.forEach { line ->
@@ -295,8 +302,51 @@ private fun DamageLines(damage: List<DamageLine>, modifier: Modifier = Modifier)
             stringResource(R.string.actions_damage, line.amount, line.damageType),
             modifier = modifier,
         )
+        val chips = line.chips
+        if (chips.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                chips.forEach { RiderChip(damageRiderLabel(it)) }
+            }
+        }
     }
 }
+
+/**
+ * A rider, chip-shaped but **not a button**.
+ *
+ * [Badge] is an `AssistChip`, and a chip is a clickable `Surface` — its own merging semantics
+ * node, which the row's `mergeDescendants` does not absorb. The first recording of
+ * `ActionsScreenRenderTest` showed the row's merged text as *"Rapier, +5 to hit, d8 + 3
+ * piercing"* with the Sneak Attack chip nowhere in it: drawn, and unreachable as part of the
+ * sentence. This is a bordered `Text` on a non-clickable surface, so its label merges into the
+ * row like the damage line above it does. (The existing badges have the same property; that is
+ * BUG-7 in the ledger, not this wave's change.)
+ */
+@Composable
+private fun RiderChip(label: String, modifier: Modifier = Modifier) {
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = modifier,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+        )
+    }
+}
+
+/** *"+2d6 Sneak Attack"* for an `add`; *"Sneak Attack · mul 2"* for anything the app has not seen. */
+@Composable
+internal fun damageRiderLabel(rider: DamageRider): String =
+    if (rider.operation == DamageRider.OPERATION_ADD) {
+        stringResource(R.string.actions_damage_rider_add, rider.amount, rider.name)
+    } else {
+        stringResource(R.string.actions_damage_rider_other, rider.name, rider.operation, rider.amount)
+    }
 
 /**
  * The shared frame of both row kinds: name, an optional trailing number, and a body.

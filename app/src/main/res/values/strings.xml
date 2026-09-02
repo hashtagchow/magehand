@@ -558,6 +558,11 @@
     <string name="actions_dc">DC %1$d</string>
     <string name="actions_ability_mod">%1$+d</string>
     <string name="actions_damage">%1$s %2$s</string>
+    <!-- FR-36: a damage rider the headline does not fold — "+2d6 Sneak Attack". The first
+         form is an `add`; the second is any other operation, rendered as words so an operation
+         the app has never seen is stated rather than mis-combined. -->
+    <string name="actions_damage_rider_add">+%1$s %2$s</string>
+    <string name="actions_damage_rider_other">%1$s · %2$s %3$s</string>
     <string name="actions_empty">Nothing to act with</string>
     <string name="actions_empty_hint">This character\'s sheet has no spells or actions on it.</string>
     <string name="actions_section_expand">collapsed, tap to expand</string>

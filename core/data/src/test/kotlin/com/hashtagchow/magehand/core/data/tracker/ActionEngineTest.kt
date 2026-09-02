@@ -10,6 +10,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import com.hashtagchow.magehand.core.model.DamageRider
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Test
 import com.hashtagchow.magehand.core.model.ActionGroup
 import com.hashtagchow.magehand.core.model.ActionType
@@ -397,6 +399,143 @@ class ActionEngineTest {
             listOf("2d4 + 2", "d6", "d8", "magicMissileDamage"),
             board.actions.single().damage.map { it.amount },
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-36 — the riders beside `amount.value`
+    // -----------------------------------------------------------------------
+
+    /** `{name, operation, amount: {value}}` — one entry of a damage `amount.effects` array. */
+    private fun effect(name: String, operation: String, value: kotlinx.serialization.json.JsonPrimitive) =
+        buildJsonObject {
+            put("_id", "e-$name")
+            put("name", name)
+            put("operation", operation)
+            put("amount", buildJsonObject { put("value", value) })
+        }
+
+    /** A damage `amount` with its `effects`, as the capture delivers it. */
+    private fun kotlinx.serialization.json.JsonObjectBuilder.calcWithEffects(
+        calculation: String,
+        value: String,
+        vararg effects: JsonObject,
+    ) = put(
+        "amount",
+        buildJsonObject {
+            put("calculation", calculation)
+            put("value", value)
+            put("effects", kotlinx.serialization.json.JsonArray(effects.toList()))
+        },
+    )
+
+    /**
+     * **The Rapier shape, exactly as captured.** `value` is `d8`; the effects the server attached
+     * are *Finesse Modifiers* (`add`, `3`) and *Sneak Attack* (`add`, `"2d6"`). The numeric rider
+     * folds into the headline; the dice rider is a chip; both are listed on the line.
+     */
+    @Test
+    fun `a numeric add rider folds into the headline and a dice rider becomes a chip`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("rapier", "action") { put("name", "Rapier"); put("actionType", "attack") },
+                prop("hit", "branch", parent = "rapier") { put("branchType", "hit") },
+                prop("dmg", "damage", parent = "hit") {
+                    calcWithEffects(
+                        "1d8", "d8",
+                        effect("Finesse Modifiers", "add", JsonPrimitive(3)),
+                        effect("Sneak Attack", "add", JsonPrimitive("2d6")),
+                    )
+                    put("damageType", "piercing")
+                },
+            ),
+        )
+
+        val line = board.actions.single().damage.single()
+        assertEquals("d8 + 3", line.amount)
+        assertEquals("d8", line.base)
+        assertEquals("piercing", line.damageType)
+        assertEquals(
+            listOf(
+                DamageRider("Finesse Modifiers", "add", "3"),
+                DamageRider("Sneak Attack", "add", "2d6"),
+            ),
+            line.riders,
+        )
+        assertEquals(listOf(DamageRider("Sneak Attack", "add", "2d6")), line.chips)
+    }
+
+    /**
+     * Two numeric riders are concatenated in server order, never summed: a −1 Strength and a +1
+     * enchantment read `d4 + 1 - 1`, which is what the server will roll and not a number this
+     * engine worked out. A negative rider prints with a minus and its magnitude, not `+ -1`.
+     */
+    @Test
+    fun `numeric riders concatenate in server order with their sign and are never summed`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("club", "action") { put("name", "Club"); put("actionType", "attack") },
+                prop("dmg", "damage", parent = "club") {
+                    calcWithEffects(
+                        "1d4", "d4",
+                        effect("Enchantment", "add", JsonPrimitive(1)),
+                        effect("Strength Modifiers", "add", JsonPrimitive(-1)),
+                    )
+                    put("damageType", "bludgeoning")
+                },
+            ),
+        )
+
+        val line = board.actions.single().damage.single()
+        assertEquals("d4 + 1 - 1", line.amount)
+        assertEquals(emptyList<DamageRider>(), line.chips)
+    }
+
+    /**
+     * An operation the app has not seen is a chip, stated in words and never combined with the
+     * die — even when its amount is a plain integer. `add` is the only operation on any damage
+     * effect in the capture (32 of 32); this is the guard for the first one that is not.
+     */
+    @Test
+    fun `a non-add operation is never folded even with a numeric amount`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Odd"); put("actionType", "attack") },
+                prop("dmg", "damage", parent = "a") {
+                    calcWithEffects("1d6", "d6", effect("Doubled", "mul", JsonPrimitive(2)))
+                    put("damageType", "fire")
+                },
+            ),
+        )
+
+        val line = board.actions.single().damage.single()
+        assertEquals("d6", line.amount)
+        assertEquals(listOf(DamageRider("Doubled", "mul", "2")), line.chips)
+    }
+
+    /**
+     * No `effects` (or an effect whose amount never resolved) leaves the line exactly as the
+     * 2026-08-24 verbatim ruling had it: `amount == base`, no riders. The four partial forms in
+     * the test above this section are therefore unchanged by FR-36.
+     */
+    @Test
+    fun `no effects means the line is the verbatim value and nothing else`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Plain"); put("actionType", "attack") },
+                prop("d1", "damage", parent = "a") {
+                    calcText("amount", "2d6", "2d6"); put("damageType", "fire"); put("order", 1)
+                },
+                prop("d2", "damage", parent = "a") {
+                    calcWithEffects("1d6", "d6", buildJsonObject { put("name", "Unresolved"); put("operation", "add") })
+                    put("damageType", "cold"); put("order", 2)
+                },
+            ),
+        )
+
+        val lines = board.actions.single().damage
+        assertEquals(listOf("2d6", "d6"), lines.map { it.amount })
+        assertEquals(lines.map { it.base }, lines.map { it.amount })
+        assertEquals(emptyList<DamageRider>(), lines.flatMap { it.riders })
     }
 
     // -----------------------------------------------------------------------
