@@ -60,7 +60,7 @@ import org.robolectric.annotation.GraphicsMode
  * token, nor a real account name appears in this corpus.
  *
  * `tools/public-gate.sh` already reaches the goldens: its source-root mode scans **`app/src`**,
- * which contains `app/src/test/snapshots/`. A string cannot hide in a PNG, but a filename can, and
+ * which contains `app/src/test/snapshots/img/`. A string cannot hide in a PNG, but a filename can, and
  * the first run of this wave's gate caught four real leaks in the *sources* around them — the
  * party surname the fixture was named after, two of the capture's feature names, and the capture's
  * own filename. The rule binds test code exactly as it binds `main`.

@@ -9,11 +9,21 @@ import java.io.File
 /**
  * Where the committed goldens live, as the Roborazzi Gradle plugin reports it.
  *
- * `app/build.gradle.kts` sets `roborazzi { outputDir = src/test/snapshots }`, and the plugin
+ * `app/build.gradle.kts` sets `roborazzi { outputDir = src/test/snapshots/img }`, and the plugin
  * passes that through to the test JVM as `roborazzi.output.dir`. Reading it back rather than
  * repeating the literal is what stops the build script and the tests from disagreeing about where
  * the corpus is — a disagreement whose symptom is `verifyRoborazziDebug` passing against files
  * nobody committed.
+ *
+ * ### Why `img/` and not `snapshots/` itself (BUG-12)
+ *
+ * Gradle caches the record task's output *directory*, so a cache hit restores everything in it as
+ * the task last produced it — which reverted the corpus's hand-written `README.md` after every
+ * `clean` build. The images are the task's output; the README is not. So the images live in
+ * `snapshots/img/` and the README stays in `snapshots/`, one level above anything Gradle owns.
+ * The fallback below must therefore name `img/` too: it is only reached when the system property
+ * is missing, and a fallback pointing one level up would write goldens back into the README's
+ * directory and re-create the bug.
  *
  * ### Why the path is spelled out at each capture at all
  *
@@ -23,7 +33,8 @@ import java.io.File
  * (`TrackerScreen_dark_150.png`), because a golden's whole job is to be recognised in a diff by a
  * human — so [captureGolden] joins the two itself and no caller can get it wrong.
  */
-private val snapshotDir: String = System.getProperty("roborazzi.output.dir") ?: "src/test/snapshots"
+private val snapshotDir: String =
+    System.getProperty("roborazzi.output.dir") ?: "src/test/snapshots/img"
 
 /**
  * Render [content] in the app's real root composition and commit one golden of the result.

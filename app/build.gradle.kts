@@ -214,8 +214,15 @@ android {
 // FR-34 layer 2 (design 19 decision 6). Goldens are committed PNGs, so they live in the
 // source tree rather than `build/` — `app/src/test/snapshots/`, next to the tests that
 // record them. See that directory's README.md for the record/verify workflow.
+//
+// BUG-12: the images sit one level further down, in `snapshots/img/`, and the README stays
+// in `snapshots/`. Gradle treats this whole directory as the record task's output and caches
+// it, so anything inside it is restored on a cache hit as the task last produced it — which
+// silently reverted the hand-written README after every `clean` build. The images are the
+// task's output; the README is not, so the README must live one level ABOVE this directory.
+// Point `outputDir` at a directory that contains nothing but goldens and it cannot happen.
 roborazzi {
-    outputDir.set(layout.projectDirectory.dir("src/test/snapshots"))
+    outputDir.set(layout.projectDirectory.dir("src/test/snapshots/img"))
 }
 
 // WP1 disabled Hilt's aggregating task because Hilt 2.58's bundled
