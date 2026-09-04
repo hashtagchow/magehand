@@ -939,9 +939,20 @@ class PaneSelectionTest {
     /**
      * The operator's screenshot: the back arrow overlapping "Short" on a bar that could carry
      * up to nine controls at once. The fix collapses the low-frequency ones behind one overflow
-     * menu (`HomeOverflowMenu` in `PaneChrome.kt`, whose KDoc carries the "six elements max"
-     * arithmetic) — pinned by reading the source, `PaneSelectionTest`'s own precedent for a
-     * shape no pure function can carry and `:app` has no Compose test harness to click through.
+     * menu (`HomeOverflowMenu` in `PaneChrome.kt`, whose KDoc carries the "five elements max"
+     * arithmetic — six until FR-39 moved history in) — pinned by reading the source,
+     * `PaneSelectionTest`'s own precedent for a shape no pure function can carry and `:app` has
+     * no Compose test harness to click through.
+     *
+     * **FR-39 extends it to history.** The 1.9.1 ruling kept history on the bar as "what a
+     * player reaches for on every turn"; the operator's 2026-09-02 judgement reverses that, and
+     * a reversal that nothing enforces is a reversal that drifts back on the next screen someone
+     * edits. Both the icon and the tag are checked, and for different failures: the icon catches
+     * "someone drew a history button on the bar again", the tag catches "someone drew it and
+     * moved the tag to it", which would leave every sweep step and render test green while the
+     * bar was crowded again. The tag's one definition is `homeOverflowHistory`, in `PaneChrome.kt`
+     * beside the menu that renders it — which is what makes its absence here meaningful rather
+     * than merely a spelling.
      */
     @Test
     fun `both home screens route their low-frequency actions through one overflow menu`() {
@@ -951,10 +962,44 @@ class PaneSelectionTest {
             assertTrue("$name no longer composes HomeOverflowMenu", source.contains("HomeOverflowMenu("))
             // The wrench/pane-order icons this screen used to draw directly for those actions —
             // now that they live behind HomeOverflowMenu, an import of either here means a
-            // second control landed back on the bar itself.
-            listOf("Icons.Filled.Build", "Icons.Filled.Menu").forEach { icon ->
+            // second control landed back on the bar itself. FR-39 adds history's list icon to
+            // the same list, for the same reason.
+            listOf("Icons.Filled.Build", "Icons.Filled.Menu", "AutoMirrored.Filled.List").forEach { icon ->
                 assertFalse("$name must not import $icon directly anymore", source.contains(icon))
             }
+            assertFalse(
+                "$name must not spell the history testTag itself — it belongs to " +
+                    "homeOverflowHistory in PaneChrome.kt, and a copy here is a history " +
+                    "control back on the app bar",
+                source.contains("tracker:history:open"),
+            )
+            // …and the positive half, without which every assertion above passes on a screen
+            // that simply dropped history altogether. "Not on the bar" and "in the menu" are
+            // two claims, and deleting the argument satisfies only the first.
+            //
+            // Against the code with its comments stripped (the technique the width-gate test
+            // above uses, extended to line comments): both screens *mention* this function by
+            // name in the comment that explains it, and a mention is not a call. Checked
+            // against the raw source this assertion is satisfied by prose, which is exactly
+            // the vacuity it was added to close — found by the mutation that deleted the
+            // argument and watched this pass anyway.
+            val code = source
+                .replace(Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL), "")
+                .replace(Regex("""//[^\n]*"""), "")
+            assertTrue(
+                "$name no longer passes history into the overflow menu",
+                code.contains("homeOverflowHistory"),
+            )
+            // Gated, and gated on the Tracker tab: an ungated history item would offer the
+            // tracker's session sheet from the Inventory and Sheet tabs, which is the defect
+            // `customize` is gated against for the same reason. The two screens spell the
+            // enum differently (`CharacterHomeTab` / `LocalCharacterHomeTab`), so the tab type
+            // is what varies in the pattern and the shape is what is pinned.
+            assertTrue(
+                "$name must pass history gated on the Tracker tab, not unconditionally",
+                Regex("""history = if \([\w.]*Tracker\.isShowing\(chrome\)\) \{\s*homeOverflowHistory""")
+                    .containsMatchIn(code),
+            )
         }
 
         // The two screens' own trailing item — Settings on the DiceCloud screen, Edit on the

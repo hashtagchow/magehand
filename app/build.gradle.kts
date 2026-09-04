@@ -111,8 +111,23 @@ android {
         // is a new thing a user can do rather than a correction to an old one — and it writes
         // stored keys (`"70"`/`"80"`/`"90"`) that no earlier build has ever seen, so a rollback
         // reads a value it must degrade. The contract is still untouched.
-        versionCode = 25
-        versionName = "1.14.0"
+        // 26 / 1.14.1 carries FR-39 — the tracker's history action moves off the app bar and into
+        // the overflow menu on both home screens — with BUG-7 (the five actions-row badges were
+        // `AssistChip`s, so a screen reader never heard "Not enough resources") and BUG-11 (two
+        // `MenuAnchorType` deprecation warnings, against the house 0-warning standard) riding
+        // along. A **PATCH**, and by the boundary the entry above it drew rather than by habit:
+        // 1.14.0 was a minor because a setting could do a new thing, and nothing here can. FR-39
+        // moves a door a player already had; BUG-7 makes five labels *audible* that were already
+        // drawn, which is 1.12.1's case exactly ("changes what a screen reader can reach ... and
+        // neither is a capability"); BUG-11 changes no runtime behaviour at all. No schema moves,
+        // no stored key is written that an earlier build cannot read, and the contract is
+        // untouched — `exportContract` re-runs at the bump and has nothing new to say.
+        // Worth one more line because it is the kind of change a ledger should not let pass
+        // silently: FR-39 **reverses** 1.9.1's ruling that history belongs on the bar. The
+        // supersession, its date and its reason are in `HomeOverflowMenu`'s KDoc, next to the
+        // paragraph it supersedes, which is kept.
+        versionCode = 26
+        versionName = "1.14.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

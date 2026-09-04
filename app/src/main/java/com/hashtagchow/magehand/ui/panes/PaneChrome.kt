@@ -255,8 +255,33 @@ fun PaneRow(
 /**
  * One low-frequency item folded into [HomeOverflowMenu] — a tab's own customize wrench, whose
  * label and target differ per screen and per which tab is showing.
+ *
+ * The name is 1.9.1's, from when the wrench was the only thing shaped like this; FR-39's history
+ * item is the second and the shape fit unchanged. Kept rather than renamed to something like
+ * `HomeOverflowItem`, because the type is referenced by name in both home screens and in the
+ * ledger, and a rename would cost every one of those readings to buy a better noun.
  */
 data class HomeOverflowCustomize(val labelRes: Int, val testTag: String, val onClick: () -> Unit)
+
+/**
+ * FR-39's history item, built here rather than at each of the two call sites.
+ *
+ * The wrench above is spelled out on both home screens because its label and target genuinely
+ * differ per screen and per tab — that is the type's whole reason. History does not differ: same
+ * label, same tag, same sheet, and only the lambda that opens it belongs to the screen. Written
+ * twice it would be two literals of `tracker:history:open` that nothing stops from drifting
+ * apart, and the tag is addressed by name from `tools/sweep/flows` and from the render tests,
+ * which is exactly the kind of string that must have one definition.
+ *
+ * `PaneSelectionTest` reads the two screens' source for that literal and fails if it reappears
+ * there — the check reads as "history is not on the bar", and it can only mean that while this
+ * is the only place the tag is written.
+ */
+fun homeOverflowHistory(onClick: () -> Unit) = HomeOverflowCustomize(
+    labelRes = R.string.tracker_history_action,
+    testTag = "tracker:history:open",
+    onClick = onClick,
+)
 
 /**
  * 1.9.1's app-bar decrowding: the character-home overflow menu, shared by both home screens for
@@ -274,23 +299,51 @@ data class HomeOverflowCustomize(val labelRes: Int, val testTag: String, val onC
  * reached rarely enough that hiding them behind one tap costs little and buys back the room the
  * bar needs.
  *
- * ### The arithmetic behind "six elements is the cap"
+ * ### Superseded 2026-09-03 (FR-39): history comes in too
  *
- * With this menu the bar carries at most six fixed elements: back, title, Short, Long, history,
- * overflow. [ProvideUiScale] scales `density` (`UiScaleProvider`'s "both components are scaled"),
+ * The paragraph above stands as written for Short and Long, and is **wrong about history** — the
+ * claim was a frequency claim, and the operator's 2026-09-02 table judgement answers it the other
+ * way. Undo is not reached through the sheet: the snackbar carries UNDO at the moment of the
+ * write, and `HistoryRowState.canUndo` carries it on the row afterwards. What the sheet is for is
+ * a once-in-a-while look back at the session, which is exactly the frequency this menu was built
+ * to hold. So history moves in — the *first* item, above `customize`, because it is the one
+ * action among a menu of destinations — and Short and Long stay on the bar, still on the original
+ * argument. The 1.9.1 paragraph is kept rather than edited because the reversal is the record: a
+ * ruling that quietly rewrites its own premise leaves nobody able to see that it changed.
+ *
+ * ### The arithmetic, rewritten for five elements
+ *
+ * With history in the menu the bar carries at most five fixed elements **on a phone** — back,
+ * title, Short, Long, overflow — where the tabs are exclusive and only one tab's actions are
+ * ever on the bar at once. In pane mode the surfaces are side by side, so the Inventory add
+ * button can sit beside the tracker's rest buttons and the count goes higher; that mode is not
+ * what this budget is about, because [isExpandedWidth] does not admit it below 840 dp
+ * (`WindowSizeClass.WIDTH_DP_EXPANDED_LOWER_BOUND`) — more than twice the width this arithmetic
+ * is worried about, even after 150 % has taken its third.
+ *
+ * [ProvideUiScale] scales `density` (`UiScaleProvider`'s "both components are scaled"),
  * so at [com.hashtagchow.magehand.core.data.settings.UiScale.LARGE_150] (1.5×) the *physical*
  * screen does not grow — a 360 dp phone (`WindowSizeGateTest`: "the width every layout in this
  * app was designed against") offers only 360 / 1.5 ≈ 240 dp of bar width in the units these
- * controls are declared in. The five non-title elements' *minimum* declared widths — back
- * (`IconButtonDefaults`, 48 dp), Short and Long (`ButtonDefaults.MinWidth`, 58 dp each), history
- * and this button (48 dp each) — already sum to 260 dp, about 20 dp (~8 %) over that budget, next
- * to the ~230 dp (nearly double the budget) the nine-element bar demanded. `AppBarKt`'s title is
- * measured last against whatever is left and floored at zero rather than negative, so the
- * remaining margin is spent on the title vanishing at the single most extreme combination
- * (150 % on the narrowest phone), not on repeating the reported back-arrow collision: Short and
- * Long cannot shrink below their own touch-target floor without failing accessibility, and
- * removing history or a rest button is exactly what the ruling protects against.
+ * controls are declared in. The four non-title elements' *minimum* declared widths — back
+ * (`IconButtonDefaults`, 48 dp), Short and Long (`ButtonDefaults.MinWidth`, 58 dp each) and this
+ * button (48 dp) — sum to 212 dp, which is **inside** that budget by about 28 dp, next to the
+ * 260 dp (~20 dp over) the six-element bar demanded and the ~230 dp overspend of the nine-element
+ * bar before 1.9.1. `AppBarKt`'s title is measured last against whatever is left and floored at
+ * zero rather than negative, so what that margin buys is the concrete thing 1.9.1 had to spend:
+ * at the single most extreme combination (150 % on the narrowest phone) the title keeps a
+ * **sliver** instead of being squeezed to nothing, and the back arrow stops colliding with
+ * "Short". It does not buy a title that *reads* — 58 dp is `ButtonDefaults.MinWidth`, a floor,
+ * and the rest buttons measure nearer 61 dp with their own labels in them, so the real headroom
+ * is closer to 18 dp than to 28. Expect an ellipsis there and treat it as the design's outcome,
+ * not a defect. Short and Long still cannot shrink below their own touch-target floor without
+ * failing accessibility, so that margin is the whole of the headroom — the next control that
+ * wants a place on this bar spends it.
  *
+ * @param history the tracker's session sheet, or `null` when the Tracker tab is not showing —
+ *   gated exactly as [customize] is, since it is that tab's action and nothing else's. FR-39: it
+ *   carries the testTag `tracker:history:open` the app-bar `IconButton` used to, because the tag
+ *   moves surfaces and not names, and the sweep flows address it by name.
  * @param customize the visible tab's own wrench, or `null` when neither tab's customize sheet
  *   applies right now (the Sheet or Actions tab is showing).
  * @param quests the quest log action, or `null` when there is nothing to open it for — a local
@@ -305,6 +358,7 @@ fun HomeOverflowMenu(
     settingsLabel: String,
     onSettings: () -> Unit,
     modifier: Modifier = Modifier,
+    history: HomeOverflowCustomize? = null,
     customize: HomeOverflowCustomize? = null,
     quests: HomeOverflowCustomize? = null,
 ) {
@@ -320,6 +374,15 @@ fun HomeOverflowMenu(
             )
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            // First, and the ordering is the point: everything below opens a settings-ish
+            // destination, while this one opens the log of what this session already did.
+            history?.let { item ->
+                DropdownMenuItem(
+                    text = { Text(stringResource(item.labelRes)) },
+                    onClick = { expanded = false; item.onClick() },
+                    modifier = Modifier.testTag(item.testTag),
+                )
+            }
             customize?.let { item ->
                 DropdownMenuItem(
                     text = { Text(stringResource(item.labelRes)) },

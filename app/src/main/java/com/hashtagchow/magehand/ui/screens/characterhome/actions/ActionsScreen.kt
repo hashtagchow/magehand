@@ -21,7 +21,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -238,11 +237,11 @@ private fun SpellRow(entry: SpellEntry, onClick: () -> Unit, modifier: Modifier 
         modifier = modifier,
     ) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (entry.concentration) Badge(stringResource(R.string.actions_concentration))
-            if (entry.ritual) Badge(stringResource(R.string.actions_ritual))
+            if (entry.concentration) ActionChip(stringResource(R.string.actions_concentration))
+            if (entry.ritual) ActionChip(stringResource(R.string.actions_ritual))
             // Decision 5: from the FIELDS. The two states below can coexist and both show.
-            if (entry.showsUnpreparedBadge) Badge(stringResource(R.string.actions_unprepared))
-            if (entry.inactive) Badge(stringResource(R.string.actions_inactive))
+            if (entry.showsUnpreparedBadge) ActionChip(stringResource(R.string.actions_unprepared))
+            if (entry.inactive) ActionChip(stringResource(R.string.actions_inactive))
         }
         // `castingTime · range`, scalars only (decision 4). Absent halves simply do not appear;
         // there is no placeholder, because a placeholder is a claim.
@@ -267,8 +266,8 @@ private fun ActionEntryRow(entry: ActionEntry, onClick: () -> Unit, modifier: Mo
         modifier = modifier,
     ) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (entry.insufficientResources) Badge(stringResource(R.string.actions_insufficient))
-            if (entry.inactive) Badge(stringResource(R.string.actions_inactive))
+            if (entry.insufficientResources) ActionChip(stringResource(R.string.actions_insufficient))
+            if (entry.inactive) ActionChip(stringResource(R.string.actions_inactive))
         }
         // Local vals: `ActionEntry` lives in :core:model, so its `val`s are not smart-cast
         // across the module boundary and the alternative is a pair of `!!`.
@@ -308,25 +307,34 @@ private fun DamageLines(damage: List<DamageLine>, modifier: Modifier = Modifier)
         val chips = line.chips
         if (chips.isNotEmpty()) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                chips.forEach { RiderChip(damageRiderLabel(it)) }
+                chips.forEach { ActionChip(damageRiderLabel(it)) }
             }
         }
     }
 }
 
 /**
- * A rider, chip-shaped but **not a button**.
+ * Every chip-shaped label on an actions row — riders *and* state badges — chip-shaped but
+ * **not a button**.
  *
- * [Badge] is an `AssistChip`, and a chip is a clickable `Surface` — its own merging semantics
- * node, which the row's `mergeDescendants` does not absorb. The first recording of
- * `ActionsScreenRenderTest` showed the row's merged text as *"Rapier, +5 to hit, d8 + 3
- * piercing"* with the Sneak Attack chip nowhere in it: drawn, and unreachable as part of the
- * sentence. This is a bordered `Text` on a non-clickable surface, so its label merges into the
- * row like the damage line above it does. (The existing badges have the same property; that is
- * BUG-7 in the ledger, not this wave's change.)
+ * `AssistChip` is a clickable `Surface`, so it owns a merging semantics node the row's
+ * `mergeDescendants` does not absorb. The first recording of `ActionsScreenRenderTest` showed
+ * the row's merged text as *"Rapier, +5 to hit, d8 + 3 piercing"* with the Sneak Attack chip
+ * nowhere in it: drawn, and unreachable as part of the sentence. This is a bordered `Text` on a
+ * non-clickable surface, so its label merges into the row like the damage line above it does.
+ *
+ * **BUG-7 (fixed 2026-09-03, FR-39 wave):** the five state badges — *Concentration*, *Ritual*,
+ * *Unprepared*, *Switched off on the sheet*, *Not enough resources* — were an `AssistChip(enabled
+ * = false)` and had exactly the same defect, on labels that matter more than a rider does: a
+ * player who cannot hear *"Not enough resources"* hears a row that is merely dim. FR-36 named
+ * them as BUG-7 rather than fixing them, because doing so redraws every badge and that was a
+ * golden re-record on a release about one row's data. They are this composable now. **One shape,
+ * no variants**: a colour-coded badge would be a second statement about the same word, and the
+ * word is the statement — the two rows below already carry the reason in text rather than in a
+ * colour ("greyed out" alone does not tell a player which of the two to fix).
  */
 @Composable
-private fun RiderChip(label: String, modifier: Modifier = Modifier) {
+private fun ActionChip(label: String, modifier: Modifier = Modifier) {
     Surface(
         shape = MaterialTheme.shapes.small,
         color = MaterialTheme.colorScheme.surface,
@@ -425,11 +433,6 @@ private fun SubText(text: String, modifier: Modifier = Modifier) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = modifier,
     )
-}
-
-@Composable
-private fun Badge(label: String, modifier: Modifier = Modifier) {
-    AssistChip(onClick = {}, enabled = false, label = { Text(label) }, modifier = modifier)
 }
 
 /**

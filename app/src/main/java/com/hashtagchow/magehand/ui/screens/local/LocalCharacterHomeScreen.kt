@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -54,6 +53,7 @@ import com.hashtagchow.magehand.ui.panes.PaneOrderSheet
 import com.hashtagchow.magehand.ui.panes.PanePicker
 import com.hashtagchow.magehand.ui.panes.PaneRow
 import com.hashtagchow.magehand.ui.panes.characterHomeChrome
+import com.hashtagchow.magehand.ui.panes.homeOverflowHistory
 import com.hashtagchow.magehand.ui.panes.localHomeTabs
 import com.hashtagchow.magehand.ui.panes.localPaneSurfaces
 import com.hashtagchow.magehand.ui.panes.resolvePaneLayout
@@ -236,15 +236,6 @@ fun LocalCharacterHomeScreen(
                         ) {
                             Text(stringResource(R.string.tracker_long_rest))
                         }
-                        IconButton(
-                            onClick = { historyOpen = true },
-                            modifier = Modifier.testTag("tracker:history:open"),
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.List,
-                                contentDescription = stringResource(R.string.tracker_history_title),
-                            )
-                        }
                     }
                     if (LocalCharacterHomeTab.Inventory.isShowing(chrome)) {
                         IconButton(
@@ -261,12 +252,20 @@ fun LocalCharacterHomeScreen(
                     // 1.9.1: the wrench(es), pane-order and Edit — every low-frequency action
                     // this bar carries — collapse into one overflow menu, the DiceCloud
                     // screen's fix applied here (this screen has no quests entry — 09
-                    // decision 8's structural absence). See `HomeOverflowMenu`'s KDoc for the
-                    // "six elements max" arithmetic both screens now respect.
+                    // decision 8's structural absence), and FR-39 adds history to that list on
+                    // both screens at once. See `HomeOverflowMenu`'s KDoc for the "five
+                    // elements max" arithmetic both screens now respect.
                     HomeOverflowMenu(
                         onPaneOrder = { paneOrderOpen = true },
                         settingsLabel = stringResource(R.string.action_edit_character),
                         onSettings = { onEdit(uiState.characterId) },
+                        // FR-39, and the same item the DiceCloud screen shows — one definition,
+                        // in `homeOverflowHistory`, for the reason its KDoc gives.
+                        history = if (LocalCharacterHomeTab.Tracker.isShowing(chrome)) {
+                            homeOverflowHistory { historyOpen = true }
+                        } else {
+                            null
+                        },
                         customize = when {
                             LocalCharacterHomeTab.Tracker.isShowing(chrome) -> HomeOverflowCustomize(
                                 labelRes = R.string.customize_title,

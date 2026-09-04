@@ -18,6 +18,7 @@ import com.hashtagchow.magehand.core.model.ActionEntry
 import com.hashtagchow.magehand.core.model.ActionType
 import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.DamageRider
+import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.ui.testing.Sabriel
 import com.hashtagchow.magehand.ui.testing.setMageHandContent
 import org.junit.Rule
@@ -234,5 +235,95 @@ class ActionsScreenRenderTest {
         compose.onNode(inSheet and hasText("+3 Finesse Modifiers")).assertIsDisplayed()
         compose.onNode(inSheet and hasText("+2d6 Sneak Attack")).assertIsDisplayed()
         compose.onAllNodes(inSheet and hasText("d8 + 3 piercing")).assertCountEquals(0)
+    }
+
+    // ---- BUG-7: the five state badges are inside the sentence too --------------
+
+    /**
+     * BUG-7, on the surface it was found on.
+     *
+     * The badges were `AssistChip(enabled = false)` — a clickable `Surface`, so a merging node of
+     * its own that `RowShell`'s `mergeDescendants` does not absorb. Every one of them was drawn
+     * and none of them was *said*: a screen-reader user got "Fireball" where a sighted player got
+     * "Fireball, Concentration, Ritual, Unprepared, Switched off on the sheet". That is worse
+     * than the FR-36 rider this file's first test is about, because these five are the whole
+     * reason a row is dim, and dimness is the other channel a screen reader also cannot see.
+     *
+     * All four spell badges at once, because the four are independent (decision 5: *"the two
+     * states below can coexist and both show"*) and the failure the `AssistChip` had was
+     * per-composable — one badge fixed and three left behind would pass any single-label check.
+     * Asserted as the whole merged text rather than by substring, so the **order** the row speaks
+     * them in is pinned as well: this is one sentence, and a sentence has a word order.
+     */
+    @Test
+    fun `every spell badge lands on the row's merged node, in the order the row draws them`() {
+        val fireball = SpellEntry(
+            propertyId = "s-fireball",
+            name = "Fireball",
+            level = 3,
+            concentration = true,
+            ritual = true,
+            // `prepared` and `alwaysPrepared` both false — `showsUnpreparedBadge` is derived from
+            // the FIELDS, never from `inactive` (decision 5), so the two badges below are two
+            // independent statements and this row deliberately makes both.
+            prepared = false,
+            inactive = true,
+            castingTime = "1 action",
+            range = "150 feet",
+        )
+        compose.setMageHandContent {
+            ActionsScreen(
+                state = toActionsUiState(
+                    creatureId = Sabriel.CREATURE_ID,
+                    board = ActionBoard(spells = listOf(fireball)),
+                    canWrite = false,
+                ),
+                onUse = { _, _, _ -> },
+            )
+        }
+
+        val texts = compose.onNodeWithTag("actions:spell:s-fireball")
+            .fetchSemanticsNode()
+            .config[SemanticsProperties.Text]
+            .map { it.text }
+        assertEquals(
+            listOf(
+                "Fireball",
+                "Concentration",
+                "Ritual",
+                "Unprepared",
+                "Switched off on the sheet",
+                "1 action · 150 feet",
+            ),
+            texts,
+        )
+    }
+
+    /**
+     * The other two badges, on the other row type — and the pair that carries BUG-7's cost most
+     * plainly. `ActionEntryRow` dims for **two independent reasons** and its own comment says why
+     * they are words rather than a colour: *"'greyed out' alone does not tell a player which of
+     * the two to fix"*. Outside the merged node they were not words either, to the one user who
+     * cannot see the grey — so the row said nothing at all about why it could not be used.
+     */
+    @Test
+    fun `both action badges land on the row's merged node, in the order the row draws them`() {
+        val smite = ActionEntry(
+            propertyId = "a-smite",
+            name = "Divine Smite",
+            type = ActionType.ACTION,
+            insufficientResources = true,
+            inactive = true,
+        )
+        compose.setMageHandContent { ActionsScreen(state = stateOf(smite), onUse = { _, _, _ -> }) }
+
+        val texts = compose.onNodeWithTag("actions:action:a-smite")
+            .fetchSemanticsNode()
+            .config[SemanticsProperties.Text]
+            .map { it.text }
+        assertEquals(
+            listOf("Divine Smite", "Not enough resources", "Switched off on the sheet"),
+            texts,
+        )
     }
 }

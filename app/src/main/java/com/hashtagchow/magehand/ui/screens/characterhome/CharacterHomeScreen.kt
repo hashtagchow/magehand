@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,6 +50,7 @@ import com.hashtagchow.magehand.ui.panes.PaneOrderSheet
 import com.hashtagchow.magehand.ui.panes.PanePicker
 import com.hashtagchow.magehand.ui.panes.PaneRow
 import com.hashtagchow.magehand.ui.panes.characterHomeChrome
+import com.hashtagchow.magehand.ui.panes.homeOverflowHistory
 import com.hashtagchow.magehand.ui.panes.resolvePaneLayout
 import com.hashtagchow.magehand.ui.panes.serverHomeTabs
 import com.hashtagchow.magehand.ui.panes.serverPaneSurfaces
@@ -304,24 +304,16 @@ fun CharacterHomeScreen(
                             ) {
                                 Text(stringResource(R.string.tracker_long_rest))
                             }
-                            IconButton(
-                                onClick = { historyOpen = true },
-                                modifier = Modifier.testTag("tracker:history:open"),
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.List,
-                                    contentDescription = stringResource(R.string.tracker_history_title),
-                                )
-                            }
                         }
-                        // FR-8's add affordance lives in the app bar, beside the tracker's
-                        // rest/history actions, for the reason those are there: it belongs to
-                        // *one tab* and the bar is where this screen already puts per-tab
-                        // actions. A FAB would have floated over the last Carried row on every
-                        // scroll, on the one tab that is a long list. It stays on the bar
-                        // rather than moving into the overflow menu below for the same reason
-                        // Short/Long/history do: it is what a player reaches for most on this
-                        // tab, not a once-a-session control.
+                        // FR-8's add affordance lives in the app bar, beside the tracker's rest
+                        // actions, for the reason those are there: it belongs to *one tab* and
+                        // the bar is where this screen already puts per-tab actions. A FAB would
+                        // have floated over the last Carried row on every scroll, on the one tab
+                        // that is a long list. It stays on the bar rather than moving into the
+                        // overflow menu below for the same reason Short and Long do: it is what
+                        // a player reaches for most on this tab, not a once-a-session control.
+                        // (History used to be in that list; FR-39 found it was not — see
+                        // `HomeOverflowMenu`'s KDoc for the supersession.)
                         if (CharacterHomeTab.Inventory.isShowing(chrome)) {
                             IconButton(
                                 onClick = { addItemOpen = true },
@@ -337,14 +329,23 @@ fun CharacterHomeScreen(
                         }
                         // 1.9.1: the wrench(es), quests, pane-order and settings — every
                         // low-frequency action this bar carries — collapse into one overflow
-                        // menu. See `HomeOverflowMenu`'s KDoc for why six is the cap this bar
-                        // now respects and the arithmetic behind it (the operator's screenshot:
-                        // the back arrow overlapping "Short" on a bar that could carry up to
-                        // nine controls at once).
+                        // menu, and FR-39 adds history to that list. See `HomeOverflowMenu`'s
+                        // KDoc for why five is the cap this bar now respects and the arithmetic
+                        // behind it (the operator's screenshot: the back arrow overlapping
+                        // "Short" on a bar that could carry up to nine controls at once).
                         HomeOverflowMenu(
                             onPaneOrder = { paneOrderOpen = true },
                             settingsLabel = stringResource(R.string.action_settings),
                             onSettings = onSettingsClick,
+                            // FR-39: the tracker's session sheet, gated on the same tab the
+                            // wrench below is, since it is that tab's action. Its label and its
+                            // tag are `homeOverflowHistory`'s and not this screen's — unlike the
+                            // wrench, both screens' history item is the same item.
+                            history = if (CharacterHomeTab.Tracker.isShowing(chrome)) {
+                                homeOverflowHistory { historyOpen = true }
+                            } else {
+                                null
+                            },
                             customize = when {
                                 CharacterHomeTab.Tracker.isShowing(chrome) -> HomeOverflowCustomize(
                                     labelRes = R.string.customize_title,

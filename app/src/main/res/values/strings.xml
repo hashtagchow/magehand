@@ -268,6 +268,11 @@
     <string name="tracker_rest_hp_note">The server also applies whatever else this sheet restores on a long rest — hit points, hit dice and any rest triggers on it.</string>
     <string name="tracker_rest_not_undoable">A rest cannot be undone.</string>
     <string name="tracker_rest_confirm">Take the rest</string>
+    <!-- FR-39: the overflow menu's verb, distinct from the sheet's own title below. A menu item
+         names what you are about to do; a sheet header names what you are looking at. "This
+         session" reads as a heading and would read as a non-sequitur in a list beside
+         "Customize tracker" and "Settings". -->
+    <string name="tracker_history_action">History</string>
     <string name="tracker_history_title">This session</string>
     <string name="tracker_history_subtitle">Everything MageHand has sent to DiceCloud since you opened this character. Only the most recent change can be undone.</string>
     <string name="tracker_history_empty">Nothing sent yet.</string>
