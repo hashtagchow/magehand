@@ -90,8 +90,27 @@ data class DdpClientConfig(
      * re-sending a refusal is precisely the storm decision 17 forbids.
      */
     val resubscribeRetryDelay: Duration = 1.seconds,
-    /** Every frame in and out, plus lifecycle notes. Off by default. */
-    val logger: (String) -> Unit = {},
+    /**
+     * Every frame in and out, plus lifecycle notes — or `null`, which means **no logging at
+     * all**, and is the default.
+     *
+     * ### Nullable rather than a no-op lambda
+     *
+     * A `{}` default made the config read nicely and made the release build pay for a log
+     * nobody reads. Since BUG-16 the frame lines are not string concatenations but a JSON
+     * transform and a re-encode ([redactForLog]) on **every inbound frame** — a document batch's
+     * worth of work, thrown away. `DdpClient.log` therefore takes a lambda and asks for the
+     * sink first: no sink, no message built, no frame re-encoded. `DebugLogSinks.sink` returns
+     * `null` for a release build for the same reason, pinned by identity in `DebugLogSinksTest`.
+     *
+     * ### What a sink is handed
+     *
+     * The `login` exchange is **redacted before it gets here** (BUG-16): the outbound method's
+     * params and the matching result's `token` read `<redacted>`, in every direction and for
+     * every sink, so no logger — this one, a test's collector, or one added later — can be the
+     * place a resume token escapes. See [redactForLog] for exactly what survives and why.
+     */
+    val logger: ((String) -> Unit)? = null,
 )
 
 /**
@@ -246,7 +265,7 @@ class DdpClient(
             if (_connectionState.value == ConnectionState.LIVE) {
                 session?.send(subMessage(sub))
             }
-            log("sub ${sub.name} id=${sub.id} params=${sub.params}")
+            log { "sub ${sub.name} id=${sub.id} params=${sub.params}" }
             sub
         }
 
@@ -338,7 +357,7 @@ class DdpClient(
     override fun close() {
         if (closed) return
         closed = true
-        log("closing")
+        log { "closing" }
         runCatching { activeSocket?.close(1000, "client closing") }
         scope.cancel()
         // shutdown(), not shutdownNow(): let queued cancellation work drain first.
@@ -358,21 +377,21 @@ class DdpClient(
                 // A TimeoutCancellationException from an inner withTimeout is not *our*
                 // cancellation: only bail out when the loop itself was cancelled.
                 if (!currentCoroutineContext().isActive) throw cancel
-                log("session aborted: $cancel")
+                log { "session aborted: $cancel" }
             } catch (auth: AuthRejected) {
-                log("login rejected: ${auth.error.message}")
+                log { "login rejected: ${auth.error.message}" }
                 authError = auth.error
                 _connectionState.value = ConnectionState.AUTH_FAILED
                 return
             } catch (t: Throwable) {
-                log("session ended: $t")
+                log { "session ended: $t" }
             }
             if (closed || !currentCoroutineContext().isActive) return
             if (reachedLive) attempt = 0
             val wait = config.backoff.delayMillis(attempt)
             attempt++
             _connectionState.value = ConnectionState.CONNECTING
-            log("reconnecting in ${wait}ms (attempt $attempt)")
+            log { "reconnecting in ${wait}ms (attempt $attempt)" }
             delay(wait)
         }
     }
@@ -401,7 +420,7 @@ class DdpClient(
                         )
                         sessionId = current.connected.await()
                     }
-                    log("connected session=$sessionId")
+                    log { "connected session=$sessionId" }
 
                     // The resync window opens the moment the session does, NOT after
                     // login: the live server pushes the `users` document as part of the
@@ -452,7 +471,7 @@ class DdpClient(
             throw AuthRejected(error)
         }
         _userId.value = (result as? JsonObject)?.get("id")?.let { (it as? JsonPrimitive)?.contentOrNull }
-        log("logged in as ${_userId.value}")
+        log { "logged in as ${_userId.value}" }
     }
 
     /**
@@ -518,7 +537,7 @@ class DdpClient(
                 // Re-read across the delay above: `pending` may name a subscription
                 // that has since been unsubscribed. See the KDoc.
                 if (!subscriptions.containsKey(sub.id)) {
-                    log("skipping replay of ${sub.name} id=${sub.id} — unsubscribed mid-replay")
+                    log { "skipping replay of ${sub.name} id=${sub.id} — unsubscribed mid-replay" }
                     continue
                 }
                 sub.onDisconnected()
@@ -543,7 +562,7 @@ class DdpClient(
         scope.launch {
             delay(config.resubscribeRetryDelay)
             if (closed || session !== refusedOn || !subscriptions.containsKey(sub.id)) return@launch
-            log("retrying refused replay of ${sub.name} id=${sub.id}")
+            log { "retrying refused replay of ${sub.name} id=${sub.id}" }
             refusedOn.send(subMessage(sub))
         }
     }
@@ -571,11 +590,24 @@ class DdpClient(
         if (!mirror.isResyncing) return
         if (subscriptions.values.all { it.readyOnWire }) {
             mirror.endResync()
-            log("mirror resync complete: ${mirror.snapshot().mapValues { it.value.size }}")
+            log { "mirror resync complete: ${mirror.snapshot().mapValues { it.value.size }}" }
         }
     }
 
-    private fun log(message: String) = config.logger(message)
+    /**
+     * Hands [message]'s result to the sink, and does not call [message] at all when there is
+     * none (review M2).
+     *
+     * `inline` so the lambda is not even allocated. This shape is load-bearing rather than
+     * tidy: since BUG-16 an inbound frame's log line costs a JSON transform and a re-encode, and
+     * a release build with no sink was paying that on every frame the server sent. The rule is
+     * "ask for the sink first"; nothing below may build a log string outside one of these
+     * lambdas.
+     */
+    private inline fun log(message: () -> String) {
+        val sink = config.logger ?: return
+        sink(message())
+    }
 
     // ------------------------------------------------------------------ session
 
@@ -644,11 +676,21 @@ class DdpClient(
             }
         }
 
+        /**
+         * The socket gets the real frame; the log gets [redactForLog]'s (BUG-16).
+         *
+         * The two encodings are produced separately on purpose. Redacting the string we are about
+         * to send would mean sending a `login` with no token in it, which is the class of bug this
+         * kind of change invites — so `text` is what goes out and is never touched.
+         */
         fun send(message: JsonObject): Boolean {
             val text = json.encodeToString(JsonObject.serializer(), message)
-            log("→ $text")
+            log { "→ ${redactForLog(message, ::pendingMethodOf)}" }
             return socket.send(text)
         }
+
+        /** The method a still-open call was made for, or `null`. [redactForLog]'s lookup. */
+        private fun pendingMethodOf(id: String): String? = pendingCalls[id]?.method
 
         fun beginCall(method: String, params: List<JsonElement>): PendingCall {
             val id = methodCounter.incrementAndGet().toString()
@@ -715,14 +757,14 @@ class DdpClient(
                     // MUST be caught before CancellationException: a rethrown
                     // TimeoutCancellationException would just kill this coroutine and
                     // leave a dead socket open forever.
-                    log("no pong within ${config.heartbeatTimeout} — dropping socket")
+                    log { "no pong within ${config.heartbeatTimeout} — dropping socket" }
                     pendingPongs.remove(id)
                     socket.close(4000, "ddp heartbeat timeout")
                     return
                 } catch (cancel: CancellationException) {
                     throw cancel
                 } catch (t: Throwable) {
-                    log("heartbeat failed ($t) — dropping socket")
+                    log { "heartbeat failed ($t) — dropping socket" }
                     pendingPongs.remove(id)
                     socket.close(4000, "ddp heartbeat failure")
                     return
@@ -751,18 +793,35 @@ class DdpClient(
             if (terminated) return
             terminated = true
             terminalCause = cause
-            log("socket down: ${cause.message}")
+            log { "socket down: ${cause.message}" }
             signals += { failPending(cause) }
         }
 
+        /**
+         * PARSE FIRST, THEN LOG (BUG-16). This used to log the raw text on the way in, which put
+         * the `login` result's token — and so the resume token itself — into logcat on every
+         * debug connection. A frame can only be redacted once it is a frame, so the parse moved
+         * above the log line and the log prints [redactForLog]'s encoding.
+         *
+         * Anything that is **not** a well-formed frame object still logs verbatim: an unparseable
+         * frame is not something the server sent us in a shape we can reason about, and seeing
+         * its actual bytes is the whole repro value. Same for a parse that yields something other
+         * than an object — Meteor's SockJS heartbeats are bare strings.
+         */
         private fun handleText(text: String) {
-            log("← $text")
-            val message = try {
-                Json.parseToJsonElement(text) as? JsonObject
+            val parsed = try {
+                Json.parseToJsonElement(text)
             } catch (t: Throwable) {
-                log("unparseable frame ($t): $text")
-                null
-            } ?: return
+                log { "← $text" }
+                log { "unparseable frame ($t): $text" }
+                return
+            }
+            val message = parsed as? JsonObject
+            if (message == null) {
+                log { "← $text" }
+                return
+            }
+            log { "← ${redactForLog(message, ::pendingMethodOf)}" }
 
             when (message.str("msg")) {
                 // Meteor's SockJS heartbeat frames have no "msg" at all — ignored above.
@@ -858,7 +917,7 @@ class DdpClient(
                     if (refusedReplay != null) {
                         refusedReplay.replayRetryArmed = false // the retry is spent here
                         refusedReplay.readyOnWire = false
-                        log("nosub for replayed ${refusedReplay.name} (${error?.reason}) — one retry")
+                        log { "nosub for replayed ${refusedReplay.name} (${error?.reason}) — one retry" }
                         // No maybeEndResync(): this sub has not gone ready, and it must
                         // keep the resync window open until the retry is answered.
                         retryRefusedReplay(this@Session, refusedReplay)
@@ -898,7 +957,12 @@ class DdpClient(
                     }
                 }
 
-                "error" -> log("server protocol error: $text")
+                // `reason` only, NOT `$text` (review M1). The frame body is already on the
+                // line above, redacted — and an `error` echoes the frame it refused in
+                // `offendingMessage`, so re-logging the raw text here would have put a refused
+                // `login`'s token back in the log one line under the copy that had just been
+                // scrubbed out of it.
+                "error" -> log { "server protocol error: ${message.str("reason")}" }
 
                 else -> Unit
             }

@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.ui.testing
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
+import com.github.takahirom.roborazzi.ExperimentalRoborazziApi
 import com.github.takahirom.roborazzi.captureScreenRoboImage
 import com.hashtagchow.magehand.core.data.settings.UiScale
 import java.io.File
@@ -79,6 +80,12 @@ fun ComposeContentTestRule.captureGolden(
  * reachable at all from a static preview renderer. Callers `setMageHandContent`, drive the UI with
  * the ordinary Compose finders, then call this.
  */
+// `captureScreenRoboImage` is @ExperimentalRoborazziApi — the whole-screen capture is newer than
+// the composable-scoped one. Opted in here, at the single call site the corpus has, rather than
+// module-wide: the annotation is Roborazzi telling us this signature may move, and one call site
+// is the cost of that move. Left as a warning it was the one warning
+// `compileDebugUnitTestKotlin` carried (BUG-12's leftover).
+@OptIn(ExperimentalRoborazziApi::class)
 fun ComposeContentTestRule.commitGolden(name: String) {
     // Sheets animate in, and a golden of a half-open sheet would be a golden of the animation
     // clock rather than of the layout. The rule's own idling is what settles that.

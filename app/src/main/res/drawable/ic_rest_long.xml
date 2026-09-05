@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Long rest — a crescent moon.
+
+  Vendored glyph: `brightness_3`, filled, from Google's Material icon set
+  (Material Symbols / Material Icons), 24 dp grid, transcribed verbatim into an
+  Android vector drawable. Licensed under the Apache License, Version 2.0
+  (https://www.apache.org/licenses/LICENSE-2.0). Copyright Google LLC.
+
+  Vendored rather than taken from `material-icons-extended`, which is ~50 MB for a
+  handful of glyphs — see the note beside `androidx-compose-material-icons-core` in
+  gradle/libs.versions.toml. Two drawables cost two files.
+
+  `fillColor` is opaque black on purpose: Compose's `Icon` tints a painter with
+  `LocalContentColor`, so the app bar's own colours (and `mageHandIconButtonColors`'
+  disabled treatment) apply exactly as they do to every `ImageVector` icon here.
+  FR-43 draws it in place of the "Long" text button below 284 dp.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M9,2c-1.05,0 -2.05,0.16 -3,0.46c4.06,1.27 7,5.06 7,9.54s-2.94,8.27 -7,9.54C6.95,21.84 7.95,22 9,22c5.52,0 10,-4.48 10,-10S14.52,2 9,2z" />
+</vector>

@@ -2,9 +2,11 @@ package com.hashtagchow.magehand.ui.golden
 
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.data.settings.PaneSurface
 import com.hashtagchow.magehand.core.data.settings.UiScale
 import com.hashtagchow.magehand.core.model.ActionBoard
@@ -13,7 +15,11 @@ import com.hashtagchow.magehand.core.model.ActionEntry
 import com.hashtagchow.magehand.core.model.ActionType
 import com.hashtagchow.magehand.core.model.ActionUses
 import com.hashtagchow.magehand.core.model.CostLine
+import com.hashtagchow.magehand.ui.panes.HomeOverflowCustomize
+import com.hashtagchow.magehand.ui.panes.HomeOverflowMenu
 import com.hashtagchow.magehand.ui.panes.PaneRow
+import com.hashtagchow.magehand.ui.panes.homeOverflowHistory
+import com.hashtagchow.magehand.ui.screens.characterhome.HomeAppBar
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsScreen
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.toActionsUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
@@ -57,6 +63,12 @@ import org.robolectric.annotation.GraphicsMode
  *
  * Both are measuring outcomes, so both are pictures. `PaneSelectionTest`'s `FlowRow` scan and
  * `InventoryLayoutTest`'s rules cover the code; these cover the result.
+ *
+ * The character-home **app bar** joined them in 1.14.2 for the same reason arrived at the hard
+ * way: FR-39 and its device sweep disagreed about what its title does at 150 %, and neither side
+ * had a picture. The first recording settled it and found worse — BUG-17, the back arrow drawing
+ * under the "S" of "Short" — which FR-43 then fixed inside the same wave. Both sides of FR-43's
+ * threshold are photographed: `HomeAppBar_320_150` compact, `HomeAppBar_360_100` unchanged.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @RunWith(RobolectricTestRunner::class)
@@ -93,6 +105,75 @@ class NarrowWidthGoldenTest {
         compose.onNodeWithTag("inventory:add:mode").performClick()
 
         compose.commitGolden("AddItemSheet_custom_narrow")
+    }
+
+    /**
+     * **The app bar FR-39 argued about, photographed** (FR-39's review leftover, 1.14.2).
+     *
+     * FR-39 moved history into the overflow menu on a widths argument: five elements — back 48 +
+     * Short 58 + Long 58 + overflow 48 = 212 dp — against ~240 dp at 150 % on a 360 dp phone, so
+     * "the title keeps a sliver". The 1.14.1 device sweep then found the title rendering **zero**
+     * characters at 150 % on a ~393 dp profile. The whole exchange was conducted in arithmetic
+     * because no golden has ever drawn this bar.
+     *
+     * This is the before-picture, at the narrowest width the app supports rather than at the
+     * sweep's: 320 dp × 150 %, the worst case, with the Tracker tab showing so the bar carries
+     * everything it can carry — back, title, Short, Long, overflow. It pins whatever the bar
+     * draws **today**, a vanished title included; that is the point. FR-43 is where a title
+     * strategy at ≥150 % is decided, and this picture is what that decision gets to argue with.
+     *
+     * The Inventory add action is deliberately absent: it belongs to the other tab, and the
+     * crowded case is the Tracker one.
+     */
+    @Test
+    fun `the character-home app bar on the narrowest phone`() {
+        compose.captureGolden("HomeAppBar_320_150", scale = UiScale.LARGE_150) { trackerAppBar() }
+    }
+
+    /**
+     * **The other side of FR-43's threshold**, and the width most players are actually on: 360 dp
+     * at 100 %, comfortably above `HOME_APP_BAR_COMPACT_WIDTH`, so Short and Long are still text
+     * buttons and the title is drawn in full.
+     *
+     * This picture is here because the fix's real risk is not that compact looks wrong — that is
+     * what the 320 dp golden watches — but that a fit rule silently reaches a width it was never
+     * meant to. Ruling 1 says every width at or above 284 dp renders exactly what 1.14.1
+     * rendered, and this is the assertion of that claim a human can check at a glance.
+     */
+    @Test
+    @Config(sdk = [34], qualifiers = "w360dp-h800dp-xhdpi")
+    fun `the character-home app bar at the common phone width`() {
+        compose.captureGolden("HomeAppBar_360_100") { trackerAppBar() }
+    }
+
+    /** The bar as the Tracker tab hands it over, at whatever width the qualifier gives it. */
+    @Composable
+    private fun trackerAppBar() {
+        HomeAppBar(
+            title = Sabriel.NAME,
+            onBack = {},
+            trackerShowing = true,
+            inventoryShowing = false,
+            trackerCanWrite = true,
+            inventoryCanWrite = false,
+            onShortRest = {},
+            onLongRest = {},
+            onAddItem = {},
+        ) {
+            // The menu as the Tracker tab hands it over, so the overflow button is the real
+            // one and carries its real tag — the bar's fifth element, at its real width.
+            HomeOverflowMenu(
+                onPaneOrder = {},
+                settingsLabel = stringResource(R.string.action_settings),
+                onSettings = {},
+                history = homeOverflowHistory {},
+                customize = HomeOverflowCustomize(
+                    labelRes = R.string.customize_title,
+                    testTag = "tracker:customize:open",
+                    onClick = {},
+                ),
+            )
+        }
     }
 
     @Test

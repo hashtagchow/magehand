@@ -340,6 +340,16 @@ fun homeOverflowHistory(onClick: () -> Unit) = HomeOverflowCustomize(
  * failing accessibility, so that margin is the whole of the headroom — the next control that
  * wants a place on this bar spends it.
  *
+ * **FR-43 (1.14.2) bought some of it back, after the arithmetic above turned out to be
+ * optimistic.** The first app-bar golden showed the back arrow drawing *under* the "S" of
+ * "Short" at 320 dp × 150 % — ~213 dp of budget, not 240 — which is BUG-17. `HomeAppBar` now
+ * measures the width it was actually given and, below 284 dp (this 212 dp plus a 72 dp title
+ * allowance), draws Short and Long as icon buttons: 48 dp each instead of ~61, so the four
+ * non-title elements fall to 192 dp and the title keeps ~21 dp at that corner rather than
+ * nothing. It is a fit rule and not a scale rule — see `HOME_APP_BAR_COMPACT_WIDTH` — so every
+ * width at or above 284 dp, which is every phone at 100 %, renders exactly the bar this
+ * paragraph describes.
+ *
  * @param history the tracker's session sheet, or `null` when the Tracker tab is not showing —
  *   gated exactly as [customize] is, since it is that tab's action and nothing else's. FR-39: it
  *   carries the testTag `tracker:history:open` the app-bar `IconButton` used to, because the tag

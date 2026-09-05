@@ -403,6 +403,73 @@ class ActionEngineTest {
     }
 
     // -----------------------------------------------------------------------
+    // BUG-10 — a WRAPPED NUMERIC base is the server's own characters
+    // -----------------------------------------------------------------------
+
+    /**
+     * **BUG-10.** A damage `amount.value` published as a JSON *number* rather than a dice string
+     * used to be read through `CreatureSheet.number`, an `Int` reader whose
+     * `toDoubleOrNull()?.toInt()` truncates — so `2.5` reached the row as `"2"` and the app
+     * printed a number the sheet never published. That is BUG-8's hazard on the base rather than
+     * on a rider, and the path is live: two of the capture's seventeen damage rows publish a
+     * numeric `amount.value` (pinned below, against the capture).
+     *
+     * The fix reads the primitive's own `content`, the rule `riderAmount` already applied. The
+     * three shapes here are the whole contract: a fraction survives whole, an integer is
+     * unchanged (so nothing that renders today renders differently), and a non-number is still
+     * absent.
+     *
+     * `damageType` is asserted beside the amount because the headline a player reads is the two
+     * of them joined by `R.string.actions_damage` — *"2.5 radiant"*.
+     */
+    @Test
+    fun `a wrapped fractional base keeps the server's own digits and never truncates`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Numbers"); put("actionType", "action") },
+                prop("d1", "damage", parent = "a") {
+                    put("amount", buildJsonObject { put("calculation", "2.5"); put("value", 2.5) })
+                    put("damageType", "radiant")
+                    put("order", 1)
+                },
+                prop("d2", "damage", parent = "a") {
+                    calc("amount", "60", 60); put("damageType", "force")
+                    put("order", 2)
+                },
+            ),
+        )
+
+        val lines = board.actions.single().damage
+        assertEquals(listOf("2.5", "60"), lines.map { it.base })
+        assertEquals(
+            "the headline is the verbatim base — 2.5 radiant, not 2 radiant",
+            listOf("2.5", "60"),
+            lines.map { it.amount },
+        )
+        assertEquals(listOf("radiant", "force"), lines.map { it.damageType })
+    }
+
+    /**
+     * **BUG-10, the other side of the guard.** The branch answers for *numbers* and only for
+     * numbers: the type test is `toDoubleOrNull() != null` on the primitive's own text, so a
+     * wrapped boolean resolves to nothing and the row is dropped — exactly what it did before
+     * the fix, and exactly what a row with no computed amount at all does.
+     */
+    @Test
+    fun `a wrapped boolean is still not an amount and the row is dropped`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("a", "action") { put("name", "Nonsense"); put("actionType", "action") },
+                prop("d", "damage", parent = "a") {
+                    put("amount", buildJsonObject { put("value", true) })
+                    put("damageType", "psychic")
+                },
+            ),
+        )
+        assertEquals(emptyList<Any>(), board.actions.single().damage)
+    }
+
+    // -----------------------------------------------------------------------
     // FR-36 — the riders beside `amount.value`
     // -----------------------------------------------------------------------
 
@@ -1331,6 +1398,68 @@ class ActionEngineTest {
     }
 
     /**
+     * **BUG-10 against the capture**: every damage row the server published as a *number* reaches
+     * the surface as that number's own characters.
+     *
+     * This is the half that makes BUG-10 a live defect rather than a hypothetical one. The
+     * ledger's claim is that two of the capture's seventeen damage rows publish `amount.value`
+     * as a JSON number rather than a dice string, and the guard below is what keeps this test
+     * honest if a re-capture ever loses them: no numeric row, no proof, and the test says so
+     * instead of passing on an empty list.
+     *
+     * The comparison is a **multiset containment**, for the reason
+     * `every effect-bearing damage row…` gives: pairing a rendered line back to its source
+     * property would mean re-deriving the walk the engine just performed. Every damage property
+     * renders exactly one line (pinned by `both damage shapes occur in the capture…`), so each
+     * expected content must be findable among the rendered bases, and removing it as it is found
+     * makes two rows publishing the same number need two rendered lines.
+     *
+     * Derived, never declared — no property id, no feature name, no character name here.
+     */
+    @Test
+    fun `every numeric damage amount in the capture reaches the row as its own characters`() {
+        val properties = Fixtures.sabrielSheet().livePropertyList
+
+        /** `amount.value` when it is a non-string primitive — the shape BUG-10 truncated. */
+        fun numericValueOf(property: JsonObject): String? =
+            ((property["amount"] as? JsonObject)?.get("value") as? JsonPrimitive)
+                ?.takeIf { it !is JsonNull && !it.isString }
+                ?.content
+                ?.takeIf { it.toDoubleOrNull() != null }
+
+        val expected = properties
+            .filter { it.string("type") == "damage" }
+            .mapNotNull { numericValueOf(it) }
+
+        // The COUNT, not merely "at least one" (review L1). Two is what the 2026-08-17 capture
+        // holds and what BUG-10's ledger cell claims, and the number is the claim: a re-capture
+        // that grows a third numeric row — a fractional one, say — is exactly the event this
+        // pin exists for, and "isNotEmpty" would have absorbed it silently. A red here is a
+        // signal to look at the new row and then update this number, not a failure to paper
+        // over.
+        assertEquals(
+            "the capture must carry exactly the two damage rows whose amount.value is a JSON " +
+                "number that BUG-10's ledger cell counts — none means this test proves nothing, " +
+                "and more means the capture changed and wants reading",
+            2,
+            expected.size,
+        )
+
+        val board = ActionEngine.build(Fixtures.sabrielSheet())
+        val rendered = (board.actions.flatMap { it.damage } + board.spells.flatMap { it.damage })
+            .map { it.base }
+            .toMutableList()
+
+        expected.forEach { content ->
+            assertTrue(
+                "a numeric amount.value must reach the row verbatim; '$content' is not among " +
+                    "the rendered bases, which is what an Int reader truncating it looks like",
+                rendered.remove(content),
+            )
+        }
+    }
+
+    /**
      * **FR-36 against the capture** (review finding 6): every effect-bearing damage row on the
      * real sheet, folded from the server's own signed numbers.
      *
@@ -1373,15 +1502,20 @@ class ActionEngineTest {
         // signed term per non-zero whole-integer `add`, in array order. Everything else chips.
         //
         // `base` follows production's own rule for the field — a string `value` if there is one,
-        // otherwise a wrapped number stringified (review L2). Every effect-bearing row in the
-        // 2026-08-17 capture is a dice string, but two of its seventeen damage rows publish a
-        // NUMERIC `amount.value`, so a re-capture where one of those grows an effect would
-        // otherwise fail here with a diff about the base rather than about the fold — a red that
-        // points at the wrong thing. (That the engine reads a numeric base through an `Int`
-        // reader, and so truncates `2.5`, is BUG-10 and not this test's claim.)
+        // otherwise the numeric primitive's own characters (review L2, corrected by BUG-10's fix:
+        // this used to stringify through the `Int` reader and so agreed with a base the engine
+        // truncated). Every effect-bearing row in the 2026-08-17 capture is a dice string, but two
+        // of its seventeen damage rows publish a NUMERIC `amount.value`, so a re-capture where one
+        // of those grows an effect would otherwise fail here with a diff about the base rather
+        // than about the fold — a red that points at the wrong thing.
         val expected = effectBearing.map { property ->
             val amount = property["amount"] as? JsonObject
-            val base = amount?.string("value") ?: amount?.number("value")?.toString().orEmpty()
+            val base = amount?.string("value")
+                ?: ((amount?.get("value") as? JsonPrimitive)
+                    ?.takeIf { it !is JsonNull && !it.isString }
+                    ?.content
+                    ?.takeIf { it.toDoubleOrNull() != null })
+                    .orEmpty()
             val terms = effectsOf(property)
                 .filter { it.string("operation") == "add" }
                 .mapNotNull { amountTextOf(it) }

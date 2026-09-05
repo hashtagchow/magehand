@@ -126,8 +126,43 @@ android {
         // silently: FR-39 **reverses** 1.9.1's ruling that history belongs on the bar. The
         // supersession, its date and its reason are in `HomeOverflowMenu`'s KDoc, next to the
         // paragraph it supersedes, which is kept.
-        versionCode = 26
-        versionName = "1.14.1"
+        // 27 / 1.14.2 carries BUG-10 and BUG-16 with three ride-alongs. BUG-10: a damage
+        // `amount.value` published as a JSON number was read through an `Int` reader, so a
+        // wrapped `2.5` rendered *"2 radiant"* — a number the sheet never published, on a live
+        // path (two of the capture's seventeen damage rows). It now reads the primitive's own
+        // characters, the rule the riders already used. BUG-16: a debug build logged the whole
+        // `login` exchange, resume token and all, into a logcat that Maestro copies into every
+        // sweep flow's output — the frame log now redacts that exchange at the source, before
+        // any sink sees it. Riding along: BUG-12's owed snapshot-README rows and its
+        // `ExperimentalRoborazziApi` warning, FR-39's app-bar golden (`HomeAppBar` extracted from
+        // the screen's `topBar` as a pure move so a picture could exist at all), and FR-40's
+        // two cosmetic tooling LOWs. That golden then caught **BUG-17** — at 320 dp × 150 % the
+        // back arrow drew under the "S" of "Short" and the title rendered nothing — and on the
+        // operator's word the fix rides here too: **FR-43**, a fit rule, draws Short and Long as
+        // icon buttons below 284 dp of measured bar width, on both home screens, which returns
+        // ~10–12 dp each to the title (48 dp against a 58 dp floor, ~60 dp in practice) — a
+        // small saving, and the whole of the difference between no title and a legible one. A **PATCH**, by the boundary 25 drew and 26 applied: no
+        // surface gains a capability. BUG-10 corrects what a row already drew; BUG-16 takes the
+        // resume token out of the debug frame log AND, after the pre-release review's M2, takes
+        // the frame log itself out of the release build entirely — `DdpClientConfig.logger` and
+        // `WriteQueueConfig.logger` are nullable now and a release wires `null`, so no frame is
+        // redacted, re-encoded or even concatenated when nobody is listening (the old no-op sink
+        // still had to be handed a string); the golden and the README are test material, and the
+        // tooling changes nothing about a successful run. FR-43 is a patch by the same test and
+        // it is worth saying why, since it is the one item here a player will see: the rest
+        // buttons **do the same thing in a smaller coat**. Same two actions, same two tags, same
+        // `enabled`, and the strings that were their labels are now their content descriptions,
+        // so a screen reader speaks the sentence it always spoke. Nothing new can be done; a
+        // collision stopped happening. No schema moves and no stored key is
+        // written that an earlier build cannot read. `exportContract` re-runs at the bump and
+        // its **discovery vectors are byte-identical** — the only change is the manifest's
+        // `sourceCommit`/`generatedOn` stamp. Worth stating in as many words, because BUG-10 is
+        // a change to what the app reads off the wire: **a corrected reader is not a schema
+        // move.** The contract describes the shapes DiceCloud publishes and which of them the
+        // engine acts on; both are exactly what they were. What changed is that the app stopped
+        // mis-transcribing one of them.
+        versionCode = 27
+        versionName = "1.14.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

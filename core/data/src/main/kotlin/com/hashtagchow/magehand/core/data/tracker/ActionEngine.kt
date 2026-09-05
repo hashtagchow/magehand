@@ -428,6 +428,12 @@ object ActionEngine {
      * dice string like `"2d4 + 2"`, and [number] would either fail or — worse — succeed on the
      * leading digit and print *"2 necrotic"* for `2d8`. See [text].
      *
+     * The base is now the server's own characters in the numeric case too (BUG-10, fixed in
+     * 1.14.2): [text]'s wrapped-number branch reads the `value` primitive's `content` rather
+     * than routing it through [number], so a `{"amount": {"value": 2.5}}` row renders *"2.5
+     * radiant"* and no longer truncates to a number the sheet never published. That is the rule
+     * [riderAmount] already applied to the riders, applied to the line they hang off.
+     *
      * A damage row with no computed amount is dropped rather than rendered as a bare damage
      * type: *"necrotic"* on its own is not information a player can act on, and an empty line
      * beside a real one reads as a rendering fault.
@@ -604,12 +610,22 @@ object ActionEngine {
      * evidence nobody has. If a sheet ever publishes one, this is the note saying where the
      * one-line change goes.
      *
-     * The wrapped-number path has a defect of its own, and it is **not** fixed here: [number] is
-     * an `Int` reader, so a wrapped `2.5` becomes `"2"` and the row prints a number the server
-     * never published — BUG-8's hazard, on the *base* rather than on a rider. Ledgered as
-     * BUG-10 for the next wave, which is where a verbatim/`decimal` reader for the base belongs.
-     * `ActionEngine`'s damage **riders** do not depend on any of this any more: they read their
-     * own primitive (see `riderAmount`).
+     * ### The wrapped number is the server's own characters (BUG-10, fixed 1.14.2)
+     *
+     * That path used to run through [number], an `Int` reader whose `toDoubleOrNull()?.toInt()`
+     * truncates: a wrapped `2.5` became `"2"` and the row printed a number the server never
+     * published — BUG-8's hazard, on the *base* rather than on a rider. It now takes the
+     * `value` primitive's own `content`, exactly as `riderAmount` does: `2.5` renders `2.5`,
+     * `60` still renders `60`, and nothing is re-formatted, because nothing is parsed and
+     * re-printed. A `decimal` route was declined for that reason — a `Double` rendered back is
+     * `2.0` for a server `2`, which is the app publishing its own number by another door.
+     *
+     * The guard is `toDoubleOrNull() != null`, so the branch still answers only for *numbers*:
+     * a wrapped `true` reads as absent exactly as it did before, and a wrapped object (a nested
+     * wrapper, which no capture has ever shown) is absent too rather than being unwrapped a
+     * second time. The fix widens to all seven call sites deliberately — every one of them
+     * truncated a fractional wrapped number, because the defect was in the reader and not in
+     * the row.
      *
      * Blank is normalised to `null` so every caller's "absent reads as absent" holds without each
      * one repeating a `takeIf`.
@@ -617,7 +633,29 @@ object ActionEngine {
     private fun JsonObject.text(key: String): String? = when (val element = this[key]) {
         is JsonObject -> element.string("text")
             ?: element.string("value")
-            ?: element.number("value")?.toString()
+            ?: element.numberText("value")
         else -> string(key)
     }?.takeIf { it.isNotBlank() }
+
+    /**
+     * A **non-string** numeric primitive, as the characters the server sent (BUG-10).
+     *
+     * The last resort of [text]'s wrapper branch, reached only once `text` and a string `value`
+     * are both absent. `toDoubleOrNull()` is the whole type test: it says "this is a number"
+     * without ever producing one, so `2.5` stays `"2.5"` and `60` stays `"60"` — no `Int`
+     * truncation, no `Double` re-rendering, no re-formatting of any kind. `true` and `null` fail
+     * it and read as absent, which is what they did before the fix.
+     *
+     * This is `riderAmount`'s **spirit**, not its rule, and the two differences are deliberate
+     * (review NIT-3). `riderAmount` accepts a *string* primitive and trims it, because an effect
+     * publishing `{"value": " 3"}` is the server saying three and a rider that chipped over a
+     * space would be reporting a formatting artefact as a fact. Neither applies here: a string
+     * `value` never reaches this function — [text]'s own `string("value")` answered one branch
+     * earlier, untrimmed, as it has since 1.9.1 — so this sees non-strings only, and a JSON
+     * number has no padding to trim.
+     */
+    private fun JsonObject.numberText(key: String): String? = (this[key] as? JsonPrimitive)
+        ?.takeIf { it !is JsonNull && !it.isString }
+        ?.content
+        ?.takeIf { it.toDoubleOrNull() != null }
 }

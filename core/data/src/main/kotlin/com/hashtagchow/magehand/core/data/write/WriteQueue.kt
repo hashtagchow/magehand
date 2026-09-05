@@ -54,7 +54,15 @@ data class WriteQueueConfig(
      * before the fight?").
      */
     val historyDepth: Int = 100,
-    val logger: (String) -> Unit = {},
+    /**
+     * Where coalescing, rate-limit retries and dropped calls are reported — or `null`, "nobody
+     * is listening", which is the default and what a release build wires (`DebugLogSinks`).
+     *
+     * Nullable rather than a no-op lambda (1.14.2 review M2): every call site here builds an op
+     * description, and a no-op sink still had to be handed one. [WriteQueue.log] asks for the
+     * sink first, so a release build builds no string at all.
+     */
+    val logger: ((String) -> Unit)? = null,
 )
 
 /**
@@ -110,6 +118,19 @@ class WriteQueue(
 
     /** One dispatchable unit: a (possibly coalesced) op plus every submission behind it. */
     private class Entry(var op: WriteOp, val submissions: MutableList<Submission>)
+
+    /**
+     * Hands [message]'s result to the sink, and does not call [message] when there is none
+     * (1.14.2 review M2 — the same shape `DdpClient.log` uses, for the same reason).
+     *
+     * Every line this queue logs interpolates an op description, and this path runs on every
+     * coalesce, every rate-limit retry and every dropped call. `inline` so no lambda is
+     * allocated either.
+     */
+    private inline fun log(message: () -> String) {
+        val sink = config.logger ?: return
+        sink(message())
+    }
 
     private val lock = Any()
     private val queue = ArrayDeque<Entry>()
@@ -416,7 +437,7 @@ class WriteQueue(
      */
     private suspend fun dispatch(entry: Entry) {
         if (entry.op is WriteOp.Noop) {
-            config.logger("write: coalesced away ${entry.submissions.size} op(s)")
+            log { "write: coalesced away ${entry.submissions.size} op(s)" }
             resolve(entry, null)
             return
         }
@@ -466,16 +487,16 @@ class WriteQueue(
             } catch (e: DdpError) {
                 e
             } catch (e: DdpConnectionException) {
-                config.logger("write: ${op.description} lost its connection — not replayed")
+                log { "write: ${op.description} lost its connection — not replayed" }
                 return e
             }
 
             if (!op.isReplayable) {
-                config.logger("write: ${op.description} failed and is never replayed")
+                log { "write: ${op.description} failed and is never replayed" }
                 return error
             }
             if (!error.isRateLimit || attempt == 1) return error
-            config.logger("write: rate limited, retrying ${op.description} once")
+            log { "write: rate limited, retrying ${op.description} once" }
             delay(config.rateLimitBackoffMillis)
             if (connectionState.value != ConnectionState.LIVE) {
                 return WriteRefusedException(connectionState.value)

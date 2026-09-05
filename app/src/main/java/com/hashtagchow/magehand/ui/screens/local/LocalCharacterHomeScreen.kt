@@ -8,12 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarDuration
@@ -22,8 +17,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -36,7 +29,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -59,6 +51,7 @@ import com.hashtagchow.magehand.ui.panes.localPaneSurfaces
 import com.hashtagchow.magehand.ui.panes.resolvePaneLayout
 import com.hashtagchow.magehand.ui.panes.surface
 import com.hashtagchow.magehand.ui.window.LocalExpandedWidth
+import com.hashtagchow.magehand.ui.screens.characterhome.HomeAppBar
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsScreen
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
@@ -73,7 +66,6 @@ import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerCustomiz
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerHistorySheet
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.TrackerTab
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.describe
-import com.hashtagchow.magehand.ui.theme.mageHandIconButtonColors
 
 /**
  * A local character's home (docs/design/09-local-characters.md decisions 5–8).
@@ -202,86 +194,60 @@ fun LocalCharacterHomeScreen(
         modifier = modifier,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = uiState.characterName ?: stringResource(R.string.title_character_home),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.action_back),
+            // FR-43: one bar composable for both home screens, the way `HomeTabRow` and
+            // `HomeOverflowMenu` already are — a rule that has to hold on two screens holds on
+            // one composable or it does not hold. The per-tab gating below is unchanged and is
+            // still this screen's: these actions were unconditional while this screen had one
+            // tab, and a "Customize tracker" control sitting over the inventory list would
+            // point at a screen the player is not looking at.
+            //
+            // Both `canWrite` flags are `true` and always were: a local character is stored on
+            // this device, so there is no server to be read-only against. The parameters exist
+            // for the DiceCloud screen, which has one.
+            HomeAppBar(
+                title = uiState.characterName ?: stringResource(R.string.title_character_home),
+                onBack = onBack,
+                trackerShowing = LocalCharacterHomeTab.Tracker.isShowing(chrome),
+                inventoryShowing = LocalCharacterHomeTab.Inventory.isShowing(chrome),
+                trackerCanWrite = true,
+                inventoryCanWrite = true,
+                onShortRest = { restToConfirm = RestKind.SHORT },
+                onLongRest = { restToConfirm = RestKind.LONG },
+                onAddItem = { addItemOpen = true },
+            ) {
+                // 1.9.1: the wrench(es), pane-order and Edit — every low-frequency action
+                // this bar carries — collapse into one overflow menu, the DiceCloud
+                // screen's fix applied here (this screen has no quests entry — 09
+                // decision 8's structural absence), and FR-39 adds history to that list on
+                // both screens at once. See `HomeOverflowMenu`'s KDoc for the "five
+                // elements max" arithmetic both screens now respect, and for what FR-43
+                // does with it below 284 dp.
+                HomeOverflowMenu(
+                    onPaneOrder = { paneOrderOpen = true },
+                    settingsLabel = stringResource(R.string.action_edit_character),
+                    onSettings = { onEdit(uiState.characterId) },
+                    // FR-39, and the same item the DiceCloud screen shows — one definition,
+                    // in `homeOverflowHistory`, for the reason its KDoc gives.
+                    history = if (LocalCharacterHomeTab.Tracker.isShowing(chrome)) {
+                        homeOverflowHistory { historyOpen = true }
+                    } else {
+                        null
+                    },
+                    customize = when {
+                        LocalCharacterHomeTab.Tracker.isShowing(chrome) -> HomeOverflowCustomize(
+                            labelRes = R.string.customize_title,
+                            testTag = "tracker:customize:open",
+                            onClick = { customizeOpen = true },
                         )
-                    }
-                },
-                actions = {
-                    // Per-tab, exactly as the DiceCloud bar is. These were unconditional
-                    // while this screen had one tab; now that it has two, a "Customize
-                    // tracker" button sitting over the inventory list would be a control
-                    // pointing at a screen the player is not looking at.
-                    if (LocalCharacterHomeTab.Tracker.isShowing(chrome)) {
-                        TextButton(
-                            onClick = { restToConfirm = RestKind.SHORT },
-                            modifier = Modifier.testTag("tracker:rest:short"),
-                        ) {
-                            Text(stringResource(R.string.tracker_short_rest))
-                        }
-                        TextButton(
-                            onClick = { restToConfirm = RestKind.LONG },
-                            modifier = Modifier.testTag("tracker:rest:long"),
-                        ) {
-                            Text(stringResource(R.string.tracker_long_rest))
-                        }
-                    }
-                    if (LocalCharacterHomeTab.Inventory.isShowing(chrome)) {
-                        IconButton(
-                            onClick = { addItemOpen = true },
-                            colors = mageHandIconButtonColors(),
-                            modifier = Modifier.testTag("inventory:add"),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Add,
-                                contentDescription = stringResource(R.string.inventory_add),
-                            )
-                        }
-                    }
-                    // 1.9.1: the wrench(es), pane-order and Edit — every low-frequency action
-                    // this bar carries — collapse into one overflow menu, the DiceCloud
-                    // screen's fix applied here (this screen has no quests entry — 09
-                    // decision 8's structural absence), and FR-39 adds history to that list on
-                    // both screens at once. See `HomeOverflowMenu`'s KDoc for the "five
-                    // elements max" arithmetic both screens now respect.
-                    HomeOverflowMenu(
-                        onPaneOrder = { paneOrderOpen = true },
-                        settingsLabel = stringResource(R.string.action_edit_character),
-                        onSettings = { onEdit(uiState.characterId) },
-                        // FR-39, and the same item the DiceCloud screen shows — one definition,
-                        // in `homeOverflowHistory`, for the reason its KDoc gives.
-                        history = if (LocalCharacterHomeTab.Tracker.isShowing(chrome)) {
-                            homeOverflowHistory { historyOpen = true }
-                        } else {
-                            null
-                        },
-                        customize = when {
-                            LocalCharacterHomeTab.Tracker.isShowing(chrome) -> HomeOverflowCustomize(
-                                labelRes = R.string.customize_title,
-                                testTag = "tracker:customize:open",
-                                onClick = { customizeOpen = true },
-                            )
-                            LocalCharacterHomeTab.Inventory.isShowing(chrome) -> HomeOverflowCustomize(
-                                labelRes = R.string.inventory_customize_title,
-                                testTag = "inventory:customize:open",
-                                onClick = { inventoryCustomizeOpen = true },
-                            )
-                            else -> null
-                        },
-                    )
-                },
-            )
+                        LocalCharacterHomeTab.Inventory.isShowing(chrome) -> HomeOverflowCustomize(
+                            labelRes = R.string.inventory_customize_title,
+                            testTag = "inventory:customize:open",
+                            onClick = { inventoryCustomizeOpen = true },
+                        )
+                        else -> null
+                    },
+                )
+            }
         },
     ) { innerPadding ->
         Column(

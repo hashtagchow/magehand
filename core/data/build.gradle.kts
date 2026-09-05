@@ -26,7 +26,7 @@ android {
 
     buildFeatures {
         // `BuildConfig.DEBUG` is what `DataModule` reads to decide whether the DDP client and
-        // the write queue get a real `android.util.Log` sink or `DebugLogSinks.NO_OP`. It has
+        // the write queue get a real `android.util.Log` sink or none at all (`null`). It has
         // to be *this* module's flag rather than `:app`'s: the wiring lives here, because
         // `WriteQueueConfig` is a `core.data.write` type and `WritePostureTest` forbids `:app`
         // from naming that package at all. AGP resolves a library's variant from the consuming

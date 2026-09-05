@@ -59,6 +59,18 @@ object Sabriel {
 
     const val CREATURE_ID: String = "FakeCreature23456"
 
+    /**
+     * The name the app bar shows — the character's **first name only**, per the class KDoc's
+     * store-safety rule.
+     *
+     * `HomeAppBar_360_100.png` renders it **in full**, so it is a committed pixel and the rule
+     * binds it exactly as it binds the source. `HomeAppBar_320_150.png` is the other picture and
+     * shows almost none of it: at 320 dp × 150 % the title has ~21 dp even after FR-43's compact
+     * rule, and before that rule it had none at all (BUG-17). Two goldens, one name, and only
+     * one of them is where you can read it.
+     */
+    const val NAME: String = "Sabriel"
+
     /** `1st Level`, the capture's 3-of-4 caster row. The click→intent exemplar spends from it. */
     val firstLevel = PipRowState(
         propertyId = "slot-1st",

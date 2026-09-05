@@ -3,13 +3,13 @@ package com.hashtagchow.magehand.core.data.di
 import android.util.Log
 
 /**
- * The two diagnostic sinks the app wires in a debug build, and the no-op it wires in a
+ * The two diagnostic sinks the app wires in a debug build, and the **nothing** it wires in a
  * release one.
  *
  * ### Why this exists at all
  *
- * `DdpClientConfig.logger` and `WriteQueueConfig.logger` both default to `{}`, and nothing had
- * ever overridden them outside a test. That default is right for a library — a log sink with no
+ * `DdpClientConfig.logger` and `WriteQueueConfig.logger` both default to "no sink", and nothing
+ * had ever overridden them outside a test. That default is right for a library — a log sink with no
  * wire effect is not part of the contract, which is why `ContractExportTest` excludes it — but
  * it meant the two layers that decide what actually reaches the server were **silent on a
  * device**. The inventory-stepper burst bug was reproduced on an emulator with no record of
@@ -17,16 +17,22 @@ import android.util.Log
  * available was the number on the screen afterwards. Every one of those four is already a
  * `logger(...)` call in `WriteQueue`, going nowhere.
  *
- * ### Debug only, and the release wiring is *this object's* no-op
+ * ### Debug only, and the release wiring is **no sink at all**
  *
  * [sink] takes the enable decision as an argument rather than reading `BuildConfig` itself, so
  * that both branches are reachable from a unit test — a `BuildConfig.DEBUG` read inside here
  * would make the release branch untestable, since unit tests compile against the debug variant.
  * The decision is made once, at the wiring site in `DataModule`, and `DebugLogSinksTest` pins
- * that a disabled sink is [NO_OP] *by identity*: not a lambda that checks a flag and returns,
- * not a lambda that builds a message and drops it, but the same do-nothing function the config
- * defaults would have used. Release therefore pays nothing, including the string concatenation
- * at the call sites.
+ * that a disabled sink is **`null`**.
+ *
+ * `null` and not a shared no-op lambda, which is what this returned until the 1.14.2 review
+ * (finding M2). A no-op still *receives* a message, so every call site had already built one:
+ * `WriteQueue` concatenates an op description on every coalesce and every retry, and since
+ * BUG-16 a `DdpClient` frame line costs a JSON transform and a re-encode of the whole frame —
+ * paid on every document the server sent, in a release build, and thrown away. Both configs now
+ * take a nullable sink and both callers ask for it before they build anything, so the claim
+ * "release pays nothing, including the string concatenation at the call sites" is finally true
+ * rather than nearly true.
  */
 internal object DebugLogSinks {
 
@@ -36,15 +42,12 @@ internal object DebugLogSinks {
     /** `adb logcat -s MageHandWrite` — coalescing, rate-limit retries, dropped calls. */
     const val WRITE_TAG: String = "MageHandWrite"
 
-    /** What a release build gets. Shared, so "release is the no-op" is an identity check. */
-    val NO_OP: (String) -> Unit = {}
-
     /**
-     * [Log.d] under [tag] when [enabled], and exactly [NO_OP] when not.
+     * [Log.d] under [tag] when [enabled], and `null` — no sink — when not.
      *
      * @param enabled `BuildConfig.DEBUG` at the wiring site. Passed rather than read here — see
      *   the class KDoc for why that is the testable arrangement.
      */
-    fun sink(tag: String, enabled: Boolean): (String) -> Unit =
-        if (enabled) { message -> Log.d(tag, message) } else NO_OP
+    fun sink(tag: String, enabled: Boolean): ((String) -> Unit)? =
+        if (enabled) { message -> Log.d(tag, message) } else null
 }

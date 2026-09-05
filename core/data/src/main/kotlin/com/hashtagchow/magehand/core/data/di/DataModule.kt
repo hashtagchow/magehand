@@ -305,7 +305,8 @@ object DataModule {
             OkHttpDdpSocketFactory.webSocketClient(baseHttpClient),
             // One of this module's two `BuildConfig.DEBUG` reads, and the reason the flag is
             // read *here*: this is the only place that both knows the build type and holds a
-            // `DdpClientConfig`. Release gets `DebugLogSinks.NO_OP` — see `DebugLogSinksTest`.
+            // `DdpClientConfig`. Release gets `null` — no sink, so no frame is ever built,
+            // let alone redacted and re-encoded. See `DebugLogSinksTest`.
             config = DdpClientConfig(
                 logger = DebugLogSinks.sink(DebugLogSinks.DDP_TAG, BuildConfig.DEBUG),
             ),

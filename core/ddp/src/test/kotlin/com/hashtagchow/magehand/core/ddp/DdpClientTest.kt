@@ -45,6 +45,10 @@ class DdpClientTest {
         resubscribeStagger: Duration = DdpClientConfig().resubscribeStagger,
         resubscribeRetryDelay: Duration = DdpClientConfig().resubscribeRetryDelay,
         tokenProvider: (suspend () -> String?)? = null,
+        // BUG-16: the default sink is the one every other test wants — printed, and nothing
+        // else. The redaction tests pass a collector so they can read back what a sink saw,
+        // which is the only place the claim "no sink is handed the token" can be checked.
+        logger: (String) -> Unit = { println("[ddp] $it") },
     ): DdpClient = DdpClient(
         socketFactory = server,
         config = DdpClientConfig(
@@ -55,7 +59,7 @@ class DdpClientTest {
             backoff = NoBackoff,
             resubscribeStagger = resubscribeStagger,
             resubscribeRetryDelay = resubscribeRetryDelay,
-            logger = { println("[ddp] $it") },
+            logger = logger,
         ),
         resumeTokenProvider = tokenProvider ?: { token },
     ).also { client = it }
@@ -926,6 +930,157 @@ class DdpClientTest {
         client.awaitLive(5.seconds)
         assertTrue(socket.sentFramesOf("method").isEmpty())
         assertNull(client.userId.value)
+    }
+
+    // ------------------------------------------------- BUG-16: the frame log
+
+    /**
+     * **BUG-16.** A debug build wires `config.logger` to `Log.d("MageHandDdp", …)` and Maestro
+     * copies logcat into every sweep flow's `logs/device-logcat.txt` — so the `login` frame's
+     * `{"resume":"<token>"}` and its result's `{"token":"<token>"}` were both one `cp` from a
+     * public tree, against `05-security.md`'s "never logged".
+     *
+     * The redaction is at the source, before the logger is called, so this asserts the thing
+     * that matters: **no sink is ever handed the token, in either direction.** The collector
+     * below is a sink like any other, which is what makes the claim general rather than a claim
+     * about one logger.
+     *
+     * The diagnostics survive, and are asserted positively — the method name, the call id and
+     * the user id. A redaction that swallowed the frame log would "pass" the token half and
+     * destroy the thing the log exists for.
+     */
+    @Test
+    fun login_frames_are_logged_without_the_token_in_either_direction() = runBlocking {
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val client = newClient(logger = { lines += it })
+        client.start()
+
+        val socket = server.awaitSocket(0)
+        socket.awaitFrame("connect")
+        socket.emit("""{"msg":"connected","session":"session-1"}""")
+        val login = socket.awaitFrame { it.msg == "method" && it.string("method") == "login" }
+        val id = login.string("id")!!
+        socket.completeMethod(id, LOGIN_RESULT)
+        client.awaitLive(5.seconds)
+
+        val logged = lines.toList()
+        assertTrue("no frames were logged at all — the sink was never reached", logged.isNotEmpty())
+
+        // The token literal, in ANY line. The outbound frame carried it in `params.resume`, the
+        // inbound one in `result.token`, and one surviving line is one leaked token.
+        logged.forEach { line ->
+            assertFalse(
+                "the resume token must not reach any logger sink: $line",
+                line.contains(TOKEN),
+            )
+        }
+        // …and it is still a usable frame log.
+        assertTrue(
+            "the outbound login frame is still logged, method name and all",
+            logged.any { it.startsWith("→ ") && it.contains("\"login\"") && it.contains("\"id\":\"$id\"") },
+        )
+        assertTrue(
+            "the redaction is visible rather than silent",
+            logged.any { it.startsWith("→ ") && it.contains("<redacted>") },
+        )
+        assertTrue(
+            "the inbound result is still logged, with the user id kept",
+            logged.any { it.startsWith("← ") && it.contains("\"result\"") && it.contains("user-1") },
+        )
+        assertTrue(
+            "tokenExpires survives — it is a fact about the session, not a credential",
+            logged.any { it.startsWith("← ") && it.contains("tokenExpires") },
+        )
+    }
+
+    /**
+     * **Review M1, end to end.** The server refuses the `login` and echoes it back in the error
+     * frame's `offendingMessage` — the shape that put the token in the log twice: once in the
+     * echo, and once more raw by the client's own `"error" ->` branch. Neither survives.
+     */
+    @Test
+    fun a_refused_login_echoed_in_an_error_frame_logs_no_token() = runBlocking {
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val client = newClient(logger = { lines += it })
+        client.start()
+
+        val socket = server.awaitSocket(0)
+        socket.awaitFrame("connect")
+        socket.emit("""{"msg":"connected","session":"session-1"}""")
+        val login = socket.awaitFrame { it.msg == "method" && it.string("method") == "login" }
+        val id = login.string("id")!!
+
+        socket.emit(
+            """{"msg":"error","reason":"Must connect first","offendingMessage":""" +
+                """{"msg":"method","method":"login","params":[{"resume":"$TOKEN"}],"id":"$id"}}"""
+        )
+        awaitUntil(what = "the error frame is logged") {
+            lines.toList().any { it.contains("Must connect first") }
+        }
+
+        lines.toList().forEach { line ->
+            assertFalse("a refused login must not put the token back in the log: $line", line.contains(TOKEN))
+        }
+        assertTrue(
+            "the reason still reaches the log — it is the whole point of an error frame",
+            lines.toList().any { it.startsWith("server protocol error:") && it.contains("Must connect first") },
+        )
+    }
+
+    /**
+     * **The redaction must not widen.** Every other method's `params` are the payload a blind
+     * repro is about — a damage write's `_id`, `operation` and `value` — and a rule that scrubbed
+     * "params" rather than "the login exchange" would take them with it and nobody would notice
+     * until the next bug could not be reproduced.
+     */
+    @Test
+    fun a_non_login_method_logs_its_params_verbatim() = runBlocking {
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val client = newClient(logger = { lines += it })
+        client.start()
+        val socket = server.awaitSocket(0)
+        socket.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        val call = callAsync(client, "creatureProperties.damage", mapOf("_id" to "p1", "value" to 1))
+        val frame = socket.awaitFrame { it.msg == "method" && it.string("method") == "creatureProperties.damage" }
+        socket.completeMethod(frame.string("id")!!, """{"ok":true}""")
+        call.await()
+
+        val sent = lines.toList().filter { it.startsWith("→ ") && it.contains("creatureProperties.damage") }
+        assertEquals("exactly one such frame was sent", 1, sent.size)
+        assertTrue("its params must be logged as they were sent: ${sent.single()}", sent.single().contains("\"p1\""))
+        assertFalse("nothing about it is redacted", sent.single().contains("<redacted>"))
+    }
+
+    /**
+     * **An unparseable frame keeps its raw line.** Redacting requires parsing, and a frame that
+     * does not parse is not one the server sent well-formed — seeing its actual bytes is the
+     * whole repro value, so it is logged exactly as it arrived.
+     */
+    @Test
+    fun an_unparseable_frame_is_logged_raw() = runBlocking {
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val client = newClient(logger = { lines += it })
+        client.start()
+        val socket = server.awaitSocket(0)
+        socket.completeHandshake()
+        client.awaitLive(5.seconds)
+
+        socket.emit("""{"msg":"result",""")
+        awaitUntil(what = "the unparseable frame is logged") {
+            lines.toList().any { it.startsWith("unparseable frame") }
+        }
+
+        val logged = lines.toList()
+        assertTrue(
+            "the raw text is logged on the way in, as it always was",
+            logged.any { it == """← {"msg":"result",""" },
+        )
+        assertTrue(
+            "and named as unparseable, with the bytes",
+            logged.any { it.startsWith("unparseable frame") && it.endsWith("""{"msg":"result",""") },
+        )
     }
 
     // --------------------------------------------------------------- helpers
