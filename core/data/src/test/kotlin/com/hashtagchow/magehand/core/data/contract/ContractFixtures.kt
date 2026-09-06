@@ -71,6 +71,15 @@ object ContractFixtures {
     // M6: FR-30's own row, exercised as its own vector rather than folded into
     // `trackerSheetBody` — see `hitDiceSheetBody`.
     val hitDiceD8Id: String = fakeId("hit-dice-d8")
+    // FR-44 R1: the limited-use rows, exercised as their own vector for `hitDiceSheetBody`'s
+    // reason — see `limitedUseSheetBody`.
+    val limitedUseActionId: String = fakeId("limited-use-action")
+    val limitedUseSpellId: String = fakeId("limited-use-spell")
+    val limitedUseUnusedId: String = fakeId("limited-use-unused")
+    val limitedUseInactiveId: String = fakeId("limited-use-inactive")
+    val limitedUseRemovedId: String = fakeId("limited-use-removed")
+    val limitedUseUnlimitedId: String = fakeId("limited-use-unlimited")
+    val limitedUseZeroId: String = fakeId("limited-use-zero")
     val downedHitPointsId: String = fakeId("death-save-hit-points")
     val rageToggleId: String = fakeId("toggle-rage")
     val concentrationToggleId: String = fakeId("toggle-concentration")
@@ -232,6 +241,67 @@ object ContractFixtures {
     )
 
     /**
+     * FR-44 R1's rows, as a sheet where **every wrong implementation produces a different
+     * answer** — which is what `rolls-discovery` established as the bar for a discovery fixture.
+     *
+     * Seven properties, three of which must survive and four of which must not, and the four
+     * exclusions are in the input on purpose: a vector carrying only the survivors proves nothing
+     * about the filter (`tracker-discovery`'s own wording).
+     *
+     *  - an `action` with `uses: 2, usesUsed: 1, reset: shortRest` — the arithmetic case;
+     *  - a `spell` with `uses: 2, usesUsed: 0, reset: longRest` — because the headline row this
+     *    FR was raised for (Guiding Bolt from a Star Map) is a **spell**, and a consumer matching
+     *    `action` alone would pass every other assertion here;
+     *  - an `action` with `uses: 3` and **no `usesUsed` key at all** — the never-used case, which
+     *    must read 3 rather than being treated as unknown;
+     *  - an `inactive` one, a `removed` one, an `action` with no `uses` at all, and one whose
+     *    `uses` computes to **zero**, none of which may appear.
+     *
+     * `uses` is written as the `_calculation` wrapper the server actually publishes rather than a
+     * bare number — the live party sheets read `uses: {calculation:"proficiencyBonus", …, value:2}`
+     * — so a consumer that reads the field literally fails this vector instead of failing at a
+     * table.
+     */
+    fun limitedUseSheetBody(): JsonObject = snapshotBody(
+        creature = creature(),
+        properties = listOf(
+            limitedUse(
+                id = limitedUseActionId, type = "action", name = "Second Wind",
+                uses = 2, usesUsed = 1, reset = "shortRest", order = 10,
+            ),
+            limitedUse(
+                id = limitedUseSpellId, type = "spell", name = "Guiding Bolt (Star Map)",
+                uses = 2, usesUsed = 0, reset = "longRest", order = 11,
+            ),
+            limitedUse(
+                id = limitedUseUnusedId, type = "action", name = "Relentless Endurance",
+                uses = 3, usesUsed = null, reset = "longRest", order = 12,
+            ),
+            limitedUse(
+                id = limitedUseInactiveId, type = "action", name = "Cosmic Omen",
+                uses = 1, usesUsed = null, reset = "longRest", order = 13, inactive = true,
+            ),
+            limitedUse(
+                id = limitedUseRemovedId, type = "spell", name = "Deleted Trick",
+                uses = 1, usesUsed = null, reset = "longRest", order = 14, removed = true,
+            ),
+            limitedUse(
+                id = limitedUseUnlimitedId, type = "action", name = "Dash",
+                uses = null, usesUsed = null, reset = null, order = 15,
+            ),
+            // `uses` present and computing to ZERO. Not a contrived case: `uses` is a calculation
+            // (`proficiencyBonus`, `max(1, wisdom.modifier)` on the reference party's sheets), so
+            // a character below the level that grants an ability publishes a real row whose count
+            // evaluates to nothing. A consumer that keyed on the field's *presence* rather than on
+            // its value draws a pip row with no pips.
+            limitedUse(
+                id = limitedUseZeroId, type = "action", name = "Not Yet Granted",
+                uses = 0, usesUsed = null, reset = "longRest", order = 16,
+            ),
+        ),
+    )
+
+    /**
      * FR-23's death-save trigger, as a sheet that can be moved through all three cases.
      *
      * The block's condition has two halves and they fail in different places, so one fixture is
@@ -274,6 +344,16 @@ object ContractFixtures {
             },
         ),
     )
+
+    /**
+     * The deliberately-wrong `usesLeft` every limited-use fixture row publishes.
+     *
+     * Not a near-miss: a consumer that reads this field renders "99 uses left" on a two-use
+     * ability, which fails loudly instead of looking almost right. `LimitedUseDiscoveryTest` uses
+     * the same number for the same reason, and the two are independent on purpose — one pins the
+     * engine, the other pins the exported vector.
+     */
+    const val LIMITED_USE_STALE_USES_LEFT: Int = 99
 
     private const val DOWNED_HP_TOTAL = 24
 
@@ -547,6 +627,60 @@ object ContractFixtures {
         if (removed) put("removed", true)
         if (inactive) put("inactive", true)
         if (hitDiceSize != null) put("hitDiceSize", hitDiceSize)
+    }
+
+    /**
+     * An `action` or `spell` property carrying a use count (FR-44 R1).
+     *
+     * @param uses `null` omits the key — the unlimited ability, which is not a tracker row at all.
+     *   Written as the `_calculation` wrapper the server publishes, never as a bare number.
+     * @param usesUsed `null` omits the key, which is what a never-used ability looks like on a
+     *   live sheet and must read as zero.
+     */
+    @Suppress("LongParameterList")
+    fun limitedUse(
+        id: String,
+        type: String,
+        name: String,
+        uses: Int?,
+        usesUsed: Int?,
+        reset: String?,
+        order: Int,
+        removed: Boolean = false,
+        inactive: Boolean = false,
+    ): JsonObject = buildJsonObject {
+        put("_id", id)
+        put("type", type)
+        put("name", name)
+        put("actionType", "action")
+        if (uses != null) {
+            put(
+                TrackerEngine.FIELD_USES,
+                buildJsonObject {
+                    put("type", "_calculation")
+                    put("calculation", uses.toString())
+                    put("value", uses)
+                },
+            )
+        }
+        if (usesUsed != null) put(TrackerEngine.FIELD_USES_USED, usesUsed)
+        // The server's own derived field, published beside the two above and DELIBERATELY not
+        // read by MageHand: 17 decision 1 records that it lags a debounced recompute by 4-10 s
+        // (probe U5), and FR-44's own re-probe caught it in the act — one frame after a write set
+        // `usesUsed: 1` on a 2-use row, the same document still published `usesLeft: 2`.
+        //
+        // **So the fixture publishes a STALE value, not the correct one.** It used to publish
+        // `uses − usesUsed`, which made the trap unenforceable: a consumer that read the easy
+        // field got the right answer from the vector and the wrong one from a server. The vector
+        // now disagrees with the arithmetic on every row, so reading `usesLeft` fails it — which
+        // is what `domain/rules.json#discovery.limitedUses.usesLeftTrap` has been claiming.
+        // [LIMITED_USE_STALE_USES_LEFT] rather than a plausible-looking number, so nobody reads it
+        // as a value the rule might accept.
+        if (uses != null) put("usesLeft", LIMITED_USE_STALE_USES_LEFT)
+        if (reset != null) put("reset", reset)
+        put("order", order)
+        if (removed) put("removed", true)
+        if (inactive) put("inactive", true)
     }
 
     /**

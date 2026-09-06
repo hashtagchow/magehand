@@ -49,6 +49,34 @@ enum class TrackerKind {
      *    section nor the resources section.
      */
     HIT_DICE,
+
+    /**
+     * An `action` or `spell` property carrying a numeric `uses` — a per-rest ability with a use
+     * count (FR-44 R1, ledgered 2026-09-06).
+     *
+     * a Stars druid's *Guiding Bolt (Star Map)*, 2 / long rest, no spell slot: the table rolls at the
+     * table rather than through DiceCloud, so the use is spent by hand and wants a pip row like
+     * a resource. Value is `uses − usesUsed` (an absent `usesUsed` reads 0, exactly as
+     * `ActionEngine.usesFor` reads it), total is `uses`, and `reset` comes off the row so FR-20's
+     * rest badge applies for free.
+     *
+     * ### Its own kind, and not [RESOURCE] — for [HIT_DICE]'s reasons plus a harder one
+     *
+     * The three above still apply (the rest dialog, the label, the section), but the reason this
+     * one could never have been a resource is the **write**. Every kind above this is an
+     * `attribute`, spent with `creatureProperties.damage` against `value = total − damage`.
+     * This is not an attribute and has no `damage` field: the counter is `usesUsed`, it counts
+     * **up**, and it is moved with `creatureProperties.update {_id, path:['usesUsed'], value}` —
+     * an absolute set, not an increment. Folding these rows into [RESOURCE] would put a row into
+     * a list whose every write is the wrong method against a field that does not exist, and the
+     * failure mode is a silent server refusal rather than a compile error.
+     *
+     * See `WriteOp.SetUsesUsed` for the probe (FR-44 R2, docs/verification/probe-fr44.md) that
+     * established both halves: the write is accepted, and the server's own long rest clears
+     * `usesUsed` on a row whose `reset` says so — which is what lets these rows appear in
+     * `rowsRestoredBy`'s restore list, where hit dice may not.
+     */
+    LIMITED_USE,
 }
 
 /**
@@ -446,6 +474,31 @@ data class TrackerBoard(
     val slots: List<TrackedResource> = emptyList(),
     val resources: List<TrackedResource> = emptyList(),
     /**
+     * The character's limited-use abilities — `action` / `spell` rows with a numeric `uses`
+     * (FR-44 R1).
+     *
+     * Declared **below [resources] and above [hitDice]**, which is R1's own wording for where the
+     * section belongs. On the tracker screen the rows are drawn directly under the Resources
+     * section; the "above hit dice" half is this declaration order and not a screen position,
+     * because 18 decision 17 already fixed hit dice *directly below HP* — above the slots and
+     * resources, not below them. See the recorded deviation in `TrackerUiState.limitedUses`.
+     *
+     * ### Its own list, and not folded into [resources]
+     *
+     * [TrackerKind.LIMITED_USE]'s KDoc gives the argument; the half this field makes structural
+     * is the write. `WriteOp.adjust` branches on [TrackedResource.kind], so a row in the wrong
+     * list is a row this app would try to spend with `creatureProperties.damage` against a
+     * property that has no `damage` field.
+     *
+     * **Not override-filtered**, for [hitDice]'s reason and by the same precedent: the customize
+     * sheet builds its sections from slots, resources, items and toggles, so there is no control
+     * anywhere that could pin, hide or reorder one of these rows. Running them through the
+     * override layer would let a stale preference hide a row with nothing on screen able to bring
+     * it back — and FR-44's switch (R3) is the control the operator asked for, which hides the
+     * whole section rather than one row.
+     */
+    val limitedUses: List<TrackedResource> = emptyList(),
+    /**
      * The character's hit dice, one row per die size (FR-30, 18 decision 17).
      *
      * ### Its own list, and not folded into [resources]
@@ -550,8 +603,8 @@ data class TrackerBoard(
 
     val isEmpty: Boolean
         get() = hp == null && tempHp == null && slots.isEmpty() && resources.isEmpty() &&
-            hitDice.isEmpty() && allItems.isEmpty() && activeToggles.isEmpty() &&
-            defenses.isEmpty() && rolls.isEmpty()
+            limitedUses.isEmpty() && hitDice.isEmpty() && allItems.isEmpty() &&
+            activeToggles.isEmpty() && defenses.isEmpty() && rolls.isEmpty()
 
     companion object {
         val EMPTY: TrackerBoard = TrackerBoard()

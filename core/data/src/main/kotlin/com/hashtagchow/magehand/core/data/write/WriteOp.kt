@@ -309,6 +309,153 @@ sealed class WriteOp {
         override val description: String get() = "adjustQuantity ${operation.wireValue} $value on $propertyId"
     }
 
+    /**
+     * `creatureProperties.update {_id, path:['usesUsed'], value}` — spending and restoring a
+     * limited-use ability's charge (FR-44 R2).
+     *
+     * ### Probe-decided, not guessed — and both halves came back yes
+     *
+     * R2 is explicit that *"the write is decided by a probe on the Test Dummy, not by guess"*,
+     * because the tracker's existing pip vocabulary is the wrong instrument twice over. `damage`
+     * is an `attribute` method and an `action` property has no `damage` field; `doAction` — the
+     * server's own use machinery — rolls the attack, spends the costs and posts the result to the
+     * party feed and any Discord webhook, which is wrong for a table that rolls by hand and is
+     * deliberately never undone (17 decision 5/8).
+     *
+     * The live probe (2026-09-06, docs/verification/probe-fr44.md) ran `update` with
+     * `path:['usesUsed']` against an inserted `uses: 2, reset: 'longRest'` action and the server
+     * **accepted it** and recomputed. The upstream method confirms why: `updateCreatureProperty`
+     * rejects exactly `type`, `order`, `parent`, `ancestors` and `damage` — `usesUsed` is not
+     * among them — and sets `dirty: true`, which is the recompute this row's `usesLeft` needs.
+     * The doc's silence about `usesUsed` was silence, not permission; this is the evidence.
+     *
+     * ### An absolute set, which changes what the inverse and the coalescing have to be
+     *
+     * Every countable write above this one is an `increment`, so its inverse is the same call
+     * with the sign flipped and two of them merge by *summing*. `update` has no increment form:
+     * the method takes a value and `$set`s it. So —
+     *
+     *  - **[inverse] is the same op with [value] and [previous] swapped.** It has to carry
+     *    [previous] for the same reason [Equip] carries `previousEquipped`: an absolute write
+     *    cannot reconstruct what it overwrote.
+     *  - **Coalescing is [Equip]'s rule, not [Damage]'s.** The later op subsumes the earlier one
+     *    (a set already contains everything before it) while keeping the *earliest* [previous],
+     *    so three taps on a 3-use row send one call and still undo back to 3 rather than to 1.
+     *    Summing would be nonsense here, and dropping [previous] would leave the undo stack
+     *    holding a write that restores the wrong number.
+     *
+     * ### The counter runs the other way
+     *
+     * [value] is `usesUsed` — **uses spent**, counting up from zero — while the tracker row shows
+     * uses *left*. The inversion is applied once, at [Companion.adjust], for the reason
+     * `TrackerEngine.limitedUse` applies the read-side inversion once: two places that both know
+     * `usesUsed = total − remaining` is two places to get a sign wrong.
+     *
+     * ### Rate class and posture
+     *
+     * `update` is the server's default 5 / 5 s ([SLOW_SPACING_MILLIS]) — the upstream method's own
+     * `RateLimiterMixin` says so, and it is not `damage`'s fast lane however much this feels like
+     * a slot spend. **Replayable and not a barrier**: unlike [DoAction] this call rolls nothing,
+     * spends nothing else and logs nothing, so re-sending the identical absolute after a
+     * `too-many-requests` produces the identical state rather than a second spend. That
+     * idempotence is a property of `set`, and it is the reason this op can carry an undo at all
+     * where a Use cannot.
+     *
+     * ### Idempotent against *itself*, and there is a second writer (FR-44 fix pass)
+     *
+     * The paragraph above is true and incomplete, and the gap is worth naming precisely because
+     * "absolute writes are safe to repeat" is the kind of claim a reader carries further than it
+     * goes. `usesUsed` has **two** writers. This op sets it; [DoAction] and [DoCastSpell] —
+     * the Actions tab's Use — *increment* it server-side as part of running the property's effect
+     * tree (17 decision 3, probe U4). Re-sending this call is safe with respect to this call. It is
+     * not safe with respect to a Use that landed in between, because the absolute this op carries
+     * was computed before that increment existed and will overwrite it.
+     *
+     * Two consequences, and only the first is closed:
+     *
+     *  - **Backwards, closed.** An undo entry from a pip spend is dropped when a Use on the same
+     *    property is enqueued — `WriteQueue.record` invalidates by target rather than clearing the
+     *    stack, so slot and resource undos survive. Without it, UNDO after a Use hands back both
+     *    the use the player spent and the one the server spent.
+     *  - **Forwards, documented and accepted.** A pip tapped in the ~0.1–0.35 s before a Use's
+     *    fast-path fields reach the mirror (probe U3) builds its absolute from a stale board and
+     *    gives a use back. Closing it would mean gating the tracker on the Actions tab's settle
+     *    window, or a server-side increment on this path, which `creatureProperties.update` does
+     *    not offer. It is self-correcting on the next sync and reachable only by using an ability
+     *    on one tab and immediately spending it on another. `WriteQueue.record`'s KDoc carries the
+     *    same window from the queue's side.
+     */
+    data class SetUsesUsed(
+        val propertyId: String,
+        /** The new `usesUsed` — charges **spent**, not charges left. */
+        val value: Int,
+        /** What `usesUsed` read before this op, so [inverse] can put it back. */
+        val previous: Int,
+        override val targetName: String = "",
+        override val intent: TrackerWriteKind? = null,
+        /** What the row will *show* once this lands (uses left), for the optimistic pips. */
+        val resultingValue: Int? = null,
+    ) : WriteOp() {
+        override val method: String get() = METHOD_UPDATE
+        override val targetId: String get() = propertyId
+        override val params: List<JsonElement>
+            get() = listOf(
+                buildJsonObject {
+                    put("_id", propertyId)
+                    put("path", JsonArray(listOf(JsonPrimitive(PATH_USES_USED))))
+                    put("value", value)
+                },
+            )
+        override val minSpacingMillis: Long get() = SLOW_SPACING_MILLIS
+
+        override val coalesceKey: String get() = "usesUsed:$propertyId"
+
+        override val optimistic: OptimisticChange
+            get() = resultingValue
+                ?.let { OptimisticChange.ValueAbsolute(propertyId, it) }
+                ?: OptimisticChange.None(propertyId)
+
+        override val magnitude: Int get() = kotlin.math.abs(value - previous)
+
+        override val inverse: WriteOp
+            get() = SetUsesUsed(
+                propertyId = propertyId,
+                value = previous,
+                previous = value,
+                targetName = targetName,
+                // `inverted()` is `null` for the absolute vocabularies (SET_VALUE), and the undo
+                // of a set is another set — so the fallback keeps the caller's word rather than
+                // producing an unlabelled history entry. This is exactly what
+                // [Companion.setValue]'s hand-built `Damage` undo does by writing SET_VALUE into
+                // both halves; here the pair is derived, so the rule has to be stated.
+                intent = intent?.let { it.inverted() ?: it },
+                // The row read `total − previous` before this op, and `total` is not carried here
+                // — but the two `resultingValue`s are symmetric around it, so the undo's target is
+                // recoverable from the pair we already hold: left-before = left-after + (value −
+                // previous). A hand-built op with no `resultingValue` inverts to one without,
+                // which degrades to `OptimisticChange.None` rather than to a wrong prediction.
+                resultingValue = resultingValue?.plus(value - previous),
+            )
+
+        override fun coalesceWith(other: WriteOp): WriteOp? {
+            if (other !is SetUsesUsed || other.propertyId != propertyId) return null
+            // A burst that lands back where it started is **nothing to send** — [FlipToggle]'s and
+            // [Equip]'s rule, and it has to be stated because an absolute set hides it: two
+            // increments that cancel merge to `value 0` and are visibly a no-op, while a spend and
+            // a restore merge to an `update` carrying the value the property already holds. That
+            // call is not harmless. It costs one of the five requests the server allows per five
+            // seconds, and — the half that reaches the user — it files a history row reading
+            // "Spent Guiding Bolt, 0" and pushes an undo entry for a write that did not happen.
+            if (other.value == previous) return Noop(coalesceKey)
+            // Otherwise [Equip]'s merge: the later op wins on everything it states, and the
+            // *earliest* `previous` is carried forward so the merged op still undoes to where the
+            // burst started rather than to its second-to-last step.
+            return other.copy(previous = previous)
+        }
+
+        override val description: String get() = "update $PATH_USES_USED=$value on $propertyId"
+    }
+
     /** `creatureProperties.flipToggle {_id}` — condition chips. Its own inverse. */
     data class FlipToggle(
         val propertyId: String,
@@ -982,6 +1129,19 @@ sealed class WriteOp {
         /** `creatureProperties.doCastSpell` — see [DoCastSpell]. */
         const val METHOD_DO_CAST_SPELL: String = "creatureProperties.doCastSpell"
 
+        /** `creatureProperties.update` — see [SetUsesUsed]. */
+        const val METHOD_UPDATE: String = "creatureProperties.update"
+
+        /**
+         * The one `path` this app ever sends to [METHOD_UPDATE] (FR-44 R2).
+         *
+         * A constant rather than a literal in [SetUsesUsed.params] because `update` is a general
+         * field-setter: it will happily `$set` any path the server does not explicitly deny, so
+         * the *narrowness* of what this app sends is a property worth stating in one place and
+         * asserting on. `WriteOpUsesUsedTest` pins the pair.
+         */
+        const val PATH_USES_USED: String = "usesUsed"
+
         private fun idOperationValue(id: String, operation: WriteOperation, value: Int): JsonObject =
             buildJsonObject {
                 put("_id", id)
@@ -1006,9 +1166,16 @@ sealed class WriteOp {
         /**
          * Move a row's remaining value by [delta] (negative spends, positive restores).
          *
-         * Items go through `adjustQuantity`; everything else through `damage`. **Both
-         * methods take a consumption amount**, so the sign flips in both branches: the
-         * server counts *up* as the row counts *down*.
+         * **Three methods now, chosen by [TrackedResource.kind]** — the sentence here used to say
+         * "items go through `adjustQuantity`; everything else through `damage`", and FR-44 made
+         * that false. Limited-use abilities go through `creatureProperties.update` on the
+         * `usesUsed` path, because they are not attributes and have no `damage` field; items go
+         * through `adjustQuantity`; every attribute row goes through `damage`.
+         *
+         * The two *increment* methods both take a **consumption amount**, so the sign flips in
+         * both of those branches: the server counts *up* as the row counts *down*. The third is an
+         * absolute set and inverts differently — it computes the counter rather than a delta — so
+         * it does not share that line even though it shares the same intent vocabulary.
          *
          * 03 §Write semantics says "Drink potion → `adjustQuantity {'increment', -1}`",
          * which is backwards for this server — a live probe on the test dummy moved
@@ -1016,7 +1183,28 @@ sealed class WriteOp {
          * it; the doc is wrong, not the server.
          */
         fun adjust(resource: TrackedResource, delta: Int): WriteOp =
-            if (resource.kind == TrackerKind.ITEM) {
+            if (resource.kind == TrackerKind.LIMITED_USE) {
+                // FR-44: the third write path, and the only one that is an absolute rather than a
+                // consumption increment. The row shows uses LEFT and the server stores uses
+                // SPENT, so the inversion happens here — once, at the one place a delta becomes a
+                // call — rather than at every call site. Clamped into `0..total` on the way in:
+                // `update` writes whatever it is handed (there is no server-side clamp on this
+                // path, unlike `damage`), so an off-by-one at the last pip would otherwise store
+                // `usesUsed: 3` on a 2-use ability and leave the row reading −1.
+                val left = (resource.value + delta).coerceIn(0, maxOf(resource.total, 0))
+                SetUsesUsed(
+                    propertyId = resource.propertyId,
+                    value = resource.total - left,
+                    previous = resource.total - resource.value,
+                    targetName = resource.name,
+                    // The shared chooser, not an inlined SPEND/RESTORE pair: the two would agree
+                    // today and the *reason* they agree — that a limited-use row is not an HP row
+                    // — is exactly the kind of thing that stops being true silently. One rule for
+                    // "what did the player just do", read by all three branches.
+                    intent = resource.spendIntent(delta),
+                    resultingValue = left,
+                )
+            } else if (resource.kind == TrackerKind.ITEM) {
                 AdjustQuantity(
                     propertyId = resource.propertyId,
                     operation = WriteOperation.INCREMENT,
@@ -1049,7 +1237,22 @@ sealed class WriteOp {
          * inverse is the row's value before the write.
          */
         fun setValue(resource: TrackedResource, desired: Int): WriteOp =
-            if (resource.kind == TrackerKind.ITEM) {
+            if (resource.kind == TrackerKind.LIMITED_USE) {
+                // FR-22 direct entry on a limited-use row, which costs nothing extra here: the
+                // op is already an absolute set, so "make this row say 3" and "spend one" are the
+                // same call with different arithmetic. The vocabulary is SET_VALUE rather than
+                // spend/restore for the reason 15 decision 6 gives — a typed number is a target,
+                // not a nudge, and the history list should say so.
+                val left = desired.coerceIn(0, maxOf(resource.total, 0))
+                SetUsesUsed(
+                    propertyId = resource.propertyId,
+                    value = resource.total - left,
+                    previous = resource.total - resource.value,
+                    targetName = resource.name,
+                    intent = TrackerWriteKind.SET_VALUE,
+                    resultingValue = left,
+                )
+            } else if (resource.kind == TrackerKind.ITEM) {
                 AdjustQuantity(
                     propertyId = resource.propertyId,
                     operation = WriteOperation.SET,

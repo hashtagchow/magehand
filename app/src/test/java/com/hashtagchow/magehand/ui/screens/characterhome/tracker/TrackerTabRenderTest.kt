@@ -13,6 +13,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import com.hashtagchow.magehand.core.model.ResetRule
+import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.ui.testing.MageHandTestSurface
 import com.hashtagchow.magehand.ui.testing.Sabriel
 import com.hashtagchow.magehand.ui.testing.setMageHandContent
@@ -143,6 +145,75 @@ class TrackerTabRenderTest {
         compose.onAllNodesWithContentDescription("Spend one 1st Level").assertCountEquals(3)
         compose.onAllNodesWithContentDescription("Restore one 1st Level").assertCountEquals(1)
     }
+
+    // ---- FR-44: limited-use abilities ---------------------------------------
+
+    /**
+     * The section renders under its own header, with the sheet's own name on the row.
+     *
+     * Built by `copy` onto the shared fixture rather than added to `Sabriel.tracker()` itself, on
+     * purpose: that fixture is what the six committed `TrackerScreen_*.png` goldens photograph,
+     * and R5 fences this wave to at most one golden moving. The composition under test is
+     * otherwise identical to the one the goldens capture.
+     */
+    @Test
+    fun `a limited-use row renders under its own header with the sheet's name`() {
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker().copy(limitedUses = listOf(guidingBolt))) }
+
+        // `SectionHeader` upper-cases its copy, so the assertion is on what the screen says
+        // rather than on what `strings.xml` stores — and `assertExists`, because scrolling the row
+        // into view is what pushes its own header off the top.
+        compose.onNode(hasScrollAction())
+            .performScrollToNode(hasTestTag("tracker:limiteduse:${guidingBolt.propertyId}"))
+
+        compose.onNodeWithText("LIMITED USE").assertExists()
+        compose.onNodeWithTag("tracker:limiteduse:${guidingBolt.propertyId}").assertTextEquals("1 / 2")
+    }
+
+    /**
+     * The row speaks as one sentence and its pips say which half they are, exactly as a slot's do.
+     *
+     * The point is that nothing about the *row* is new — the write underneath it is a different
+     * DDP method entirely, and a player must not be able to tell. A 1-of-2 row offers one spend
+     * and one restore; a row that drew both pips as filled would look plausible and fail here.
+     */
+    @Test
+    fun `a limited-use row speaks its reset rule and its pips`() {
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker().copy(limitedUses = listOf(guidingBolt))) }
+
+        compose.onNode(hasScrollAction())
+            .performScrollToNode(hasTestTag("tracker:limiteduse:${guidingBolt.propertyId}"))
+
+        compose.onNodeWithContentDescription("Guiding Bolt (Star Map), restores on a long rest")
+            .assertIsDisplayed()
+        compose.onAllNodesWithContentDescription("Spend one Guiding Bolt (Star Map)").assertCountEquals(1)
+        compose.onAllNodesWithContentDescription("Restore one Guiding Bolt (Star Map)").assertCountEquals(1)
+    }
+
+    /**
+     * An empty list means **no header**, not an empty section — which is the shipped fixture's own
+     * case (a character with no limited-use ability) and, by the same code path, what R3's switch
+     * produces when it is off, because the gate empties the list in `toTrackerUiState` rather than
+     * hiding anything here. This test exercises the first of those; `TrackerUiStateTest` owns the
+     * switch itself, at both values.
+     */
+    @Test
+    fun `no limited-use rows means no header`() {
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker()) }
+
+        compose.onNodeWithText("LIMITED USE").assertDoesNotExist()
+    }
+
+    /** FR-44 R1's row, 1 of 2 uses left on a long rest — the party sheet's headline case. */
+    private val guidingBolt = PipRowState(
+        propertyId = "lu-guiding-bolt",
+        label = "Guiding Bolt (Star Map)",
+        reset = ResetRule.LONG_REST,
+        value = 1,
+        total = 2,
+        pinned = false,
+        kind = TrackerKind.LIMITED_USE,
+    )
 
     // ---- collapse / expand (the FR-16 item class) ---------------------------
 

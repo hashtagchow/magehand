@@ -66,6 +66,11 @@ data class OptimisticOverlay(
             tempHp = board.tempHp?.let(::apply),
             slots = board.slots.map(::apply),
             resources = board.resources.map(::apply),
+            // FR-44. Named here rather than left to `copy`'s pass-through, which is the trap this
+            // function's KDoc records: a new list of countable rows that is *not* taught to the
+            // overlay renders the server's value through every write, so a spent pip comes back
+            // for the round trip and then goes away again.
+            limitedUses = board.limitedUses.map(::apply),
             hitDice = board.hitDice.map(::apply),
             pinnedItems = board.pinnedItems.map(::apply),
             allItems = board.allItems.map(::apply),

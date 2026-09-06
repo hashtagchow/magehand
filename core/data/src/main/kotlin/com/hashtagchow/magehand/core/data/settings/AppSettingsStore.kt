@@ -58,9 +58,29 @@ interface AppSettingsStore {
 
     suspend fun setUiScale(value: UiScale)
 
+    /**
+     * FR-44 R3: whether the tracker shows the **limited-use abilities** section — `action` and
+     * `spell` rows carrying a use count, discovered by shape (`TrackerKind.LIMITED_USE`).
+     *
+     * **Default `true`**, and the asymmetry with [showToggles] is deliberate rather than an
+     * inconsistency. R3 states it in one line: *"the table asked for the rows, the switch is for
+     * people who did not"*. FR-6's switch defaults off because most sheets' toggles are build
+     * machinery a player never wanted on screen; these rows are the feature the operator asked
+     * for, and a feature that ships off is a feature nobody finds.
+     *
+     * The default lives here, next to [DEFAULT_SHOW_TOGGLES] and for the same reason: a caller
+     * that forgets it cannot accidentally opt a screen into the opposite answer.
+     */
+    val showLimitedUses: Flow<Boolean>
+
+    suspend fun setShowLimitedUses(value: Boolean)
+
     companion object {
         /** 09 decision 9, stated once. */
         const val DEFAULT_SHOW_TOGGLES: Boolean = false
+
+        /** FR-44 R3's "default **ON**", stated once. */
+        const val DEFAULT_SHOW_LIMITED_USES: Boolean = true
     }
 }
 
@@ -88,11 +108,27 @@ class DataStoreAppSettingsStore(
         dataStore.edit { it[KEY_UI_SCALE] = value.key }
     }
 
+    /** FR-44 R3, in [showToggles]'s shape — one boolean in the same preferences file. */
+    override val showLimitedUses: Flow<Boolean> =
+        dataStore.data.map { it[KEY_SHOW_LIMITED_USES] ?: AppSettingsStore.DEFAULT_SHOW_LIMITED_USES }
+
+    override suspend fun setShowLimitedUses(value: Boolean) {
+        dataStore.edit { it[KEY_SHOW_LIMITED_USES] = value }
+    }
+
     companion object {
         /** 09 decision 9 names the key `show_toggles`; this is that name, unchanged. */
         private val KEY_SHOW_TOGGLES = booleanPreferencesKey("show_toggles")
 
         /** 14 decision 2's "app-level string", in the same preferences file. */
         private val KEY_UI_SCALE = stringPreferencesKey("ui_scale")
+
+        /**
+         * FR-44 R3. Named for the switch, in `show_toggles`' snake_case — the two are read as a
+         * pair by anyone inspecting the preferences file, and an install that has never seen the
+         * switch has no entry at all, which is what makes
+         * [AppSettingsStore.DEFAULT_SHOW_LIMITED_USES] the answer on upgrade.
+         */
+        private val KEY_SHOW_LIMITED_USES = booleanPreferencesKey("show_limited_uses")
     }
 }

@@ -58,16 +58,22 @@ class FakeAccounts(seed: List<Account> = emptyList()) : AccountRepository {
     override suspend fun tokenFor(accountId: String): String? = null
 }
 
-/** FR-6's switch and FR-18's scale, in memory. Writeable, so a rendered toggle can move them. */
+/**
+ * FR-6's switch, FR-18's scale and FR-44's switch, in memory. Writeable, so a rendered toggle can
+ * move them.
+ */
 class FakeSettings(
     showToggles: Boolean = AppSettingsStore.DEFAULT_SHOW_TOGGLES,
     uiScale: UiScale = UiScale.DEFAULT,
+    showLimitedUses: Boolean = AppSettingsStore.DEFAULT_SHOW_LIMITED_USES,
 ) : AppSettingsStore {
     private val toggles = MutableStateFlow(showToggles)
     private val scale = MutableStateFlow(uiScale)
+    private val limitedUses = MutableStateFlow(showLimitedUses)
 
     override val showToggles: Flow<Boolean> = toggles
     override val uiScale: Flow<UiScale> = scale
+    override val showLimitedUses: Flow<Boolean> = limitedUses
 
     override suspend fun setShowToggles(value: Boolean) {
         toggles.value = value
@@ -75,5 +81,9 @@ class FakeSettings(
 
     override suspend fun setUiScale(value: UiScale) {
         scale.value = value
+    }
+
+    override suspend fun setShowLimitedUses(value: Boolean) {
+        limitedUses.value = value
     }
 }

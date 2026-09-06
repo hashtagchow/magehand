@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.ui.screens.characterhome.tracker
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -82,6 +83,8 @@ class TrackerUiStateTest {
         accent: String? = null,
         /** FR-6. True here so every pre-FR-6 assertion keeps asserting FR-1/2's behaviour. */
         showToggles: Boolean = true,
+        /** FR-44 R3. True here because that is the shipped default (R3: "default ON"). */
+        showLimitedUses: Boolean = true,
         hasConnection: Boolean = true,
         selectedRollId: String? = null,
     ) = toTrackerUiState(
@@ -93,6 +96,7 @@ class TrackerUiStateTest {
         accentColor = accent,
         zone = utc,
         showToggles = showToggles,
+        showLimitedUses = showLimitedUses,
         hasConnection = hasConnection,
         selectedRollId = selectedRollId,
     )
@@ -978,5 +982,120 @@ class TrackerUiStateTest {
         val onlyDice = TrackerBoard(hitDice = listOf(hitDie("hd8", "d8", 3, 5)))
 
         assertFalse(map(board = onlyDice).isEmpty)
+    }
+
+    // --- FR-44: limited-use abilities (R1, R3) ------------------------------
+
+    private fun limitedUse(id: String, name: String, value: Int, total: Int, reset: ResetRule?) =
+        TrackedResource(
+            propertyId = id,
+            kind = TrackerKind.LIMITED_USE,
+            name = name,
+            value = value,
+            total = total,
+            reset = reset,
+        )
+
+    private val withAbilities = sabriel.copy(
+        limitedUses = listOf(
+            limitedUse("lu1", "Guiding Bolt (Star Map)", 1, 2, ResetRule.LONG_REST),
+            limitedUse("lu2", "Adrenaline Rush", 2, 2, ResetRule.SHORT_REST),
+            limitedUse("lu3", "Unnamed Trick", 1, 1, null),
+        ),
+    )
+
+    /** The rows reach the screen as ordinary pip rows, with FR-20's badge off the row's reset. */
+    @Test
+    fun `limited-use rows become pip rows with their reset badge`() {
+        val rows = map(board = withAbilities).limitedUses
+
+        assertEquals(listOf("lu1", "lu2", "lu3"), rows.map { it.propertyId })
+        assertEquals(listOf("Guiding Bolt (Star Map)", "Adrenaline Rush", "Unnamed Trick"), rows.map { it.label })
+        assertEquals(listOf(1, 2, 1), rows.map { it.value })
+        assertEquals(listOf(2, 2, 1), rows.map { it.total })
+    }
+
+    /**
+     * R3's switch, off: the section is **absent**, not empty — the screen renders the group only
+     * when the list is non-empty, so emptying the list here is what removes the header too. This
+     * is FR-6's mechanism applied a second time, and it is asserted at both values because a gate
+     * that is only tested in one position is a gate whose sense could be inverted.
+     */
+    @Test
+    fun `with the limited-use switch off, the section is absent from the tracker entirely`() {
+        assertTrue(map(board = withAbilities, showLimitedUses = false).limitedUses.isEmpty())
+        assertEquals(3, map(board = withAbilities, showLimitedUses = true).limitedUses.size)
+    }
+
+    /** And it touches nothing else, exactly as FR-6's switch does not. */
+    @Test
+    fun `the limited-use switch touches nothing else on the board`() {
+        val off = map(board = withAbilities, showLimitedUses = false)
+        val on = map(board = withAbilities, showLimitedUses = true)
+
+        assertEquals(on.hp, off.hp)
+        assertEquals(on.slots, off.slots)
+        assertEquals(on.resources, off.resources)
+        assertEquals(on.hitDice, off.hitDice)
+        assertEquals(on.consumables, off.consumables)
+        assertEquals(on.conditions, off.conditions)
+    }
+
+    /** A board of nothing but limited uses is empty once they are hidden — FR-6's own pin. */
+    @Test
+    fun `a board of nothing but limited uses is empty once they are hidden`() {
+        val board = TrackerBoard(
+            limitedUses = listOf(limitedUse("lu1", "Second Wind", 1, 1, ResetRule.SHORT_REST)),
+        )
+
+        assertFalse(map(board = board, showLimitedUses = true).isEmpty)
+        assertTrue(map(board = board, showLimitedUses = false).isEmpty)
+    }
+
+    /**
+     * **R2's probe result, made structural.** These rows DO belong in the rest dialog's restore
+     * list, and hit dice still do not — the two facts sit one line apart here on purpose, because
+     * from the UI they look like the same kind of row and the difference is entirely what the
+     * server does. `creature.methods.rest` clears `usesUsed` on a matching row and logs it
+     * (probe FR-44 B); it restores half the hit dice by its own arithmetic (probe H3).
+     */
+    @Test
+    fun `a rest's restore list names limited-use rows, by their own reset rule`() {
+        val board = withAbilities.copy(hitDice = listOf(hitDie("hd8", "d8", 3, 5)))
+        val state = map(board = board)
+
+        val long = state.rowsRestoredBy(RestKind.LONG).map { it.propertyId }
+        assertTrue("a long rest restores both reset rules", "lu1" in long)
+        assertTrue("lu2" in long)
+        assertFalse("a row with no reset rule is restored by nothing", "lu3" in long)
+        assertFalse("hit dice stay out — 18 decision 19", "hd8" in long)
+
+        val short = state.rowsRestoredBy(RestKind.SHORT).map { it.propertyId }
+        assertFalse("lu1" in short)
+        assertTrue("lu2" in short)
+    }
+
+    /**
+     * With the switch off the rows are not on the tracker, so a rest dialog must not promise
+     * them either — which falls out of the gate rather than needing its own rule, and is
+     * asserted so it cannot stop falling out.
+     */
+    @Test
+    fun `the rest list follows the limited-use switch`() {
+        val off = map(board = withAbilities, showLimitedUses = false)
+
+        assertTrue(off.rowsRestoredBy(RestKind.LONG).none { it.propertyId.startsWith("lu") })
+    }
+
+    /** FR-22 direct entry reaches these rows through the resource key, like a hit-die row. */
+    @Test
+    fun `direct entry resolves a limited-use row through the resource key`() {
+        val target = map(board = withAbilities).directEntryTarget(DirectEntryKeys.resource("lu1"))
+
+        assertNotNull(target)
+        assertEquals(DirectEntryKind.RESOURCE, target!!.kind)
+        assertEquals("Guiding Bolt (Star Map)", target.label)
+        assertEquals(1, target.current)
+        assertEquals("the ceiling is the row's own total", 2, target.max)
     }
 }

@@ -448,6 +448,13 @@ class CharacterHomeViewModel @Inject constructor(
      */
     private val showToggles: Flow<Boolean> = appSettingsStore.showToggles
 
+    /**
+     * FR-44 R3's switch. Read here for [showToggles]' reason — the gate belongs on the state the
+     * screen renders — and read only by the tracker: R4 fences the DM cards, the local screen and
+     * the Actions tab out of this wave entirely, so no other view model reads it.
+     */
+    private val showLimitedUses: Flow<Boolean> = appSettingsStore.showLimitedUses
+
     private val trackerState: Flow<TrackerUiState> = open.flatMapLatest { character ->
         if (character == null) {
             flowOf(TrackerUiState(creatureId = creatureId))
@@ -465,8 +472,12 @@ class CharacterHomeViewModel @Inject constructor(
                 character.canWrite,
                 character.canUndo,
                 character.writeHistory,
-                combine(showToggles, selectedRollId(character)) { toggles, rollId ->
-                    Prefs(showToggles = toggles, selectedRollId = rollId)
+                combine(
+                    showToggles,
+                    selectedRollId(character),
+                    showLimitedUses,
+                ) { toggles, rollId, limitedUses ->
+                    Prefs(showToggles = toggles, selectedRollId = rollId, showLimitedUses = limitedUses)
                 },
             ) { read, canWrite, canUndo, history, prefs ->
                 toTrackerUiState(
@@ -481,6 +492,7 @@ class CharacterHomeViewModel @Inject constructor(
                     history = history,
                     zone = zone,
                     showToggles = prefs.showToggles,
+                    showLimitedUses = prefs.showLimitedUses,
                     selectedRollId = prefs.selectedRollId,
                 )
             }
@@ -1129,7 +1141,16 @@ class CharacterHomeViewModel @Inject constructor(
         // FR-30: hit dice join the lookup, because decision 18 writes them through these same
         // `spend`/`restore` intents — the row a tap names has to be findable or the tap is
         // dropped. See `TrackerBoard.hitDice` for why they are their own list to begin with.
-        val row = (board.slots + board.resources + board.hitDice + board.allItems + listOfNotNull(board.hp))
+        //
+        // FR-44: and so do the limited uses, for exactly that reason and with exactly that
+        // failure mode. This is the price of every new board list — the section renders, the pips
+        // draw, the row speaks its name, and the tap does nothing at all, because the id resolves
+        // against a sum that does not include it. `TrackerTabIntentTest` pins the tap; nothing
+        // else in this file could have.
+        val row = (
+            board.slots + board.resources + board.limitedUses + board.hitDice + board.allItems +
+                listOfNotNull(board.hp)
+            )
             .firstOrNull { it.propertyId == propertyId } ?: return
         act(character, row)
     }
@@ -1387,14 +1408,19 @@ class CharacterHomeViewModel @Inject constructor(
     )
 
     /**
-     * The two *preference* signals, bundled for the same arity reason as [Read].
+     * The *preference* signals, bundled for the same arity reason as [Read].
      *
      * FR-7's selection made the tracker's `combine` nine flows wide, one past the typed
      * five-arity overload nesting bought. Pairing the two DataStore-backed reads is the
      * cheapest honest fix — they are the same kind of signal (a stored choice, not sheet
      * data), so the grouping means something rather than being an arbitrary split to fit.
      */
-    private data class Prefs(val showToggles: Boolean, val selectedRollId: String?)
+    private data class Prefs(
+        val showToggles: Boolean,
+        val selectedRollId: String?,
+        /** FR-44 R3. A third stored choice, which is what this bundle is for. */
+        val showLimitedUses: Boolean,
+    )
 
     /** The inventory tab's stored preferences. See [inventoryPrefs]. */
     private data class InventoryPrefs(

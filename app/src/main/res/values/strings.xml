@@ -208,6 +208,10 @@
     <string name="tracker_section_slots">Spell slots</string>
     <string name="tracker_section_resources">Resources</string>
     <string name="tracker_section_consumables">Consumables</string>
+    <!-- FR-44 R1. "Limited use" and not "Features": the section is defined by carrying a use
+         count, not by the sheet's own idea of what a feature is, and a spell can be in it
+         (a Circle of the Stars druid's Guiding Bolt from a Star Map is 2 / long rest and costs no slot). -->
+    <string name="tracker_section_limited_uses">Limited use</string>
     <!-- FR-30 (docs/design/18-table-pack.md decision 17). The row label is composed here and
          not in TrackerEngine, which has no R class: the engine carries the die size as a fact
          (TrackedResource.dieSize) and this is the one place the word "Hit Dice" is written. -->
@@ -364,6 +368,11 @@
     <string name="settings_tracker">Tracker</string>
     <string name="settings_show_toggles">Show toggles on tracker</string>
     <string name="settings_show_toggles_note">Most sheets\' toggles are build machinery — hidden unless you use them.</string>
+    <!-- FR-44 R3, wording from the ruling. The note names the thing rather than the switch,
+         as the FR-6 note above does: "limited-use abilities" is jargon until you are told it
+         means the ones with a use count, and an example is the shortest way to say it. -->
+    <string name="settings_show_limited_uses">Show limited-use abilities on tracker</string>
+    <string name="settings_show_limited_uses_note">Actions and spells with a use count, like 2 per long rest.</string>
 
     <!-- FR-18: UI scale (docs/design/14-large-screen-arc.md decisions 2-4). The note is
          decision 3's sentence verbatim: the sheet is a WebView, so it can only scale its

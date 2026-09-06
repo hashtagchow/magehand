@@ -52,6 +52,32 @@ object TrackerEngine {
      */
     const val ATTR_HIT_DICE = "hitDice"
 
+    /**
+     * FR-44 R1's discriminators — the two property **types** a limited-use row can be.
+     *
+     * Public for [ATTR_HIT_DICE]'s reason: the contract export states the discovery rule from the
+     * constants that implement it, so the two cannot drift.
+     *
+     * Both, and not just `action`: the live probe of the party's sheets found the headline case —
+     * a Stars druid's *Guiding Bolt (Star Map)*, 2 / long rest — typed `spell`, because a Star Map spell
+     * granted by a feature is a spell that costs a use rather than a slot. Matching `action`
+     * alone would have missed exactly the row the FR was raised for.
+     */
+    const val TYPE_ACTION = "action"
+    const val TYPE_SPELL = "spell"
+
+    /**
+     * The counter a limited-use row carries, and the field the write moves.
+     *
+     * Public because [WriteOp.SetUsesUsed] sends this exact string as the `path` element and the
+     * contract export prints it; three copies of `"usesUsed"` is three chances for one of them to
+     * be a typo the server answers with a silent no-op. (`ActionEngine` keeps its own private
+     * copies because it is a *reader* on the other side of the same field; the two are pinned
+     * against each other by `LimitedUseDiscoveryTest`.)
+     */
+    const val FIELD_USES = "uses"
+    const val FIELD_USES_USED = "usesUsed"
+
     /** The die a hit-dice row counts — `"d8"` on the live sheet. See [hitDieSize]. */
     private const val FIELD_HIT_DICE_SIZE = "hitDiceSize"
 
@@ -132,6 +158,7 @@ object TrackerEngine {
 
         val slots = properties.mapNotNull { spellSlot(it) }
         val resources = properties.mapNotNull { resource(it) }
+        val limitedUses = properties.mapNotNull { limitedUse(it) }
         val hitDice = properties.mapNotNull { hitDice(it) }
         val items = properties.mapNotNull { item(it) }
         val toggles = properties.mapNotNull { toggle(it) }
@@ -147,6 +174,11 @@ object TrackerEngine {
                 ?.takeUnless { overrides[it.propertyId]?.hidden == true },
             slots = order(slots, overrides, SLOT_ORDER),
             resources = order(resources, overrides, NATURAL_ORDER),
+            // FR-44 R1. Sorted but **not** override-filtered, for the reason on the line below
+            // and by the same precedent: no customize-sheet control can reach one of these rows,
+            // so the override layer could only ever hide one irrecoverably. FR-44's own switch
+            // (R3) is the control, and it hides the section rather than a row.
+            limitedUses = limitedUses.sortedWith(NATURAL_ORDER),
             // FR-30 decision 17. Sorted but **not** override-filtered, unlike the two lists above
             // and for `deathSaves`' reason one line down: the customize sheet builds its sections
             // from slots, resources, items and toggles, so nothing anywhere can pin, hide or
@@ -212,6 +244,114 @@ object TrackerEngine {
         val value = p.remaining(total)
         if (total <= 0 && value <= 0) return null
         return p.toResource(TrackerKind.RESOURCE, total = total, reset = ResetRule.fromWire(p.string("reset")))
+    }
+
+    /**
+     * FR-44 R1: an `action` or `spell` row carrying a **numeric `uses`**.
+     *
+     * > *"`action` and `spell` rows with a numeric `uses`, not `inactive`, not removed, become
+     * > `TrackerKind.LIMITED_USE`: value = `uses − usesUsed` (`usesUsed` absent reads 0, as
+     * > `ActionEngine.usesFor`), total = `uses`, label = the property's `name`, `reset` read from
+     * > the row so the FR-20 badge applies."*
+     *
+     * ### Discovery by **shape**, which is the operator's stated requirement
+     *
+     * Nothing here names a feature, a class or a sheet. A row is a limited-use row because it
+     * carries a use count, so a new ability added to any character's sheet appears on the tracker
+     * with no build and no list to maintain — the same posture [damageDefense] takes towards a
+     * homebrew damage type. The party's own rows span both types, three different `uses`
+     * calculations (`2`, `proficiencyBonus`, `max(1, wisdom.modifier)`) and both reset rules; not
+     * one of those variations is visible from here, because [number] resolves the server's
+     * `_calculation` wrapper down to the answer it already computed.
+     *
+     * ### `uses` absent is not a limited-use row, and `usesUsed` absent is zero
+     *
+     * The presence of a **positive** `uses` is the rule — an ability with no counter is an
+     * unlimited ability and has nothing to put pips on, and one whose counter computes to `0` or
+     * less has no pips to draw either. The zero case is not hypothetical: `uses` is a calculation
+     * (*Guiding Bolt (Star Map)* is `proficiencyBonus`, *Weal* is `max(1, wisdom.modifier)`), so a
+     * character built below the level that grants an ability can publish a real row whose count
+     * evaluates to zero. A zero-pip row is a section entry the player can neither read nor spend,
+     * and the export states the same rule (`domain/rules.json#discovery.limitedUses.include`).
+     *
+     * `usesUsed`, by contrast, is written by the server only once
+     * a use has been spent, so its absence is a fact (*"never used"*) rather than an unknown; the
+     * live sheets show four of the live druid sheet's five limited rows with the key simply missing.
+     * `ActionEngine.usesFor` has read it that way since FR-28 and this is deliberately the same
+     * reading in the same words, because the Actions tab's *"N of M uses left"* and this row's
+     * pips are two renderings of one number and a player will have both on screen.
+     *
+     * ### A newly added ability is not on the tracker for the first few seconds
+     *
+     * `uses` arrives as DiceCloud's `_calculation` wrapper and [number] resolves it through its
+     * **`value`** key — the server's computed answer. That answer is written on a *debounced*
+     * pass, so between a property being created and that pass landing the wrapper carries a
+     * `calculation` and no `value`, [number] returns `null`, and this function correctly declines
+     * to invent a row. The re-probe of 2026-09-06 measured the window on the Test Dummy at
+     * **~2.5 s** from insert (docs/verification/probe-fr44.md, probe C); every frame after that
+     * carried `value` immediately. The same holds for an ability whose calculation *errors* — a
+     * reference to a variable the sheet does not have — except that there the row never appears at
+     * all, because the server never writes a `value` to appear from.
+     *
+     * **Ruling (FR-44 fix pass): no fallback that parses `calculation`.** The string is DiceCloud's
+     * own expression language over the character's variables; evaluating `proficiencyBonus` or
+     * `max(1, wisdom.modifier)` here would be a second implementation of the server's rules engine
+     * for the sake of two seconds — 10 decision 3's grand-total lesson, in the discovery layer.
+     * The honest behaviour is the one above: the row appears when the server says what it is. This
+     * paragraph exists so that "my new ability is not on the tracker yet" is a documented wait
+     * rather than a bug report.
+     *
+     * ### Why `value` is computed rather than read from `usesLeft`
+     *
+     * The server publishes `usesLeft`, and it is the obvious-looking field. 17 decision 1 is
+     * explicit that it **must not** drive the UI: it lags a debounced recompute by 4–10 s (probe
+     * U5), so a row driven by it would sit visibly wrong for seconds after every spend — exactly
+     * the window a player is looking at it. `uses − usesUsed` is arithmetic over two fields the
+     * server writes synchronously, which is why the Actions tab already computes it.
+     *
+     * FR-44's own re-probe caught the lag in the act and the transcript is worth keeping: one
+     * frame after a write set `usesUsed: 1` on a 2-use row, the same document still published
+     * `usesLeft: 2`. A row driven by that field would have shown a full ability the instant after
+     * the player spent from it.
+     *
+     * ### The blanket skip, and the one it now also catches
+     *
+     * [isSkipped] drops `inactive` and `removed` as everywhere else. Both cases are real here
+     * rather than theoretical: the live druid sheet carries four limited-use rows that are `inactive` until the
+     * levels that grant them (*Cosmic Omen*, *Weal*, *Woe*, *Eat a Goodberry*), and FR-44's own
+     * R2 probe left a soft-removed `action` on the Test Dummy — a permanent negative fixture for
+     * this predicate. Note that this makes tracker discovery **stricter than the Actions tab**,
+     * which deliberately keeps `inactive` rows and badges them (16 decision 2): a dimmed row that
+     * explains itself is right for a list of everything the character has, and wrong for a strip
+     * of pips whose entire purpose is "spend this".
+     */
+    private fun limitedUse(p: JsonObject): TrackedResource? {
+        val type = p.string("type")
+        if (type != TYPE_ACTION && type != TYPE_SPELL) return null
+        if (p.isSkipped()) return null
+        val total = p.number(FIELD_USES) ?: return null
+        if (total <= 0) return null
+        return p.toResource(
+            TrackerKind.LIMITED_USE,
+            total = total,
+            reset = ResetRule.fromWire(p.string("reset")),
+            // `total − usesUsed`, not [remaining]'s `value ?: total − damage`: an action property
+            // carries neither of the two fields that reader looks at. Its `value` is absent and
+            // its consumption is `usesUsed`, which counts UP from zero rather than down from the
+            // total — the inversion `WriteOp.SetUsesUsed` exists to keep in one place.
+            //
+            // Floored at zero, because `usesUsed > uses` is a state the server can publish and
+            // this app cannot. `uses` is a calculation: an ability whose count shrinks — a lost
+            // level, an edited formula, a dropped proficiency bonus — keeps whatever `usesUsed`
+            // it had, so a 3-use ability spent twice and re-computed to 1 publishes
+            // `uses: 1, usesUsed: 2`. Unfloored that is a row reading −1, with a negative pip
+            // count to draw and, worse, a *write* built from it: `WriteOp.adjust` derives
+            // `usesUsed = total − remaining`, so the first restore tap would send
+            // `usesUsed = 1 − 0 = 1` and the row would still read 0. Flooring here makes the row
+            // read "0 of 1" — spent out, which is the truthful reading of a counter that is past
+            // its own maximum — and the restore tap then writes `usesUsed: 0` and works.
+            valueOverride = (total - (p.number(FIELD_USES_USED) ?: 0)).coerceAtLeast(0),
+        )
     }
 
     /**
@@ -627,11 +767,17 @@ object TrackerEngine {
         level: Int? = null,
         /** [TrackerKind.HIT_DICE] only — see [TrackedResource.dieSize]. */
         dieSize: String? = null,
+        /**
+         * What is left, when [remaining]'s `value ?: total − damage` is the wrong arithmetic for
+         * this row (FR-44: an `action`/`spell` counts consumption in `usesUsed`, and carries
+         * neither `value` nor `damage`). `null` keeps every caller before FR-44 unchanged.
+         */
+        valueOverride: Int? = null,
     ): TrackedResource? = TrackedResource(
         propertyId = string("_id") ?: return null,
         kind = kind,
         name = string("name").orEmpty(),
-        value = remaining(total),
+        value = valueOverride ?: remaining(total),
         total = total,
         reset = reset,
         spellSlotLevel = level,

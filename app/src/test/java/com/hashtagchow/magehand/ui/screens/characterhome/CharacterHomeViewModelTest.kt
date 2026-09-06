@@ -1760,11 +1760,17 @@ class FakeEquippableOverrideStore : EquippableOverrideStore {
  * pinned at the default because no view model reads it — it reaches the UI through the root
  * density provider.
  */
-class FakeAppSettingsStore(showToggles: Boolean) : AppSettingsStore {
+class FakeAppSettingsStore(
+    showToggles: Boolean,
+    /** FR-44 R3. Defaulted to the shipped answer so every existing call site keeps its meaning. */
+    showLimitedUses: Boolean = AppSettingsStore.DEFAULT_SHOW_LIMITED_USES,
+) : AppSettingsStore {
     override val showToggles: Flow<Boolean> = flowOf(showToggles)
     override suspend fun setShowToggles(value: Boolean) = Unit
     override val uiScale: Flow<UiScale> = flowOf(UiScale.DEFAULT)
     override suspend fun setUiScale(value: UiScale) = Unit
+    override val showLimitedUses: Flow<Boolean> = flowOf(showLimitedUses)
+    override suspend fun setShowLimitedUses(value: Boolean) = Unit
 }
 
 object StubTokenStore : TokenStore {

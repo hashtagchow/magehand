@@ -197,6 +197,38 @@ fun SettingsScreen(
                         .testTag("settings:show-toggles"),
                 )
             }
+
+            // FR-44 R3, in FR-6's shape immediately above — same row-as-target rule, same
+            // label-plus-note layout, same write-through. Beside it rather than in a section of
+            // its own because both answer one question ("what does the tracker show?"), and a
+            // reader who has just decided about toggles is in exactly the frame of mind to
+            // decide about these.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { viewModel.setShowLimitedUses(!uiState.showLimitedUses) }
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.settings_show_limited_uses),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Text(
+                        text = stringResource(R.string.settings_show_limited_uses_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = uiState.showLimitedUses,
+                    onCheckedChange = viewModel::setShowLimitedUses,
+                    modifier = Modifier
+                        .padding(start = 16.dp)
+                        .testTag("settings:show-limited-uses"),
+                )
+            }
         }
     }
 

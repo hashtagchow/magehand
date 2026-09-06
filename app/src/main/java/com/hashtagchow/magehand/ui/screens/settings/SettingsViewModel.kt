@@ -35,6 +35,13 @@ data class SettingsUiState(
      * being drawn at in that frame.
      */
     val uiScale: UiScale = UiScale.DEFAULT,
+    /**
+     * FR-44 R3's switch, seeded from [AppSettingsStore.DEFAULT_SHOW_LIMITED_USES] for
+     * [showToggles]' reason — and here the seeding matters more, because this default is **on**:
+     * a literal `false` here would show the switch off for one frame and then flick it on, which
+     * reads as the app changing a setting by itself.
+     */
+    val showLimitedUses: Boolean = AppSettingsStore.DEFAULT_SHOW_LIMITED_USES,
 )
 
 /**
@@ -53,8 +60,9 @@ class SettingsViewModel @Inject constructor(
         accountRepository.activeAccountId,
         appSettingsStore.showToggles,
         appSettingsStore.uiScale,
-    ) { accounts, activeId, showToggles, uiScale ->
-        SettingsUiState(accounts, activeId, showToggles, uiScale)
+        appSettingsStore.showLimitedUses,
+    ) { accounts, activeId, showToggles, uiScale, showLimitedUses ->
+        SettingsUiState(accounts, activeId, showToggles, uiScale, showLimitedUses)
     }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUiState())
 
@@ -74,6 +82,11 @@ class SettingsViewModel @Inject constructor(
      */
     fun setUiScale(value: UiScale) {
         viewModelScope.launch { appSettingsStore.setUiScale(value) }
+    }
+
+    /** FR-44 R3. [setShowToggles]' write-through shape, unchanged — the flow brings it back. */
+    fun setShowLimitedUses(value: Boolean) {
+        viewModelScope.launch { appSettingsStore.setShowLimitedUses(value) }
     }
 
     fun switchTo(accountId: String) {

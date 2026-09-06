@@ -156,8 +156,34 @@ object ContractExport {
      * **restores half of them itself on a long rest** and logs it. A client that added a reset
      * rule to make them "work like resources" would then double-restore, or predict a restoration
      * the server has already performed differently.
+     *
+     * **8** — FR-44's limited-use abilities (`domain/rules.json#discovery.limitedUses`, the
+     * `limited-use-discovery` vector, `LIMITED_USE` in `#trackerKinds`, and the `update.*Use`
+     * write vectors). A bump for 4/5/6/7's reason and the strongest instance of it yet: a
+     * consumer implementing the exported discovery rules literally matches `type == 'attribute'`
+     * and finds **no** limited-use ability on any sheet, because these rows are not attributes at
+     * all — the counter lives on the `action`/`spell` property beside the one the Actions tab
+     * already reads. No row, no error, and nothing in the export said the rows existed.
+     *
+     * Three facts here are not guessable from the match, and each is a bug a second client ships
+     * before it learns:
+     *
+     *  - **The write is `creatureProperties.update {path:['usesUsed']}`**, an absolute set — not
+     *    `damage`, which is an `attribute` method against a field these properties do not have,
+     *    and not `doAction`, which runs the whole effect tree and posts to the party feed. The
+     *    method's own denied-path list (`type/order/parent/ancestors/damage`) does not include
+     *    `usesUsed`, and the live probe confirmed the server accepts it and recomputes.
+     *  - **The counter runs the other way.** `usesUsed` counts *up* from zero while the row shows
+     *    uses *left*; a client that treats it as a remaining count spends backwards.
+     *  - **`usesLeft` is published and must not be read.** It is the field whose name a consumer
+     *    recognises, and it lags a debounced recompute by 4–10 s (probe U5, already exported for
+     *    the Use path). `uses − usesUsed` is the number to render.
+     *
+     * The rest half is the good news and is exported as such: `creature.methods.rest` **does**
+     * clear `usesUsed` on a row whose `reset` matches, and logs it — so unlike hit dice these
+     * rows belong in a rest dialog's restore list.
      */
-    const val SCHEMA_VERSION: Int = 7
+    const val SCHEMA_VERSION: Int = 8
 
     /** Where the export lives, relative to the repository root. */
     const val DIRECTORY: String = "contract-export"
@@ -1079,6 +1105,11 @@ object ContractExport {
         CreatureSheet.fromSnapshotJson(ContractFixtures.hitDiceSheetBody(), ContractFixtures.creatureId)
     }
 
+    /** FR-44's own fixture. See [ContractFixtures.limitedUseSheetBody]. */
+    private val limitedUseSheet: CreatureSheet by lazy {
+        CreatureSheet.fromSnapshotJson(ContractFixtures.limitedUseSheetBody(), ContractFixtures.creatureId)
+    }
+
     // -----------------------------------------------------------------------
     // FR-23 death saves
     // -----------------------------------------------------------------------
@@ -1210,6 +1241,18 @@ object ContractExport {
         TrackerEngine.build(inventorySheet).allItems.first { it.propertyId == ContractFixtures.potionId }
     }
 
+    /**
+     * The limited-use row the `update.*Use` vectors are built from — **produced by the engine**,
+     * never written down, so the vector's `_id` and its `value` come from the same discovery rule
+     * `limited-use-discovery` publishes. A hand-built `TrackedResource` here could name the wrong
+     * [TrackerKind] and silently route the frame to `creatureProperties.damage`, which is the
+     * mistake `deathSaveRow`'s KDoc already records one screen up.
+     */
+    private val limitedUseRow: TrackedResource by lazy {
+        TrackerEngine.build(limitedUseSheet).limitedUses
+            .first { it.propertyId == ContractFixtures.limitedUseActionId }
+    }
+
     /** Where a new item goes on this sheet — resolved by the production rule, not hardcoded. */
     private val insertTarget: InventoryEngine.InsertTarget by lazy {
         InventoryEngine.insertTarget(inventorySheet) ?: error("the inventory fixture must offer an insert target")
@@ -1261,6 +1304,35 @@ object ContractExport {
                     "(`set 5` on a 20-point row produced `value: 5, damage: 15`). Following the " +
                     "old reading sets a row to its own complement, and 'heal to full' — where " +
                     "`total − desired == 0` — would drop the character to 0 HP.",
+            ),
+
+            // --- creatureProperties.update, FR-44 limited uses -----------------------
+            Vector(
+                name = "update.spendUse",
+                op = WriteOp.spend(limitedUseRow),
+                note = "Spend one use of a limited-use ability — an `action` or `spell` property " +
+                    "carrying a use count, NOT an attribute. The row reads 1 of 2 left, so the " +
+                    "spend writes `usesUsed: 2`.",
+                quirk = "Three traps in one call. (1) The METHOD is " +
+                    "`creatureProperties.update`, not `creatureProperties.damage`: these " +
+                    "properties have no `damage` field, and `damage` is the attribute method. " +
+                    "(2) The VALUE is `usesUsed` — uses SPENT, counting up from zero — while the " +
+                    "row shows uses LEFT; `usesUsed = uses − remaining`. (3) The call is an " +
+                    "ABSOLUTE set and therefore idempotent, which is why it carries an inverse " +
+                    "where `doAction` (the server's own use machinery) cannot: `doAction` also " +
+                    "rolls the attack, spends every cost and posts to the party feed and any " +
+                    "webhook, none of which is reversible. `update` rejects the paths " +
+                    "`type/order/parent/ancestors/damage` and nothing else; `usesUsed` is " +
+                    "accepted and marks the property dirty, which is what recomputes `usesLeft`. " +
+                    "Live-probed 2026-09-06.",
+            ),
+            Vector(
+                name = "update.restoreUse",
+                op = WriteOp.restore(limitedUseRow),
+                note = "Give the use back; the inverse of the vector above, and the same call " +
+                    "with the other number. A long rest does this server-side for every row " +
+                    "whose `reset` matches — see domain/rules.json#discovery.limitedUses.rest — " +
+                    "so a client restoring them itself after calling `rest` writes twice.",
             ),
 
             // --- creatureProperties.damage, FR-23 death saves ------------------------
@@ -1580,22 +1652,25 @@ object ContractExport {
         trackerBoard.activeToggles.first { it.propertyId == ContractFixtures.rageToggleId }
     }
 
-    /** Methods design 02 catalogs that this client deliberately never calls. */
+    /**
+     * Methods design 02 catalogs that this client deliberately never calls.
+     *
+     * **A method belongs here or in [VECTORS], never both** — `ContractExportTest` asserts the two
+     * sets are disjoint, because the failure is not a duplicate entry but a *contradiction* a
+     * consumer reads as fact. `creatureProperties.update` sat here saying "MageHand has no caller,
+     * so none could be recorded rather than invented" in the same export that carried two recorded
+     * `update.*Use` vectors (FR-44). A reader trusting the note would have concluded the vectors
+     * were invented, which is exactly the thing this export exists to be trusted about. Its
+     * denied-path content is not lost: it is in `domain/rules.json#discovery.limitedUses.spend`
+     * and in the `update.spendUse` vector's own quirk, both now stated from a live probe.
+     */
     private val UNCALLED_METHODS: List<Triple<String, String, String>> = listOf(
-        Triple(
-            "creatureProperties.update",
-            "{_id, path: [...], value}",
-            "Rename and pin-side edits. REJECTS the paths `type`, `order`, `parent`, `ancestors` " +
-                "and `damage` — which is why consumption goes through `damage` and reparenting " +
-                "through `organizeDoc`. No wire vector: MageHand has no caller, so none could be " +
-                "recorded rather than invented.",
-        ),
         Triple(
             "creatures.insertCreature",
             "{name, gender?, alignment?, allowedLibraries…}",
             "Character creation. MageHand hands this to the server's own web UI in a WebView. " +
                 "A live probe established that `startingLevel` is required — `{name}` alone is a " +
-                "schema failure. No wire vector, for the same reason as above.",
+                "schema failure. No wire vector, because there is no caller to record one from.",
         ),
         Triple(
             "creatures.update",
@@ -2021,6 +2096,76 @@ object ContractExport {
                         "because its discovery matched `spellSlot` and `resource` and nothing " +
                         "else, which drops them with no row and no error. If your tracker shows " +
                         "no hit dice, check your predicate before you check the wire.",
+                )
+            },
+        )
+        put(
+            "limitedUses",
+            buildJsonObject {
+                put(
+                    "match",
+                    "(type == '${TrackerEngine.TYPE_ACTION}' || type == " +
+                        "'${TrackerEngine.TYPE_SPELL}') && a numeric `${TrackerEngine.FIELD_USES}` " +
+                        "is present",
+                )
+                put("include", "uses > 0, and the blanket !inactive && !removed")
+                put(
+                    "notAnAttribute",
+                    "**The single most important line in this block.** Every other rule in this " +
+                        "document matches `type == 'attribute'`. These rows are `action` and " +
+                        "`spell` properties — the same documents an actions/spells list already " +
+                        "reads — and a tracker built only from attributes finds none of them, " +
+                        "with no row and no error. Both types, not just `action`: a spell granted " +
+                        "by a feature (a Star Map's Guiding Bolt, 2 per long rest) costs a use " +
+                        "rather than a slot, and it is the headline case.",
+                )
+                put(
+                    "shape",
+                    "`${TrackerEngine.FIELD_USES}` is the maximum and " +
+                        "`${TrackerEngine.FIELD_USES_USED}` is how many have been spent, so " +
+                        "remaining = `uses − usesUsed`. `uses` arrives as the `_calculation` " +
+                        "wrapper (the live sheets carry `{calculation:'proficiencyBonus', …, " +
+                        "value:2}`) — read `value`, not `calculation`. `reset` is on the property " +
+                        "and takes the same `shortRest`/`longRest` values a slot does.",
+                )
+                put(
+                    "usesUsedAbsent",
+                    "An absent `${TrackerEngine.FIELD_USES_USED}` is **zero**, not unknown: the " +
+                        "server writes the key only once a use has been spent, so a never-used " +
+                        "ability simply has no counter. Four of the five limited rows on the " +
+                        "reference party's sheets are in that state.",
+                )
+                put(
+                    "usesLeftTrap",
+                    "The server ALSO publishes `usesLeft`, and it is the field whose name a " +
+                        "consumer recognises. **Do not render it.** It lags a debounced " +
+                        "server-side recompute by 4–10 s (probe U5, the same lag " +
+                        "ddp/method-vectors.json#use records for `insufficientResources`), so a " +
+                        "row driven by it sits visibly wrong for seconds after every spend — the " +
+                        "exact window a player is watching it. Compute `uses − usesUsed`, which " +
+                        "are both written synchronously.",
+                )
+                put(
+                    "spend",
+                    "`creatureProperties.update {_id, path:['${TrackerEngine.FIELD_USES_USED}'], " +
+                        "value}` — an ABSOLUTE set of uses SPENT, in the default 5-per-5-second " +
+                        "rate class. Not `creatureProperties.damage` (an attribute method; these " +
+                        "properties carry no `damage` field) and not `creatureProperties.doAction` " +
+                        "(which runs the whole effect tree, rolls, and posts to the party feed and " +
+                        "any webhook — right for a Use button, wrong for a tracker pip at a table " +
+                        "that rolls its own dice). `update`'s denied paths are exactly " +
+                        "`type/order/parent/ancestors/damage`; `usesUsed` is accepted and sets " +
+                        "`dirty: true`, which is the recompute. Live-probed 2026-09-06 — see " +
+                        "ddp/method-vectors.json#vectors `update.spendUse`.",
+                )
+                put(
+                    "rest",
+                    "`creature.methods.rest` **does** clear `usesUsed` on a row whose `reset` " +
+                        "matches the rest kind, and writes a `creatureLogs` entry for it " +
+                        "(*\"Restored 1 uses\"*, live-probed 2026-09-06). So these rows — unlike " +
+                        "hit dice, see #discovery.hitDice.longRest — belong in a rest confirm " +
+                        "dialog's \"restored to full\" list, and a client must NOT restore them " +
+                        "itself afterwards or it writes twice.",
                 )
             },
         )
@@ -2617,6 +2762,35 @@ object ContractExport {
                 )
                 add(
                     discoveryVector(
+                        name = "limited-use-discovery",
+                        purpose = "FR-44's discovery rule (domain/rules.json#discovery.limitedUses) " +
+                            "on its own sheet, for `hit-dice-discovery`'s reason and one stronger: " +
+                            "these rows are not `attribute` properties at all, so every predicate " +
+                            "`tracker-discovery` exercises drops them silently. Three of the seven " +
+                            "input properties must survive and four must not.",
+                        exercises = listOf(
+                            "an `action` with uses:2 usesUsed:1 — value = uses − usesUsed, NOT `usesLeft`; " +
+                                "every input row publishes a deliberately STALE `usesLeft` (99), so " +
+                                "reading that field fails this vector",
+                            "a `spell` row: matching `action` alone misses the case the FR was raised for",
+                            "`usesUsed` absent reads 0 — a never-used ability, not an unknown one",
+                            "`uses` as the server's `_calculation` wrapper, read through to `value`",
+                            "`reset` carried onto the row from the property (shortRest AND longRest)",
+                            "inactive: true and removed: true exclusions (both documents are in the input)",
+                            "an action with no `uses` at all is not a row — an unlimited ability has " +
+                                "nothing to count",
+                            "`uses` present but computing to 0 is not a row either — `uses` is a " +
+                                "calculation, so an ability the character has not qualified for yet " +
+                                "publishes a real property with no pips to draw",
+                        ),
+                        input = ContractFixtures.limitedUseSheetBody(),
+                        expected = buildJsonObject {
+                            put("trackerBoard", TrackerEngine.build(limitedUseSheet).toJson())
+                        },
+                    ),
+                )
+                add(
+                    discoveryVector(
                         name = "inventory-discovery",
                         purpose = "The inventory board, plus the TRACKER board over the same " +
                             "input. Both engines on one sheet is what makes the missing-quantity " +
@@ -2862,6 +3036,8 @@ object ContractExport {
         // carried the same drop `OptimisticOverlay.applyTo` was fixed for (H1), just on the
         // contract-export side of the app instead of the tracker's.
         put("hitDice", JsonArray(hitDice.map { it.toJson() }))
+        // FR-44's own list, named for `hitDice`'s reason one line up.
+        put("limitedUses", JsonArray(limitedUses.map { it.toJson() }))
         put("allItems", JsonArray(allItems.map { it.toJson() }))
         put("pinnedItems", JsonArray(pinnedItems.map { it.toJson() }))
         put("activeToggles", JsonArray(activeToggles.map { it.toJson() }))

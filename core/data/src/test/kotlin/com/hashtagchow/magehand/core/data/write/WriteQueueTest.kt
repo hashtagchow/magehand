@@ -693,6 +693,72 @@ class WriteQueueTest {
         assertFalse(h.queue.canUndo.value)
     }
 
+    /** FR-44's row: 1 of 2 uses left, so a spend writes `usesUsed: 2`. */
+    private val ability = TrackedResource(
+        propertyId = "lu-1",
+        kind = TrackerKind.LIMITED_USE,
+        name = "Guiding Bolt (Star Map)",
+        value = 1,
+        total = 2,
+    )
+
+    /**
+     * **A Use invalidates the undo for the property it used, and only that property** (FR-44).
+     *
+     * `doAction` increments `usesUsed` server-side; `SetUsesUsed` writes it absolutely. So an undo
+     * entry minted by a pip spend, then a Use on the same ability, then UNDO would send the
+     * absolute computed *before* the server's increment — handing the player back both uses. The
+     * entry has to go.
+     *
+     * The second half is the ruling's real content: the slot's undo **survives**. Clearing the
+     * whole stack (a rest's rule) would take away the undo for a `damage increment -1` that is
+     * exactly as correct after a Use as before it, which is a real loss for a hazard that never
+     * reaches that row.
+     */
+    @Test
+    fun `a use drops the undo for that property and leaves every other row's alone`() = queueTest {
+        val h = harness()
+        h.queue.submit(WriteOp.spend(slot))
+        h.queue.submit(WriteOp.spend(ability))
+        advanceUntilIdle()
+        assertTrue("both writes are undoable before the use", h.queue.canUndo.value)
+
+        h.queue.submit(WriteOp.useAction("lu-1", targetName = "Guiding Bolt (Star Map)"))
+        advanceUntilIdle()
+        h.caller.reset()
+
+        // The ability's own history row is no longer offering an UNDO it cannot honour.
+        val abilityEntry = h.queue.history.value.first { it.targetName == "Guiding Bolt (Star Map)" }
+        assertFalse("the pip spend's undo is gone", abilityEntry.undoable)
+
+        // And the next UNDO is the SLOT's, untouched — one `damage` call, not an `update`.
+        assertTrue(h.queue.undo())
+        advanceUntilIdle()
+        val call = h.caller.calls.single()
+        assertEquals("creatureProperties.damage", call.method)
+        assertEquals("slot-1", call.text("_id"))
+    }
+
+    /** A Use on some *other* property leaves the limited-use undo exactly where it was. */
+    @Test
+    fun `a use on another property does not touch this row's undo`() = queueTest {
+        val h = harness()
+        h.queue.submit(WriteOp.spend(ability))
+        advanceUntilIdle()
+
+        h.queue.submit(WriteOp.useAction("some-other-action"))
+        advanceUntilIdle()
+        h.caller.reset()
+
+        assertTrue(h.queue.undo())
+        advanceUntilIdle()
+        val call = h.caller.calls.single()
+        assertEquals("creatureProperties.update", call.method)
+        assertEquals("lu-1", call.text("_id"))
+        // Back to one spent, which is where the row was before the pip tap.
+        assertEquals(1, call.int("value"))
+    }
+
     @Test
     fun `a write lost to a dying socket is never replayed`() = queueTest {
         // docs/verification/WP2.md deviation #3: replaying an increment whose result we

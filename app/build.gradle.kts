@@ -161,8 +161,8 @@ android {
         // move.** The contract describes the shapes DiceCloud publishes and which of them the
         // engine acts on; both are exactly what they were. What changed is that the app stopped
         // mis-transcribing one of them.
-        versionCode = 27
-        versionName = "1.14.2"
+        versionCode = 28
+        versionName = "1.15.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

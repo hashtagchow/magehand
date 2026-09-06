@@ -5,6 +5,7 @@ import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.ui.components.DirectEntryKeys
 import com.hashtagchow.magehand.ui.components.DirectEntryKind
 import com.hashtagchow.magehand.ui.components.DirectEntryTarget
+import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DamageDefense
@@ -404,6 +405,26 @@ data class TrackerUiState(
     val slots: List<PipRowState> = emptyList(),
     val resources: List<PipRowState> = emptyList(),
     /**
+     * The limited-use ability rows — `action` / `spell` properties with a use count (FR-44 R1).
+     *
+     * Empty when the character has none **and** when FR-44's switch is off (R3), which is what
+     * makes the section and its header *absent* rather than empty: the screen already renders the
+     * group only `if (limitedUses.isNotEmpty())`, so the gate reuses the rule the screen has for a
+     * character with no such abilities. That is FR-6's shape applied a second time — see
+     * [toTrackerUiState]'s `showLimitedUses` parameter.
+     *
+     * ### Recorded deviation: "below resources, above hit dice" is half a screen instruction
+     *
+     * R1 asks for the section *"below resources, above hit dice"*. On this screen those two cannot
+     * both hold: 18 decision 17 puts hit dice **directly below HP** — above the defenses, the
+     * rolls, the slots and the resources — because they are the other thing attached to hit
+     * points. So the rows are drawn directly below the Resources section (R1's first half, and the
+     * load-bearing one: these are resources you spend, and they belong with the resources), and
+     * "above hit dice" is honoured where it can be, in `TrackerBoard`'s own field order. Moving
+     * the hit-dice section to satisfy the second half would re-decide FR-30.
+     */
+    val limitedUses: List<PipRowState> = emptyList(),
+    /**
      * The hit-dice rows, one per die size (FR-30, 18 decision 17: *"rendered as tracker rows
      * below HP … pips spent/total, FR-22 direct entry applies"*).
      *
@@ -476,9 +497,9 @@ data class TrackerUiState(
 ) {
     /** Nothing discovered yet — a cold open with no snapshot and no live sub. */
     val isEmpty: Boolean
-        get() = hp == null && slots.isEmpty() && resources.isEmpty() && hitDice.isEmpty() &&
-            consumables.isEmpty() && conditions.isEmpty() && inactiveConditions.isEmpty() &&
-            defenses.isEmpty() && !rolls.isPresent
+        get() = hp == null && slots.isEmpty() && resources.isEmpty() && limitedUses.isEmpty() &&
+            hitDice.isEmpty() && consumables.isEmpty() && conditions.isEmpty() &&
+            inactiveConditions.isEmpty() && defenses.isEmpty() && !rolls.isPresent
 
     /**
      * Distinguishes "this character genuinely has no tracker rows" from "we have not
@@ -600,7 +621,10 @@ data class TrackerUiState(
             // says *"FR-22 direct entry applies"*, and a hit-dice row is written by the same
             // `spend`/`restore` intents against the same ceiling as a resource — the key prefix
             // names the *shape* of the target, not the section it was drawn in.
-            (slots + resources + hitDice).firstOrNull { it.propertyId == id }?.let {
+            // FR-44 joins the same lookup for the same reason: a limited-use row is written by
+            // the same `spend`/`restore` intents against the same ceiling, so it is the same
+            // *shape* of target however different the DDP call underneath it is.
+            (slots + resources + limitedUses + hitDice).firstOrNull { it.propertyId == id }?.let {
                 DirectEntryTarget(
                     kind = DirectEntryKind.RESOURCE,
                     propertyId = it.propertyId,
@@ -634,6 +658,12 @@ data class TrackerUiState(
  *
  * @param zone injected so the formatted `HH:MM` is deterministic in tests. Production
  *   passes the device zone.
+ * @param showLimitedUses FR-44 R3's `show_limited_uses`. **False empties
+ *   [TrackerUiState.limitedUses]**, which makes the section absent rather than empty — the same
+ *   mechanism `showToggles` uses one line down, and the reason the gate is here rather than in
+ *   `TrackerScreen`. Defaults to [AppSettingsStore.DEFAULT_SHOW_LIMITED_USES] (on) rather than to
+ *   a literal, so this function and the switch cannot disagree about what an unset preference
+ *   means.
  * @param showToggles FR-6's `show_toggles` (docs/design/09-local-characters.md decision 9).
  *   **False empties both condition lists**, which is what makes the section, its header and
  *   its inactive drawer *absent* from the tracker rather than merely collapsed: the screen
@@ -663,6 +693,7 @@ fun toTrackerUiState(
     history: List<TrackerWrite> = emptyList(),
     zone: ZoneId = ZoneId.systemDefault(),
     showToggles: Boolean = true,
+    showLimitedUses: Boolean = AppSettingsStore.DEFAULT_SHOW_LIMITED_USES,
     hasConnection: Boolean = true,
     selectedRollId: String? = null,
 ): TrackerUiState {
@@ -688,6 +719,11 @@ fun toTrackerUiState(
         rolls = toRollPicker(board.rolls, selectedRollId),
         slots = board.slots.map { it.toPipRow() },
         resources = board.resources.map { it.toPipRow() },
+        // FR-44 R3, in FR-6's shape one line up: false empties the list, which makes the section
+        // and its header absent rather than collapsed. Gated here rather than in the composable so
+        // `TrackerUiStateTest` can pin both values without a device, and so a second screen cannot
+        // re-derive it differently.
+        limitedUses = if (showLimitedUses) board.limitedUses.map { it.toPipRow() } else emptyList(),
         hitDice = board.hitDice.map { it.toPipRow() },
         consumables = board.pinnedItems.map { it.toConsumable() },
         conditions = conditions,

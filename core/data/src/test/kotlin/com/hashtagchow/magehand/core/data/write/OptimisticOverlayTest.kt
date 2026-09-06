@@ -32,11 +32,14 @@ class OptimisticOverlayTest {
     private val bless = ConditionToggle("t1", "Bless", enabled = false, flippable = true)
     // H1: FR-30's row, 3 of 4 d8s remaining — the fixture the review's three pins share below.
     private val hitDie = TrackedResource("hd1", TrackerKind.HIT_DICE, "Hit Dice", 3, 4, dieSize = "d8")
+    // FR-44's row, 2 of 2 uses left. The same class of field as `hitDice` above and the same trap.
+    private val ability = TrackedResource("lu1", TrackerKind.LIMITED_USE, "Guiding Bolt", 2, 2)
 
     private val board = TrackerBoard(
         hp = hp,
         slots = listOf(slot),
         hitDice = listOf(hitDie),
+        limitedUses = listOf(ability),
         pinnedItems = listOf(potion),
         allItems = listOf(potion),
         activeToggles = listOf(bless),
@@ -127,6 +130,38 @@ class OptimisticOverlayTest {
         val sixSpends = OptimisticOverlay.of(List(6) { OptimisticChange.ValueDelta("hd1", -1) })
         val applied = sixSpends.applyTo(board)
         assertEquals(0, applied.hitDice.single().value)
+    }
+
+    // --- FR-44: `limitedUses` is the next list that could have been forgotten in the same way ---
+
+    /**
+     * A use spent has to move the pips in the frame it is tapped.
+     *
+     * The write behind this row is an **absolute** (`update {path:['usesUsed']}`), so its
+     * optimistic change is a `ValueAbsolute` rather than the `ValueDelta` every other pip row
+     * emits — and the row still has to be in `applyTo`'s `copy` for either kind to land.
+     */
+    @Test
+    fun `a limited-use spend overlays immediately`() {
+        val spend = OptimisticOverlay.of(listOf(OptimisticChange.ValueAbsolute("lu1", 1)))
+        val applied = spend.applyTo(board)
+        assertEquals(1, applied.limitedUses.single().value)
+    }
+
+    /** And it is clamped into the row like every other, however the queue got there. */
+    @Test
+    fun `a limited-use row is clamped to its own total`() {
+        val overshoot = OptimisticOverlay.of(listOf(OptimisticChange.ValueAbsolute("lu1", 9)))
+        assertEquals(2, overshoot.applyTo(board).limitedUses.single().value)
+
+        val undershoot = OptimisticOverlay.of(listOf(OptimisticChange.ValueDelta("lu1", -9)))
+        assertEquals(0, undershoot.applyTo(board).limitedUses.single().value)
+    }
+
+    /** A write on some other row leaves this one exactly as it was — not merely equal-looking. */
+    @Test
+    fun `an unrelated write leaves the limited-use row untouched`() {
+        assertEquals(listOf(ability), overlay.applyTo(board).limitedUses)
     }
 
     /** FR-22 direct entry: a later absolute wins over an earlier delta for the same row. */

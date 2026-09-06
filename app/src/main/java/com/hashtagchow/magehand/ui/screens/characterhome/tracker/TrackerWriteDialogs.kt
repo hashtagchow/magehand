@@ -267,9 +267,19 @@ fun RestConfirmDialog(
  *
  * Rows already at full are included: seeing "1st Level — 3 / 3" in the list is how the user
  * learns the rest will not gain them anything, which is information, not noise.
+ *
+ * ### FR-44's rows are in this list, and hit dice still are not
+ *
+ * The two look alike from here — both are countable rows outside `slots`/`resources` — and the
+ * difference is entirely what the **server** does, which is why R2 made it a probe rather than a
+ * ruling. `creature.methods.rest` clears `usesUsed` on a limited-use row whose `reset` matches,
+ * and logs it as *"Restored 1 uses"* (probe FR-44 B, 2026-09-06); so listing one here is a promise
+ * the button keeps, and the reset-rule filter is the right filter. Hit dice carry no `reset` at
+ * all and the server restores *half* of them by its own arithmetic (18 decision 19, probe H3), so
+ * the app predicts nothing about them and `TrackerUiState.hitDice` is deliberately not in this sum.
  */
 fun TrackerUiState.rowsRestoredBy(kind: RestKind): List<PipRowState> =
-    (slots + resources).filter { row -> kind.restores(row.reset) }
+    (slots + resources + limitedUses).filter { row -> kind.restores(row.reset) }
 
 /**
  * Whether the long-rest confirm adds `tracker_rest_hp_note` — *"The server also applies …

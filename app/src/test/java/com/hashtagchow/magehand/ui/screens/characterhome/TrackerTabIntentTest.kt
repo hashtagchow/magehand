@@ -152,7 +152,75 @@ class TrackerTabIntentTest {
         assertEquals(emptyList<String>(), character.writes.toList())
     }
 
-    private fun viewModel() = CharacterHomeViewModel(
+    /**
+     * FR-44 R1's row, and the whole point of the test below: the tap goes to the **same two
+     * intents** a slot's does. Everything different about this row happens under
+     * `OpenCharacter.spend`, where `WriteOp.adjust` reads the kind and sends
+     * `creatureProperties.update {path:['usesUsed']}` instead of a `damage` increment.
+     */
+    private val ability = TrackedResource(
+        propertyId = "lu-guiding-bolt",
+        name = "Guiding Bolt (Star Map)",
+        value = 1,
+        total = 2,
+        kind = TrackerKind.LIMITED_USE,
+        reset = ResetRule.LONG_REST,
+    )
+
+    /**
+     * The section is wired to `onSpend`/`onRestore` like every other pip row.
+     *
+     * A section added to `TrackerScreen` with its callbacks left unbound renders perfectly, dims
+     * nothing and does nothing — which is invisible to a golden and to a state test, and is the
+     * only failure mode this composition can have that the two tests above cannot see.
+     */
+    @Test
+    fun `tapping a limited-use pip reaches the same spend and restore intents`() {
+        character.board.value = TrackerBoard(limitedUses = listOf(ability))
+        character.boardIgnoringHidden.value = character.board.value
+        val viewModel = viewModel()
+
+        compose.setMageHandContent {
+            val state by viewModel.uiState.collectAsState()
+            TrackerTab(
+                state = state.tracker,
+                actions = TrackerActions(onSpend = viewModel::spend, onRestore = viewModel::restore),
+            )
+        }
+
+        compose.onNodeWithTag("tracker:limiteduse:lu-guiding-bolt:pip:0")
+            .assertContentDescriptionEquals("Spend one Guiding Bolt (Star Map)")
+            .performClick()
+        assertEquals(listOf("spend lu-guiding-bolt 1"), character.writes.toList())
+
+        compose.onNodeWithTag("tracker:limiteduse:lu-guiding-bolt:pip:1")
+            .assertContentDescriptionEquals("Restore one Guiding Bolt (Star Map)")
+            .performClick()
+        assertEquals(
+            listOf("spend lu-guiding-bolt 1", "restore lu-guiding-bolt 1"),
+            character.writes.toList(),
+        )
+    }
+
+    /** R3's switch, at the view-model seam: off means the rows never reach the composition. */
+    @Test
+    fun `with the limited-use switch off the rows are not on the tracker`() {
+        character.board.value = TrackerBoard(limitedUses = listOf(ability))
+        character.boardIgnoringHidden.value = character.board.value
+        val viewModel = viewModel(showLimitedUses = false)
+
+        compose.setMageHandContent {
+            val state by viewModel.uiState.collectAsState()
+            TrackerTab(
+                state = state.tracker,
+                actions = TrackerActions(onSpend = viewModel::spend, onRestore = viewModel::restore),
+            )
+        }
+
+        compose.onNodeWithTag("tracker:limiteduse:lu-guiding-bolt:pip:0").assertDoesNotExist()
+    }
+
+    private fun viewModel(showLimitedUses: Boolean = true) = CharacterHomeViewModel(
         savedStateHandle = SavedStateHandle(mapOf("creatureId" to creatureId)),
         characterListRepository = FakeCharacterListRepository(
             CharacterListState(
@@ -161,7 +229,7 @@ class TrackerTabIntentTest {
             ),
         ),
         sheetSessionFactory = SheetSessionFactory(StubAccountRepository, StubTokenStore),
-        appSettingsStore = FakeAppSettingsStore(showToggles = true),
+        appSettingsStore = FakeAppSettingsStore(showToggles = true, showLimitedUses = showLimitedUses),
         selectedRollStore = FakeSelectedRollStore(),
         equippableOverrideStore = FakeEquippableOverrideStore(),
         inventoryLayoutStore = FakeInventoryLayoutStore(),

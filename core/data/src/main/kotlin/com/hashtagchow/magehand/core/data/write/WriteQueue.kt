@@ -150,8 +150,16 @@ class WriteQueue(
     /** Pending optimistic changes, oldest first, keyed by submission id. */
     private val pending = LinkedHashMap<Long, OptimisticChange>()
 
-    /** Inverse ops, newest last, each tagged with the [TrackerWrite] it would undo. */
-    private class Undoable(val entryId: Long, val inverse: WriteOp)
+    /**
+     * Inverse ops, newest last, each tagged with the [TrackerWrite] it would undo.
+     *
+     * [targetId] is the *original* op's target, carried so [record] can invalidate the entries a
+     * later write has made unsafe without inspecting the inverse. It is the same property in every
+     * case today — an inverse writes back to what its op wrote to — but "the inverse's target is
+     * the op's target" is an invariant of the ops rather than of this class, and this class is
+     * where the consequence of it being wrong would be a wrong write.
+     */
+    private class Undoable(val entryId: Long, val targetId: String, val inverse: WriteOp)
 
     private val undoStack = ArrayDeque<Undoable>()
     private val lastDispatchAt = HashMap<String, Long>()
@@ -516,18 +524,53 @@ class WriteQueue(
      * trigger, so "restore the slot I spent" after a long rest would send `damage -1` at a
      * slot the server has already put back — silently overfilling it. The stack is therefore
      * emptied and the older rows are marked non-undoable rather than left as traps.
+     *
+     * ### A Use invalidates the undo entries **for the property it used** (FR-44)
+     *
+     * [WriteOp.DoAction] and [WriteOp.DoCastSpell] run the property's own effect tree, and part of
+     * what that does is **increment `usesUsed`** on the property (17 decision 3, probe U4). That
+     * is the same counter [WriteOp.SetUsesUsed] writes — and writes *absolutely*. So a pip spend
+     * on the tracker followed by a Use on the Actions tab leaves an undo entry holding "set
+     * `usesUsed` back to 0", computed before the server's own increment existed. Pressing UNDO
+     * then hands the player back **both** uses: the one they spent and the one the server spent.
+     *
+     * It is a narrower invalidation than a rest's, deliberately. A rest rewrites the whole sheet,
+     * so nothing before it can be trusted; a Use rewrites *this property* plus resources the app
+     * did not predict and cannot name. Clearing the whole stack would take away the undo for a
+     * slot spend three taps earlier, which is a real loss for a hazard that does not reach it —
+     * a `damage increment -1` on some other row is exactly as correct after a Use as before it.
+     * So the rule is by target: entries whose op wrote to the used property go, and nothing else.
+     *
+     * **The forward hazard is documented, not closed.** This handles writes that already exist. A
+     * pip tapped in the seconds *after* a Use, before the server's fast-path fields reach the
+     * mirror (~0.1–0.35 s, probe U3), builds its absolute from a board that has not yet seen the
+     * server's increment — so it sends a `usesUsed` one lower than the truth and gives a use back.
+     * Closing that would mean either blocking the tracker on the Actions tab's settle window or
+     * making the write a server-side increment, which this method does not offer. The window is
+     * small, self-correcting on the next sync, and reachable only by using an ability on one tab
+     * and immediately spending it on another; see [WriteOp.SetUsesUsed]'s KDoc, which names the
+     * competing writer where it claims idempotence.
      */
     private fun record(op: WriteOp) = synchronized(lock) {
         val entryId = entryIds.incrementAndGet()
         val isRest = op is WriteOp.Rest
+        val usesEffectTree = op is WriteOp.DoAction || op is WriteOp.DoCastSpell
 
         if (isRest) {
             undoStack.clear()
             _history.value = _history.value.map { if (it.undoable) it.copy(undoable = false) else it }
+        } else if (usesEffectTree) {
+            val invalidated = undoStack.filter { it.targetId == op.targetId }.map { it.entryId }.toSet()
+            undoStack.removeAll { it.targetId == op.targetId }
+            if (invalidated.isNotEmpty()) {
+                _history.value = _history.value.map {
+                    if (it.id in invalidated && it.undoable) it.copy(undoable = false) else it
+                }
+            }
         }
 
         op.inverse?.let { inverse ->
-            undoStack.addLast(Undoable(entryId, inverse))
+            undoStack.addLast(Undoable(entryId, op.targetId, inverse))
             while (undoStack.size > config.undoDepth) undoStack.removeFirst()
         }
         _canUndo.value = undoStack.isNotEmpty()

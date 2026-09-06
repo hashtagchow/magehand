@@ -490,6 +490,36 @@ private fun TrackerContent(
                 }
             }
 
+            // FR-44 R1: "below resources". Directly below, because these ARE resources the player
+            // spends — a per-rest ability with a use count is a Rage row that happens to live on
+            // an `action` property — and a player who has just scanned their slots and resources
+            // is looking for the next thing they can spend. Absent, header and all, both for the
+            // characters whose sheet carries none and when R3's switch is off.
+            //
+            // R1's "above hit dice" is honoured in `TrackerBoard`'s field order rather than here:
+            // 18 decision 17 fixed hit dice directly below HP, so the two halves cannot both be
+            // screen positions. See `TrackerUiState.limitedUses`.
+            if (state.limitedUses.isNotEmpty()) {
+                item(key = "limited-uses-header") {
+                    SectionHeader(stringResource(R.string.tracker_section_limited_uses))
+                }
+                items(state.limitedUses, key = { "limited-use-${it.propertyId}" }) { row ->
+                    PipRow(
+                        row = row,
+                        testTag = "tracker:limiteduse:${row.propertyId}",
+                        canWrite = state.canWrite,
+                        // The same two intents every other pip row uses. What is different is one
+                        // layer down and deliberately invisible here: `WriteOp.adjust` turns this
+                        // into `creatureProperties.update {path:['usesUsed']}` rather than a
+                        // `damage` increment, because an action property has no `damage` field.
+                        onSpend = actions.onSpend,
+                        onRestore = actions.onRestore,
+                        onDirectEntry = { onDirectEntry(DirectEntryKeys.resource(row.propertyId)) },
+                        modifier = Modifier.shakeOn(shake, row.propertyId),
+                    )
+                }
+            }
+
             if (state.consumables.isNotEmpty()) {
                 item(key = "consumables-header") {
                     SectionHeader(stringResource(R.string.tracker_section_consumables))

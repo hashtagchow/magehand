@@ -552,7 +552,16 @@ class DmViewViewModel @Inject constructor(
         // FR-30: hit dice join the lookup for `CharacterHomeViewModel.withRow`'s reason — they are
         // written through these same `spend`/`restore` intents (18 decision 18). No DM card draws
         // one today, and the lookup is one list rather than a rule to remember if one ever does.
-        val row = (board.slots + board.resources + board.hitDice + board.allItems + listOfNotNull(board.hp))
+        //
+        // FR-44's limited uses join it on that comment's own terms. R4 leaves the DM cards
+        // untouched, so nothing here renders one either — but the comment above promised a list
+        // rather than a rule, and a list that is kept only where a control happens to exist is
+        // exactly the rule it was promising not to be. The sibling view model shipped this gap for
+        // one commit and its symptom was a row that draws and does nothing.
+        val row = (
+            board.slots + board.resources + board.limitedUses + board.hitDice + board.allItems +
+                listOfNotNull(board.hp)
+            )
             .firstOrNull { it.propertyId == propertyId } ?: return
         act(character, row)
     }

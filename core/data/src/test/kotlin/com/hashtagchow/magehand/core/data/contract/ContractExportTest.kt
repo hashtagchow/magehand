@@ -349,6 +349,25 @@ class ContractExportTest {
             emptySet<String>(),
             exported + uncalled - catalog,
         )
+
+        // …and the third direction, which is not about drift at all but about the export
+        // CONTRADICTING ITSELF.
+        //
+        // Both assertions above are satisfied by a method that appears in `vectors` AND in
+        // `documentedNotCalled`, and the second list's entries are prose saying MageHand has no
+        // caller — "no wire vector: none could be recorded rather than invented". FR-44 shipped
+        // exactly that state for one commit: two recorded `update.*Use` vectors alongside a
+        // `creatureProperties.update` entry claiming there was nothing to record. A consumer
+        // reading the note would reasonably conclude the vectors beside it were fabricated, which
+        // is the one thing this export must never make anybody wonder.
+        assertEquals(
+            "a method is BOTH exported as a vector and documented as never called. The " +
+                "`documentedNotCalled` note asserts there is no caller to record from, so the " +
+                "two lists cannot overlap: delete the uncalled entry and keep the vectors, " +
+                "moving anything worth saying into the vector's own `quirk` or domain/rules.json.",
+            emptySet<String>(),
+            exported intersect uncalled,
+        )
     }
 
     /**
@@ -1685,7 +1704,12 @@ class ContractExportTest {
             dir.deleteRecursively()
             for ((path, content) in generated) {
                 val file = File(dir, path)
-                file.parentFile.mkdirs()
+                // `?.`, not a bare call: `File.getParentFile` is platform-typed and the bare form
+                // is the module's one compiler warning. Every path here is built from `dir`, so
+                // the parent is never actually null — this states that rather than asserting it.
+                // (Pre-existing; cleared in the FR-44 wave to keep the build's warning count at
+                // zero, which is the gate the wave was held to.)
+                file.parentFile?.mkdirs()
                 file.writeText(content)
             }
             println("contract export written: ${generated.size} files under ${dir.path}")

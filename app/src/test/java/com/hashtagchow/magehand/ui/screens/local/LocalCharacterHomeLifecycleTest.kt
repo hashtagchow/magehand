@@ -236,4 +236,8 @@ private object FakeAppSettingsStore : AppSettingsStore {
     override suspend fun setShowToggles(value: Boolean) = Unit
     override val uiScale: Flow<UiScale> = flowOf(UiScale.DEFAULT)
     override suspend fun setUiScale(value: UiScale) = Unit
+    // FR-44 R3, fixed like the two above: R4 leaves the local screen untouched, so its view
+    // model never reads this.
+    override val showLimitedUses: Flow<Boolean> = flowOf(AppSettingsStore.DEFAULT_SHOW_LIMITED_USES)
+    override suspend fun setShowLimitedUses(value: Boolean) = Unit
 }
