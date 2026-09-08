@@ -55,8 +55,8 @@ class AccountConnection(
 
 /**
  * `https://dnd.example-table.com` → `wss://dnd.example-table.com/websocket`
- * (docs/design/02-ddp-and-api.md — the endpoint littleguy's nginx already
- * upgrades). The input is always a normalized origin from `normalizeServerUrl`,
+ * (docs/design/02-ddp-and-api.md — the endpoint the server host's nginx
+ * already upgrades). The input is always a normalized origin from `normalizeServerUrl`,
  * so this is a scheme swap and a suffix, not a URL parser.
  */
 fun websocketUrlFor(serverOrigin: String): String =

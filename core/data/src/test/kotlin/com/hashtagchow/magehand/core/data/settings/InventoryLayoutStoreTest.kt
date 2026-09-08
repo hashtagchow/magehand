@@ -508,8 +508,8 @@ class InventoryLayoutStoreTest {
             InventoryLayoutStore.SORT_DIRECTION_SUFFIX,
         )
         val realistic = listOf(
-            InventoryLayoutStore.serverKey("acct-1", "dgfCnHywxzmYMDtbb"),
-            InventoryLayoutStore.serverKey("3f2b8c10-0e2a-4f7d-9a11-77bd3c9e4a55", "TknmogLrZMih74Nr2"),
+            InventoryLayoutStore.serverKey("acct-1", "aBcD3fGh4jKmN5pQr"),
+            InventoryLayoutStore.serverKey("3f2b8c10-0e2a-4f7d-9a11-77bd3c9e4a55", "s7TuWxY9zA2bCdEfG"),
             InventoryLayoutStore.localKey("3f2b8c10-0e2a-4f7d-9a11-77bd3c9e4a55"),
         )
 

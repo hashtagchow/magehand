@@ -41,7 +41,7 @@ import androidx.compose.ui.text.style.Hyphens
  * (`/system/usr/hyphen-data`), and the Robolectric graphics stack the whole FR-34 corpus renders
  * in does not supply them.
  *
- * **On hardware it works.** Architect device probe, 2026-08-31, `magehand-a30` (API 30, the sweep
+ * **On hardware it works.** Architect device probe, 2026-08-31, on an API 30 AVD (the sweep
  * floor): a "Quarterstaff" row at a ~160 dp-equivalent name column renders `Quar-` with a **true
  * hyphen** at the break. Evidence: `docs/verification/sweep-fr34/golden1-device-hyphenation.png`.
  * GOLDEN-1 and BUG-5 are closed on that basis.
