@@ -14,6 +14,7 @@ import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.DamageRider
 import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.SpellListHeader
+import com.hashtagchow.magehand.core.model.WeaponMastery
 
 /**
  * Turns one creature's raw properties into an [ActionBoard] (docs/design/16-actions-and-feed.md,
@@ -48,6 +49,25 @@ object ActionEngine {
     private const val TYPE_BRANCH = "branch"
     private const val TYPE_DAMAGE = "damage"
 
+    // --- FR-47 weapon-mastery vocabulary (live probe, 2026-09-07 — docs/dicecloud-api.md,
+    // "Weapon items and their 'Mastery' line") ---
+    private const val TYPE_FEATURE = "feature"
+    private const val TYPE_TRIGGER = "trigger"
+    private const val TYPE_PROPERTY_SLOT = "propertySlot"
+    private const val SLOT_TAGS = "slotTags"
+    private const val TARGET_TAGS = "targetTags"
+    private const val TAGS = "tags"
+
+    /**
+     * The tag that identifies the *"choose your weapon masteries"* slot — **not** its name.
+     *
+     * FR-47 R6 in as many words: *"match the tag, never the name"*. The probe found the same slot
+     * called two different things on two sheets of the same edition, because the name is written
+     * by whichever class entry the library happened to build it from. `slotTags` is the machine
+     * half of that property and is the same on both.
+     */
+    private const val WEAPON_MASTERY_SLOT_TAG = "weaponMastery"
+
     /**
      * The branch kind that carries an attack's on-hit damage.
      *
@@ -75,6 +95,79 @@ object ActionEngine {
     private const val MAX_DAMAGE_DEPTH = 4
 
     /**
+     * How far the three mastery walks will go: up from an action to its `item`, down from that
+     * item to its `feature`s, and up from a `trigger` to its `propertySlot`.
+     *
+     * The same number as [MAX_DAMAGE_DEPTH] and for the same reason — the real shapes are one and
+     * two levels deep (`item → folder → {feature, action}`, `propertySlot → folder → trigger`),
+     * and the bound is the guard against a cyclic `parent` chain turning a render into a hang.
+     * One constant rather than three because a sheet deep enough to need a different answer for
+     * one of them is a sheet this engine has never seen.
+     */
+    private const val MAX_MASTERY_DEPTH = 4
+
+    /**
+     * R1's line, in the weapon `feature`'s `summary.text`: *"Versatile\nMastery: Topple"*.
+     *
+     * Applied per line and anchored at both ends, so *"Mastery"* appearing mid-sentence in a
+     * feature's prose is not a match. The optional trailing `.` is there because the sheets carry
+     * both *"Mastery: Vex"* and *"Mastery: Vex."*, and a badge reading *"Mastery: Vex."* would be
+     * this app inventing punctuation.
+     *
+     * ### `^Mastery:` is anchored at column zero, deliberately
+     *
+     * Review LOW-5. A summary line written *"  Mastery: Vex"* — with leading whitespace — does not
+     * match and the row stays silent. This is R1's regex character for character (*"a line matching
+     * `^Mastery:\s*(.+?)\.?\s*$`"*), so widening it to `^\s*Mastery:` would be a new deviation from
+     * a ledger ruling rather than a fix, and no probed sheet writes the line indented. It is
+     * recorded here so a live miss is diagnosable without re-deriving the regex: if a sheet ever
+     * indents the line, this anchor is the reason and the ledger is where the change starts.
+     */
+    private val MASTERY_SUMMARY_LINE = Regex("""^Mastery:\s*(.+?)\.?\s*$""")
+
+    /**
+     * R7's bullet, in the same feature's `description.text`:
+     * `- **Mastery: Nick.** When you make the extra attack…`
+     *
+     * The library writes `**Mastery: Vex.**` on these and `**Finesse:**` / `**Two-Handed.**` on the
+     * weapon's other properties, so both lead punctuations are accepted. Group 1 is the bullet's
+     * own indentation — R7's regex has a bare `\s*` there, and capturing it is what lets
+     * [masteryBulletText] tell a *"next top-level bullet"* (which ends the mastery's text) from a
+     * nested `  - ` sub-bullet (which does not).
+     */
+    private val MASTERY_BULLET = Regex("""^(\s*)-\s*\*\*Mastery:\s*(.+?)[.:]?\*\*[.:]?\s*(.*)$""")
+
+    /**
+     * Any markdown list item, with its indentation captured. See [masteryBulletText].
+     *
+     * The lookahead is what keeps this in step with [MASTERY_BULLET] (review LOW-5). That regex
+     * accepts `-\s*\*\*Mastery:`, so the library's occasional unspaced `-**Versatile.**` **is** a
+     * bullet to it; a bare `-\s` here would not have recognised the same line as the next property
+     * and would have swallowed it into the mastery's rules text. `\s|\*\*` covers exactly the
+     * shapes [MASTERY_BULLET] can start with — every line that one matches, this one matches too —
+     * while still declining `---` (a rule) and `-5 to hit` (prose), neither of which is a bullet
+     * and neither of which should end the text.
+     */
+    private val ANY_BULLET = Regex("""^(\s*)-(?=\s|\*\*)""")
+
+    /**
+     * The `**`/`*` emphasis runs [masteryBulletText] and [masteryFromFeature] strip.
+     *
+     * 16 decision 4: *"plain text (no markdown rendering v1)"*. Stripping is the honest half of
+     * that ruling — leaving the asterisks in would print `**Nick.**` at a player, and rendering
+     * them would be the markdown renderer the decision declines.
+     *
+     * ### Only asterisks that hug their content
+     *
+     * Review LOW-5: a bare `\*+` also ate a literal asterisk in prose, so *"2 \* your level"*
+     * rendered as *"2  your level"* — the app deleting a character the server sent. A markdown
+     * delimiter always touches the text it emphasises on at least one side, and a multiplication
+     * sign is spaced on both, so the two alternatives here ("preceded by non-space" or "followed by
+     * non-space") strip every `**bold**` and `*italic*` run and leave a standalone `*` alone.
+     */
+    private val MARKDOWN_EMPHASIS = Regex("""(?<=\S)\*+|\*+(?=\S)""")
+
+    /**
      * Builds the board.
      *
      * @param sheet the same input [TrackerEngine.build] and [InventoryEngine.build] take, from
@@ -87,6 +180,11 @@ object ActionEngine {
         val properties = sheet.livePropertyList
         val childrenByParent = properties.groupBy { it.parentId() }
         val resources = ResourceIndex.of(properties)
+        // FR-47 R6: the chosen masteries and the per-item words are BOTH computed once here, for
+        // `ResourceIndex`'s stated reason — a board rebuilds on every mirror change, and a
+        // per-row scan of the sheet for a property slot on the other side of it is the shape of
+        // cost that only shows up on a DM dashboard watching six creatures.
+        val masteries = masteryIndexOf(properties, childrenByParent)
 
         val spells = properties
             .filter { it.string("type") == TYPE_SPELL }
@@ -102,7 +200,7 @@ object ActionEngine {
 
         val actions = properties
             .filter { it.string("type") == TYPE_ACTION }
-            .mapNotNull { it.toAction(childrenByParent, resources) }
+            .mapNotNull { it.toAction(childrenByParent, resources, masteries) }
             // Decision 3: group order first (the enum's own declaration order — see
             // `ActionGroup`), then the sheet's `order` inside a group. Name is the final
             // tie-break so a rebuild of the same sheet cannot reshuffle two rows that share an
@@ -177,6 +275,7 @@ object ActionEngine {
     private fun JsonObject.toAction(
         childrenByParent: Map<String?, List<JsonObject>>,
         resources: ResourceIndex,
+        masteries: MasteryIndex,
     ): ActionEntry? {
         val id = string("_id") ?: return null
         return ActionEntry(
@@ -193,6 +292,7 @@ object ActionEngine {
             damage = damageFor(id, childrenByParent),
             cost = costFor(resources),
             uses = usesFor(),
+            mastery = masteryFor(masteries),
             sortOrder = number("order") ?: 0,
         )
     }
@@ -571,6 +671,351 @@ object ActionEngine {
             ?.content
             ?.trim()
             ?.takeIf { it.isNotBlank() }
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-47 — weapon mastery (rulings R1, R6 and R7 on the ledger row)
+    // -----------------------------------------------------------------------
+
+    /**
+     * The two facts a mastery badge is a join of, both computed once per [build].
+     *
+     * ### Why the chosen set is a list of tag-SETS and not a set of names
+     *
+     * R6: the badge shows only when *"some chosen-mastery trigger's `targetTags` are **all**
+     * present in the action's `tags`"* — DiceCloud's own trigger semantics. A build's *Battleaxe
+     * Mastery* carries `['battleaxeWeapon', 'strengthAttack']`, so it fires on a strength attack
+     * with a battleaxe and not on a hypothetical finesse one with the same weapon. Reducing that
+     * to a set of weapon names would have thrown away the second tag, which is the half that
+     * makes the rule mean anything.
+     *
+     * A trigger publishing **no** `targetTags` is dropped rather than kept as an empty set. An
+     * empty set is a subset of every action's tags, so keeping one would badge every attack on the
+     * sheet with that mastery's word — the failure mode being loudest exactly where the data is
+     * thinnest. R6 describes a chosen mastery as one *"carrying `targetTags`"*; one that carries
+     * none has not said what it applies to.
+     *
+     * ### Why the item→word map is eager
+     *
+     * A weapon has three attack rows and they share one `feature`, so a per-row walk would parse
+     * the same summary three times. The items are walked once instead. It is skipped entirely
+     * when nothing is chosen, because then no row can show a badge whatever its item says.
+     *
+     * @property byId every live property by `_id` — the parent chain both upward walks follow.
+     * @property masteryByItem an `item`'s `_id` → the word (and rules text) its features name.
+     * @property chosenTargetTags one entry per live chosen-mastery `trigger`.
+     */
+    private class MasteryIndex(
+        val byId: Map<String, JsonObject>,
+        val masteryByItem: Map<String, WeaponMastery>,
+        val chosenTargetTags: List<Set<String>>,
+    )
+
+    /**
+     * [MasteryIndex], built from the same live property list [build] hands everything else.
+     *
+     * Not a `companion object.of` like [ResourceIndex]'s, and the reason is mechanical rather than
+     * a taste call: this needs [text] and [parentId], which are private member extensions of this
+     * object and are therefore out of scope inside a nested class. The shape a reader should take
+     * from it is the same one — one pass, per build, never per row.
+     *
+     * `properties` is `livePropertyList`, so **`removed` is already gone** — a soft-removed
+     * trigger (which is what an *unchosen* mastery looks like on the wire) never reaches the
+     * filter below, and a soft-removed feature is not among the item's descendants. `inactive` is
+     * the case that has to be decided here, and the two answers differ:
+     *
+     *  - an `inactive` **trigger** is dropped: R6's chosen set is what the build has switched on.
+     *  - an `inactive` **feature** is read: the feature goes inactive when the weapon is
+     *    unequipped, and the row is dimmed already — the mastery is a fact about the weapon, not
+     *    about whether it is in hand right now (R1).
+     */
+    private fun masteryIndexOf(
+        properties: List<JsonObject>,
+        childrenByParent: Map<String?, List<JsonObject>>,
+    ): MasteryIndex {
+        val byId = properties.mapNotNull { property ->
+            property.string("_id")?.let { it to property }
+        }.toMap()
+
+        val chosen = properties
+            .filter { it.string("type") == TYPE_TRIGGER && !it.isTrue("inactive") }
+            .filter { it.underWeaponMasterySlot(byId) }
+            .map { it.strings(TARGET_TAGS).toSet() }
+            .filter { it.isNotEmpty() }
+
+        val masteryByItem = if (chosen.isEmpty()) {
+            emptyMap()
+        } else {
+            properties
+                .filter { it.string("type") == TYPE_ITEM }
+                .mapNotNull { item ->
+                    val id = item.string("_id") ?: return@mapNotNull null
+                    masteryUnder(id, childrenByParent)?.let { id to it }
+                }
+                .toMap()
+        }
+
+        return MasteryIndex(byId = byId, masteryByItem = masteryByItem, chosenTargetTags = chosen)
+    }
+
+    /**
+     * Whether this `trigger` hangs under the *Weapon Masteries* slot — R6's *"match the tag, never
+     * the name"*.
+     *
+     * The live shape is `propertySlot → folder → trigger`, so this is a two-hop walk with
+     * [MAX_MASTERY_DEPTH]'s guard on it. It asks every ancestor rather than only the grandparent
+     * because the folder layer is the library's packaging and not something the wire promises.
+     */
+    private fun JsonObject.underWeaponMasterySlot(byId: Map<String, JsonObject>): Boolean {
+        var current = this
+        repeat(MAX_MASTERY_DEPTH) {
+            val parent = byId[current.parentId()] ?: return false
+            if (parent.string("type") == TYPE_PROPERTY_SLOT &&
+                WEAPON_MASTERY_SLOT_TAG in parent.strings(SLOT_TAGS)
+            ) {
+                return true
+            }
+            current = parent
+        }
+        return false
+    }
+
+    /**
+     * R1's word for one `item`: the first of its `feature` descendants, **by `order` then name**,
+     * whose `summary` carries a *"Mastery: X"* line.
+     *
+     * ### First, and only ever one
+     *
+     * R1: *"Two qualifying features under one item: first by `order` then name, one word rendered;
+     * a second different word is a builder finding to ledger, never a second chip."* `order` then
+     * name is [build]'s own NATURAL_ORDER tie-break, so two features sharing an `order` cannot
+     * reshuffle between two rebuilds of the same sheet and make the badge flicker.
+     *
+     * Both halves of the comparator are pinned against the wire order rather than with it: the
+     * fixtures in `two features under one item render only the first by order` and `two features
+     * sharing one order fall back to the name` declare the *losing* feature first, so the answer
+     * they assert is one only this `sortedWith` can produce. Review MEDIUM-1 found the earlier
+     * fixture agreed with declaration order, which left the whole sort deletable with the suite
+     * green.
+     *
+     * ### A nested `item` is not descended into
+     *
+     * A container holding another weapon is a real inventory shape, and its contents' features
+     * belong to *that* weapon. Descending would give a backpack the mastery of the axe inside it,
+     * and — worse — would give the axe's own rows the backpack's answer if the backpack won on
+     * `order`. Every other property type is walked through, because the layer between an item and
+     * its feature is `folder` on the sheets probed and there is no promise it stays that.
+     *
+     * The rule is stated here because R1 does not state it: R1 says *"walk up… to the first
+     * `item`, then take that item's `feature` descendants"*, and "descendants" is silent about a
+     * second item in the middle. **Neither lends nor steals** is the answer, and both halves are
+     * pinned by `a nested item neither lends nor steals a mastery` — removing the `TYPE_ITEM`
+     * branch turns that test red in both directions (review MEDIUM-3, which found the branch
+     * deletable with the suite green).
+     */
+    private fun masteryUnder(
+        itemId: String,
+        childrenByParent: Map<String?, List<JsonObject>>,
+    ): WeaponMastery? {
+        val features = mutableListOf<JsonObject>()
+
+        fun walk(parentId: String, depth: Int) {
+            if (depth > MAX_MASTERY_DEPTH) return
+            for (child in childrenByParent[parentId].orEmpty()) {
+                val childId = child.string("_id") ?: continue
+                when (child.string("type")) {
+                    TYPE_FEATURE -> features += child
+                    TYPE_ITEM -> Unit
+                    else -> walk(childId, depth + 1)
+                }
+            }
+        }
+        walk(itemId, 0)
+
+        return features
+            .sortedWith(compareBy({ it.number("order") ?: 0 }, { it.string("name").orEmpty() }))
+            .firstNotNullOfOrNull { it.masteryFromFeature() }
+    }
+
+    /**
+     * One `feature` → its mastery, or `null` when it names none.
+     *
+     * `summary` and **not** `description`, which is R1 stated as code: the sheet's Features pane
+     * shows `summary`, the operator named that pane, and it is the line that follows a renamed or
+     * homebrewed weapon. The `**Mastery: X.**` bullet in an `item`'s own `description` is a
+     * different, library-stock-only field that the probe caught *disagreeing* with the feature on
+     * a live sheet — so it is not read here, and no fallback to it exists. The feature's own
+     * `description` is read, but only for [masteryBulletText]'s rules sentence, never for the word.
+     *
+     * ### The word is markdown-stripped too
+     *
+     * Review LOW-5. A hand-written summary line `Mastery: **Topple**` used to cost twice over: the
+     * badge read *"Mastery: \*\*Topple\*\*"*, and the rules sentence vanished as well, because the
+     * bullet's plain `Topple` could never equal the starred word the name check compared it
+     * against. [MARKDOWN_EMPHASIS] runs on the word for the same reason it runs on the body — 16
+     * decision 4's plain text — and the trailing period the regex already trims is trimmed again
+     * afterwards, since `**Topple.**` hides its `.` behind the closing asterisks.
+     */
+    private fun JsonObject.masteryFromFeature(): WeaponMastery? {
+        val summary = text("summary") ?: return null
+        val name = summary.lineSequence()
+            .firstNotNullOfOrNull { MASTERY_SUMMARY_LINE.find(it)?.groupValues?.get(1) }
+            ?.replace(MARKDOWN_EMPHASIS, "")
+            ?.trim()
+            ?.removeSuffix(".")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        return WeaponMastery(name = name, text = masteryBulletText(name))
+    }
+
+    /**
+     * R7's rules sentence: the `- **Mastery: X.** …` bullet of this feature's `description`.
+     *
+     * ### Where the bullet ends
+     *
+     * *"the rest of that line and any following lines until the next top-level `- ` bullet or the
+     * end"*. "Top-level" is read against **the mastery bullet's own indentation** rather than
+     * against column zero: a following line that starts a bullet at the same indent or less is the
+     * next property, and a more-indented `  - ` is a sub-bullet belonging to this one. That reading
+     * gives R7's stated cases exactly — a nested sub-bullet under the *preceding* property stays
+     * out because the scan starts below the mastery bullet — and it also survives a description
+     * whose whole list happens to be indented, which a literal column-zero test would not.
+     *
+     * ### The weapon's other properties are not shown
+     *
+     * *Finesse*, *Versatile*, *Two-Handed* are in the same list and are deliberately left there.
+     * The operator asked for the mastery; the whole property block is FR-47d if the table wants it.
+     *
+     * ### A name mismatch drops the TEXT and keeps the summary's word
+     *
+     * R7 says the bullet's name is confirmed against R1's summary line and *"the summary wins on a
+     * mismatch"*. What that leaves open is what happens to the sentence, and the answer here is
+     * that it goes: a sheet whose summary says one mastery and whose bullet describes another is
+     * a sheet this engine cannot reconcile, and printing the second one's rules under the first
+     * one's heading would be a confident, wrong statement about what the weapon does. The heading
+     * alone is the honest remainder, and it is a shape the detail sheet already draws. The
+     * mismatch is a builder finding to ledger, not a runtime signal — there is nowhere on a badge
+     * to say "these two disagree" that would help a player at a table.
+     *
+     * ### The FIRST bullet that names this mastery, not the first bullet that says "Mastery"
+     *
+     * Review LOW-5. Taking `indexOfFirst { MASTERY_BULLET… }` and only then checking the name meant
+     * a description with two `**Mastery: …**` bullets could never reach the second: the first one
+     * decided the answer, and if it named something else the sentence was dropped without looking
+     * further. The scan now carries the name check, so the mismatch rule above still holds exactly
+     * — a description in which *no* bullet names the summary's mastery yields `null` — while a
+     * description that does carry the right bullet is read wherever in the list it sits.
+     *
+     * ### Continuation lines are de-indented against the bullet
+     *
+     * Review LOW-6 / NIT-7. Everything below the mastery bullet is kept verbatim apart from having
+     * the bullet's own indentation removed, so a description whose whole list is indented renders
+     * the same text as one written at column zero — the "relative to the bullet" reading stated
+     * above, applied to the output and not only to where the text stops.
+     *
+     * A continuation sub-bullet keeps its `- `, and that asymmetry with the mastery bullet — whose
+     * own `- **Mastery: X.**` lead *is* consumed — is deliberate rather than an oversight. The lead
+     * is consumed because the sheet draws it: R7's block prints *"Mastery: Topple"* as its heading,
+     * so repeating it in the body would say the same thing twice. A sub-bullet has no heading
+     * anywhere, and its dash is the only mark left that it is a nested point rather than another
+     * sentence of the paragraph above it — dropping that would flatten a rules exception into the
+     * rule. 16 decision 4 declines a markdown renderer, not the structure the text came with.
+     */
+    private fun JsonObject.masteryBulletText(name: String): String? {
+        val lines = text("description")?.lines() ?: return null
+        val start = lines.indices.firstOrNull { index ->
+            val candidate = MASTERY_BULLET.find(lines[index])
+            candidate != null && candidate.groupValues[2].trim().equals(name, ignoreCase = true)
+        } ?: return null
+
+        val bullet = MASTERY_BULLET.find(lines[start]) ?: return null
+        val indent = bullet.groupValues[1].length
+
+        val body = mutableListOf(bullet.groupValues[3])
+        for (index in start + 1 until lines.size) {
+            val next = ANY_BULLET.find(lines[index])
+            if (next != null && next.groupValues[1].length <= indent) break
+            body += lines[index].dropIndent(indent)
+        }
+
+        return body.joinToString("\n")
+            .replace(MARKDOWN_EMPHASIS, "")
+            .trim()
+            .takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Drops up to [indent] leading whitespace characters — never more, and never a non-blank one.
+     *
+     * The `coerceAtMost` is the whole point: a continuation line indented *less* than the bullet
+     * (ragged hand-written prose) keeps what it has rather than losing a character of its text.
+     */
+    private fun String.dropIndent(indent: Int): String =
+        drop(takeWhile { it.isWhitespace() }.length.coerceAtMost(indent))
+
+    /**
+     * R6's gate, and R1's walk, for one action row — the only entry point the rest of the engine
+     * uses.
+     *
+     * ### The gate is asked first, and that ordering is the cheap half
+     *
+     * Two tag lookups settle most rows on a sheet with no masteries at all, before any tree is
+     * walked. It also states the rule in the order the ledger does: *a mastery the build did not
+     * choose is not shown*, whatever the weapon's feature says, and no dimmed or greyed variant
+     * exists for it (R6: *"A line present but not chosen is **not** an error state"*).
+     *
+     * ### `extraTags` is ignored, deliberately
+     *
+     * R6 again. A trigger's `extraTags` is DiceCloud's recursion guard (the NOT-`cleaveAttack`
+     * exclusion on a mastery that grants an extra attack), not part of what the mastery applies
+     * to. Reading it would suppress the badge on the very row the mastery is about.
+     *
+     * ### The trigger that opens the gate and the word that gets printed are not cross-checked
+     *
+     * Review LOW-4, and this is a declined fix rather than an unnoticed one. The gate answers *"has
+     * the build chosen **a** mastery that applies to this row?"* and the word then comes from the
+     * row's own weapon; nothing verifies that the trigger which opened the gate is the one naming
+     * that word. On every probed sheet each trigger is weapon-specific
+     * (`['battleaxeWeapon','strengthAttack']`, `['rapierWeapon']`), so the two cannot come apart —
+     * but an action carrying two weapon tags, or a trigger targeting only a non-weapon tag such as
+     * `strengthAttack`, would badge a row with a mastery chosen for a different weapon.
+     *
+     * There is no by-shape link to check it with. A `trigger` publishes `targetTags` and nothing
+     * else about *which* mastery it is: its `description` and `summary` are empty (the probe found
+     * the body is a `reference` into the library), and the only thing that carries the word is its
+     * own `name` or its folder's — *"Battleaxe Mastery"*. R6 forbids exactly that reading
+     * (*"match the tag, never the name"*, [underWeaponMasterySlot]'s rule), and a name match here
+     * would reintroduce it one field over, so the check is not implementable without changing the
+     * ruling. It is left as R6 states it and recorded here: a re-probe that finds a `targetTags`
+     * list which is not weapon-specific is the signal that this needs a ruling, not a patch.
+     */
+    private fun JsonObject.masteryFor(masteries: MasteryIndex): WeaponMastery? {
+        if (masteries.chosenTargetTags.isEmpty() || masteries.masteryByItem.isEmpty()) return null
+
+        val tags = strings(TAGS).toSet()
+        if (masteries.chosenTargetTags.none { tags.containsAll(it) }) return null
+
+        return masteries.masteryByItem[nearestItemId(masteries.byId)]
+    }
+
+    /**
+     * R1's upward walk: through `folder`s and `toggle`s (the dual-wielding shape) to the row's
+     * nearest `item` ancestor, or `null` when there is none within [MAX_MASTERY_DEPTH].
+     *
+     * No ancestor means no weapon, which is a real and common answer rather than a gap — a
+     * feature-granted action, a potion, an unarmed strike. Nothing about the intervening types is
+     * asserted: this passes *through* whatever it finds and stops at the first `item`, so a shape
+     * the probe has not seen costs nothing as long as it still ends at one.
+     */
+    private fun JsonObject.nearestItemId(byId: Map<String, JsonObject>): String? {
+        var current = this
+        repeat(MAX_MASTERY_DEPTH) {
+            val parent = byId[current.parentId()] ?: return null
+            if (parent.string("type") == TYPE_ITEM) return parent.string("_id")
+            current = parent
+        }
+        return null
     }
 
     // -----------------------------------------------------------------------

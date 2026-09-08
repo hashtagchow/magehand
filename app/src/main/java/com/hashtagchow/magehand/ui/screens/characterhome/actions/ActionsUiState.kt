@@ -10,6 +10,7 @@ import com.hashtagchow.magehand.core.model.SpellListHeader
 import com.hashtagchow.magehand.core.model.SpellSlotOption
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.UseTarget
+import com.hashtagchow.magehand.core.model.WeaponMastery
 import com.hashtagchow.magehand.core.model.spellSlotOptions
 
 /**
@@ -229,6 +230,17 @@ data class ActionDetailState(
             is ActionRow.Spell -> entry.entry.description ?: entry.entry.summary
             is ActionRow.Action -> entry.entry.description ?: entry.entry.summary
         }?.takeIf { it.isNotBlank() }
+
+    /**
+     * FR-47 R7's mastery block — the word and, when the sheet carries one, its rules sentence.
+     *
+     * An action row only, and `null` for every spell: [WeaponMastery] is a property of a weapon,
+     * and [SpellEntry] has no field for one. Written as a cast rather than as a `when` over the
+     * sealed pair for that reason — a `when` would need a `null` branch for spells that reads as
+     * "not yet implemented", and this is "there is nothing there to show".
+     */
+    val mastery: WeaponMastery?
+        get() = (row as? ActionRow.Action)?.entry?.mastery
 
     /**
      * Why the Use is missing, when it is — 17 decision 2's *"dimmed rows explain why in the

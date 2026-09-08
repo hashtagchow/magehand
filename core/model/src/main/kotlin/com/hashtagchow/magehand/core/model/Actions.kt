@@ -699,6 +699,42 @@ data class SpellEntry(
 }
 
 /**
+ * The 2024 weapon-mastery property a weapon's attack rows carry (FR-47).
+ *
+ * ### Two strings, and no way to tell where either came from
+ *
+ * This is the whole type. It says *which* mastery the weapon has and *what the mastery does*, and
+ * it names neither the sheet's `feature`, nor its `summary`, nor the class subtree's chosen-mastery
+ * `trigger` — the three server shapes that had to agree before one of these could be built. That
+ * is this file's standing rule ("no DiceCloud vocabulary"), and here it is load-bearing rather
+ * than tidy: the discovery is a four-way join across an item's descendants and a property slot on
+ * the other side of the sheet, and a UI layer holding any part of that join would eventually be
+ * asked to re-do a piece of it. The join lives in `:core:data`'s `ActionEngine` and what comes out
+ * is two strings.
+ *
+ * ### The badge is gated, and the gate is not visible here either
+ *
+ * FR-47 R6: an entry exists only when the character's build has actually **chosen** the mastery
+ * (a live `trigger` under a `weaponMastery` slot whose `targetTags` are all present on the action).
+ * A weapon whose feature names a mastery the character did not choose produces `null`, and it
+ * produces `null` rather than a dimmed or greyed variant — that is not an error state, it is a
+ * weapon property this character cannot use, and the row is silent about it exactly as the sheet
+ * is. So there is no `chosen` flag to read: an unchosen mastery is not a [WeaponMastery] with a
+ * false field, it is the absence of one.
+ *
+ * @property name the mastery's word — *"Topple"*, *"Nick"*, *"Vex"*. Never empty: a mastery with
+ *   no word is not one, and the engine drops it rather than badging a row with *"Mastery: "*.
+ * @property text the mastery's rules sentence, plain (16 decision 4: no markdown renderer in v1),
+ *   or `null` when the sheet does not carry one. Null is a real and common answer — a hand-made
+ *   weapon may name its mastery without restating the rule — and the detail sheet draws the
+ *   heading alone for it, because a heading with no body is still true.
+ */
+data class WeaponMastery(
+    val name: String,
+    val text: String? = null,
+)
+
+/**
  * An action or an attack, as the Actions surface draws it (16 decisions 3 and 4).
  *
  * @property type `null` when the server sent an `actionType` this build does not know — see
@@ -755,6 +791,15 @@ data class ActionEntry(
     val cost: ActionCost = ActionCost.FREE,
     /** 17 decision 1's **Uses**, or `null` when the action is not use-limited. */
     val uses: ActionUses? = null,
+    /**
+     * FR-47's weapon mastery, or `null` — which is most rows. See [WeaponMastery].
+     *
+     * On [ActionEntry] and deliberately not on [SpellEntry]: a mastery is a property of a
+     * *weapon*, and the whole discovery starts by walking up to the row's nearest `item`
+     * ancestor. A spell has none, so there is nothing for the field to mean there — the same
+     * shape of argument [SpellEntry]'s missing hit bonus makes, in the opposite direction.
+     */
+    val mastery: WeaponMastery? = null,
     val sortOrder: Int = 0,
 ) {
     /** Which header this row sits under; an unknown [type] falls to Other. See [ActionGroup]. */

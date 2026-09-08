@@ -268,6 +268,12 @@ private fun ActionEntryRow(entry: ActionEntry, onClick: () -> Unit, modifier: Mo
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (entry.insufficientResources) ActionChip(stringResource(R.string.actions_insufficient))
             if (entry.inactive) ActionChip(stringResource(R.string.actions_inactive))
+            // FR-47 R3: after the state badges, before the uses line. Last of the chips because
+            // the two above it are about whether the row can be used *now* and this one is a
+            // standing fact about the weapon — the same order a player reads them in. It is an
+            // `ActionChip` and not a second tappable: the rules text is behind the row tap that
+            // already opens the detail sheet (R7), which is BUG-7's rule rather than a shortcut.
+            entry.mastery?.let { ActionChip(stringResource(R.string.actions_mastery, it.name)) }
         }
         // Local vals: `ActionEntry` lives in :core:model, so its `val`s are not smart-cast
         // across the module boundary and the alternative is a pair of `!!`.

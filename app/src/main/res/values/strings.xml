@@ -589,6 +589,16 @@
     <string name="actions_inactive">Switched off on the sheet</string>
     <string name="actions_insufficient">Not enough resources</string>
     <string name="actions_attack_bonus">%1$+d to hit</string>
+    <!-- FR-47 (ledger rulings R3 and R7): the 2024 weapon-mastery badge on an attack row, and the
+         heading of the detail sheet's mastery block. One string for both, because they are the
+         same statement about the same weapon and two that drifted apart is exactly what
+         `actions_damage_rider` above was collapsed to fix.
+
+         It is only ever drawn for a mastery the character's build has CHOSEN, so there is
+         deliberately no companion string for an unchosen one: a weapon naming a mastery this
+         character did not take is not an error state to label, it is a row that says nothing.
+         The mastery's own word (%1$s) is the sheet's, verbatim — see WeaponMastery. -->
+    <string name="actions_mastery">Mastery: %1$s</string>
     <string name="actions_uses">%1$d / %2$d uses</string>
     <string name="actions_uses_left">%1$d left</string>
     <string name="actions_dc">DC %1$d</string>

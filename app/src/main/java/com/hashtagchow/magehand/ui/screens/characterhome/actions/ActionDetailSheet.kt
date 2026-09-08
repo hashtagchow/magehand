@@ -45,6 +45,7 @@ import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.ActionCost
 import com.hashtagchow.magehand.core.model.CostLine
 import com.hashtagchow.magehand.core.model.UseTarget
+import com.hashtagchow.magehand.core.model.WeaponMastery
 
 /**
  * One spell or action, expanded — 16 decision 4's *"tap → detail sheet"*, carrying 17 decision 1's
@@ -131,6 +132,14 @@ fun ActionDetailSheet(
             state.body?.let {
                 HorizontalDivider()
                 Text(text = it, style = MaterialTheme.typography.bodyMedium)
+            }
+
+            // FR-47 R7: after the action's own body, before the Use block. In that order because
+            // the mastery is a rider on what the row already said — reading it before the action's
+            // own text would be reading the footnote first.
+            state.mastery?.let { mastery ->
+                HorizontalDivider()
+                MasteryBlock(mastery)
             }
 
             HorizontalDivider()
@@ -242,6 +251,45 @@ private fun ActionFacts(row: ActionRow.Action) {
             )
         }
         entry.damage.forEach { DamageFacts(it) }
+    }
+}
+
+/**
+ * FR-47 R7's mastery block: *"Mastery: Nick"* and, under it, what Nick does.
+ *
+ * ### The heading repeats the row's badge, and the block is the only place it appears in the sheet
+ *
+ * R3 also offered this line a slot in [ActionFacts], above the first divider. It is not taken:
+ * with the block below, the sheet would have said *"Mastery: Topple"* twice, eight lines apart,
+ * with nothing different in the second — and the badge on the row behind the sheet makes three.
+ * R7 is the later ruling and it gives the fact a place with room for its text, which is what the
+ * operator asked for ("show the description of what the action is"). One statement, once. Recorded
+ * as this wave's call rather than left silent, because R3's wording is still on the ledger row.
+ *
+ * ### The heading alone is a complete block
+ *
+ * [WeaponMastery.text] is `null` whenever the weapon's feature names its mastery without restating
+ * the rule, which is a real shape on hand-made weapons. R7: *"a heading with no body is still
+ * true"*. Nothing is drawn in the gap — no *"no description"* line, which would be this app
+ * reporting on the sheet's completeness rather than on the weapon.
+ *
+ * The text is the server's own characters with markdown stripped, never re-flowed — see
+ * `ActionEngine.masteryBulletText` and 16 decision 4's *"plain text (no markdown rendering v1)"*.
+ */
+@Composable
+private fun MasteryBlock(mastery: WeaponMastery, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.testTag("actions:detail:mastery"),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = stringResource(R.string.actions_mastery, mastery.name),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        mastery.text?.let {
+            Text(text = it, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
 

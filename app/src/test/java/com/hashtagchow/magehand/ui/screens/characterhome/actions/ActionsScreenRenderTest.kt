@@ -1,6 +1,7 @@
 package com.hashtagchow.magehand.ui.screens.characterhome.actions
 
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
@@ -9,6 +10,7 @@ import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import org.junit.Assert.assertEquals
@@ -19,6 +21,7 @@ import com.hashtagchow.magehand.core.model.ActionType
 import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.DamageRider
 import com.hashtagchow.magehand.core.model.SpellEntry
+import com.hashtagchow.magehand.core.model.WeaponMastery
 import com.hashtagchow.magehand.ui.testing.Sabriel
 import com.hashtagchow.magehand.ui.testing.setMageHandContent
 import org.junit.Rule
@@ -325,5 +328,134 @@ class ActionsScreenRenderTest {
             listOf("Divine Smite", "Not enough resources", "Switched off on the sheet"),
             texts,
         )
+    }
+
+    // ---- FR-47: the weapon-mastery badge and the detail sheet's block -----------
+
+    /** A chosen mastery with its rules sentence, as `ActionEngine` hands one to the surface. */
+    private val battleaxe = ActionEntry(
+        propertyId = "a-mastery",
+        name = "Battleaxe",
+        type = ActionType.ATTACK,
+        attackRoll = 6,
+        mastery = WeaponMastery("Topple", "The target makes a save or falls prone."),
+        damage = listOf(DamageLine.of("1d12", "slashing")),
+    )
+
+    /**
+     * FR-47 R3, asserted the way BUG-6 and BUG-7 taught this file to: through the **merged** node.
+     *
+     * A badge that existed outside the row's merging shell would draw correctly and be unreachable
+     * as part of the sentence TalkBack speaks — the exact defect the five state badges had. Every
+     * badge is on at once so the ruling's *"after the state badges and before the uses line"* is
+     * pinned as an order and not just as presence: this is one sentence, and a sentence has a word
+     * order.
+     *
+     * The rules text is deliberately **not** on the row. R7 puts it behind the row tap; a paragraph
+     * on a list row would be read out in full on every scroll stop.
+     */
+    @Test
+    fun `the mastery badge lands on the row's merged node, after the state badges`() {
+        val dimmed = battleaxe.copy(
+            propertyId = "a-mastery-dim",
+            usesLeft = 2,
+            usesMax = 3,
+            insufficientResources = true,
+            inactive = true,
+        )
+        compose.setMageHandContent { ActionsScreen(state = stateOf(dimmed), onUse = { _, _, _ -> }) }
+
+        val texts = compose.onNodeWithTag("actions:action:a-mastery-dim")
+            .fetchSemanticsNode()
+            .config[SemanticsProperties.Text]
+            .map { it.text }
+        assertEquals(
+            listOf(
+                "Battleaxe",
+                "+6 to hit",
+                "Not enough resources",
+                "Switched off on the sheet",
+                "Mastery: Topple",
+                "2 / 3 uses",
+                "1d12 slashing",
+            ),
+            texts,
+        )
+        assertTrue(texts.none { it.contains("falls prone") })
+    }
+
+    /** A row with no mastery is exactly the row it was before FR-47 — no stray chip, no gap. */
+    @Test
+    fun `a row without a mastery gains nothing`() {
+        compose.setMageHandContent {
+            ActionsScreen(state = stateOf(battleaxe.copy(mastery = null)), onUse = { _, _, _ -> })
+        }
+
+        val texts = compose.onNodeWithTag("actions:action:a-mastery")
+            .fetchSemanticsNode()
+            .config[SemanticsProperties.Text]
+            .map { it.text }
+        assertEquals(listOf("Battleaxe", "+6 to hit", "1d12 slashing"), texts)
+    }
+
+    /**
+     * R7's whole point: the tap that already opened the detail sheet now answers *"what does
+     * Topple do?"*. The heading repeats the badge and the sentence is the server's own text.
+     */
+    @Test
+    fun `tapping the row shows the mastery's rules text in the detail sheet`() {
+        compose.setMageHandContent { ActionsScreen(state = stateOf(battleaxe), onUse = { _, _, _ -> }) }
+
+        compose.onNodeWithTag("actions:action:a-mastery").performClick()
+
+        compose.onNode(
+            hasAnyAncestor(hasTestTag("actions:detail:a-mastery")) and
+                hasTestTag("actions:detail:mastery"),
+        ).assertIsDisplayed()
+        assertEquals(
+            listOf("Mastery: Topple", "The target makes a save or falls prone."),
+            masteryBlockTexts(),
+        )
+    }
+
+    /**
+     * The block's own words, in order.
+     *
+     * Read off the **children** rather than off the block itself, because — unlike `RowShell` —
+     * this one deliberately does not merge: it is a heading plus a paragraph in a scrolling sheet,
+     * where a reader wants to stop at each, not a list row that has to be one sentence.
+     */
+    private fun masteryBlockTexts(): List<String> =
+        compose.onNodeWithTag("actions:detail:mastery")
+            .fetchSemanticsNode()
+            .children
+            .flatMap { it.config.getOrNull(SemanticsProperties.Text).orEmpty() }
+            .map { it.text }
+
+    /**
+     * R7: *"Bullet absent → `text = null`, the block shows the heading alone; a heading with no
+     * body is still true."* Nothing is drawn in the gap — no *"no description"* placeholder, which
+     * would be this app reporting on the sheet's completeness rather than on the weapon.
+     */
+    @Test
+    fun `a mastery with no rules text shows the heading alone`() {
+        val wordOnly = battleaxe.copy(propertyId = "a-word-only", mastery = WeaponMastery("Topple"))
+        compose.setMageHandContent { ActionsScreen(state = stateOf(wordOnly), onUse = { _, _, _ -> }) }
+
+        compose.onNodeWithTag("actions:action:a-word-only").performClick()
+
+        assertEquals(listOf("Mastery: Topple"), masteryBlockTexts())
+    }
+
+    /** No mastery, no block — not an empty one, and not a heading with nothing under it. */
+    @Test
+    fun `the detail sheet has no mastery block for a row without one`() {
+        compose.setMageHandContent {
+            ActionsScreen(state = stateOf(battleaxe.copy(mastery = null)), onUse = { _, _, _ -> })
+        }
+
+        compose.onNodeWithTag("actions:action:a-mastery").performClick()
+
+        compose.onAllNodesWithTag("actions:detail:mastery").assertCountEquals(0)
     }
 }

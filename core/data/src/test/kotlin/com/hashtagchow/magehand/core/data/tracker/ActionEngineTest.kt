@@ -1344,6 +1344,719 @@ class ActionEngineTest {
     }
 
     // -----------------------------------------------------------------------
+    // FR-47 — WEAPON MASTERY (ledger rulings R1, R6 and R7)
+    // -----------------------------------------------------------------------
+    //
+    // Synthetic throughout, and the fixtures are generic weapons rather than any sheet's: the
+    // shapes below are the ones the live probe recorded in docs/dicecloud-api.md, rebuilt here so
+    // the expected answer sits beside the input. The failure mode this whole block guards is the
+    // quiet one — a badge that says a weapon has a mastery the character never chose, or that
+    // stays silent on one they did.
+
+    private fun kotlinx.serialization.json.JsonObjectBuilder.tagList(
+        key: String,
+        values: List<String>,
+    ) = put(key, buildJsonArray { values.forEach { add(it) } })
+
+    /** A `{text: …}` wrapper, as `summary` and `description` arrive. */
+    private fun kotlinx.serialization.json.JsonObjectBuilder.wrappedText(key: String, value: String) =
+        put(key, buildJsonObject { put("text", value) })
+
+    /**
+     * The 2024 library's weapon: `item` → `folder` → { `feature` + the attack `action` }.
+     *
+     * The feature carries the *"Mastery: X"* line in its `summary` and the rules bullet in its
+     * `description`; the action carries the `<weapon>Weapon` tag the chosen-mastery trigger
+     * matches on.
+     */
+    private fun weapon(
+        summary: String? = "Versatile\nMastery: Topple",
+        description: String? = null,
+        actionTags: List<String> = listOf("battleaxeWeapon"),
+        itemDescription: String? = null,
+        featureInactive: Boolean = false,
+        featureRemoved: Boolean = false,
+    ): List<JsonObject> = listOf(
+        prop("w-item", "item") {
+            put("name", "Battleaxe")
+            itemDescription?.let { wrappedText("description", it) }
+        },
+        prop("w-folder", "folder", "w-item") { put("name", "Battleaxe") },
+        prop("w-feature", "feature", "w-folder") {
+            put("name", "Battleaxe")
+            put("order", 0)
+            summary?.let { wrappedText("summary", it) }
+            description?.let { wrappedText("description", it) }
+            if (featureInactive) put("inactive", true)
+            if (featureRemoved) put("removed", true)
+        },
+        prop("w-attack", "action", "w-folder") {
+            put("name", "Battleaxe")
+            put("actionType", "attack")
+            tagList("tags", actionTags)
+        },
+    )
+
+    /**
+     * The class subtree's record of one **chosen** mastery:
+     * `propertySlot {slotTags:[weaponMastery]}` → `folder` → `trigger {targetTags:[…]}`.
+     */
+    private fun chosenMastery(
+        slotName: String = "Weapon Masteries",
+        slotTags: List<String> = listOf("weaponMastery", "LoV"),
+        targetTags: List<String> = listOf("battleaxeWeapon"),
+        removed: Boolean = false,
+        inactive: Boolean = false,
+    ): List<JsonObject> = listOf(
+        prop("m-slot", "propertySlot") {
+            put("name", slotName)
+            tagList("slotTags", slotTags)
+        },
+        prop("m-folder", "folder", "m-slot") { put("name", "Weapon Mastery") },
+        prop("m-trigger", "trigger", "m-folder") {
+            put("name", "Weapon Mastery")
+            tagList("targetTags", targetTags)
+            if (removed) put("removed", true)
+            if (inactive) put("inactive", true)
+        },
+    )
+
+    /** The mastery on the one action of a sheet assembled from these property groups. */
+    private fun masteryOf(vararg groups: List<JsonObject>) =
+        ActionEngine.build(sheetOf(*groups.toList().flatten().toTypedArray()))
+            .actions.single().mastery
+
+    /**
+     * R1 and R6 together, on the shape the probe found: the word comes from the feature's
+     * `summary`, the sentence from its `description` bullet, and both are gated on the build
+     * having chosen a mastery whose `targetTags` the action carries.
+     *
+     * The `folder` between the item and the feature is deliberate — it is the library's real
+     * packaging, and a walk that only looked at an item's *direct* children would find nothing on
+     * any 2024 weapon.
+     */
+    @Test
+    fun `a chosen mastery on a library-shaped weapon reaches the action row`() {
+        val mastery = masteryOf(
+            weapon(
+                description = "- **Versatile.** Roll the larger die in two hands.\n" +
+                    "- **Mastery: Topple.** If you hit a creature, it makes a save or falls prone.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals("Topple", mastery?.name)
+        assertEquals("If you hit a creature, it makes a save or falls prone.", mastery?.text)
+    }
+
+    /**
+     * R6, and the ruling's own summary of what it means at a table: *"A line present but not
+     * chosen is **not** an error state and gets no dimmed badge; the row is silent."*
+     *
+     * Both halves of "not chosen" are here, because they fail through different code: a build with
+     * no weapon-mastery slot at all, and a build whose chosen mastery is for another weapon.
+     */
+    @Test
+    fun `a mastery the build has not chosen is not shown`() {
+        assertNull("no chosen masteries at all", masteryOf(weapon()))
+        assertNull(
+            "chosen, but for a weapon whose tag this action does not carry",
+            masteryOf(weapon(), chosenMastery(targetTags = listOf("rapierWeapon"))),
+        )
+    }
+
+    /**
+     * R6's *"**all** present"*: a trigger targeting `[<weapon>Weapon, strengthAttack]` fires on a
+     * strength attack and not on one that carries only the weapon tag. Both directions asserted —
+     * a subset test that accidentally became an intersection test would pass the second half alone.
+     */
+    @Test
+    fun `every targetTag must be present on the action, not just one`() {
+        val both = listOf("battleaxeWeapon", "strengthAttack")
+
+        assertNull(
+            "the action carries one of the trigger's two tags",
+            masteryOf(weapon(actionTags = listOf("battleaxeWeapon")), chosenMastery(targetTags = both)),
+        )
+        assertEquals(
+            "Topple",
+            masteryOf(weapon(actionTags = both), chosenMastery(targetTags = both))?.name,
+        )
+    }
+
+    /**
+     * An unchosen mastery is `removed: true` on the wire, and a switched-off one is `inactive` —
+     * neither is a choice this build has made.
+     *
+     * `removed` never reaches the engine at all (`livePropertyList`); `inactive` does, and is
+     * filtered here. The pair is asserted together because they are one rule with two spellings,
+     * and because dropping the `inactive` clause would leave a green test for `removed` alone.
+     */
+    @Test
+    fun `a removed or inactive trigger is not a chosen mastery`() {
+        assertNull(masteryOf(weapon(), chosenMastery(removed = true)))
+        assertNull(masteryOf(weapon(), chosenMastery(inactive = true)))
+    }
+
+    /**
+     * R6: *"match the tag, never the name"*. The probe found the same slot called *Weapon
+     * Masteries* on one sheet and *Choose Weapon Masteries* on another, because the name comes
+     * from whichever class entry the library built it from.
+     *
+     * The second assertion is the one that makes the first mean something: a slot with the
+     * expected *name* and the wrong tags is not a weapon-mastery slot.
+     */
+    @Test
+    fun `the mastery slot is found by its slotTags and not by its name`() {
+        assertEquals(
+            "Topple",
+            masteryOf(weapon(), chosenMastery(slotName = "Choose Weapon Masteries"))?.name,
+        )
+        assertNull(
+            "the right name is not the rule",
+            masteryOf(weapon(), chosenMastery(slotTags = listOf("armorTraining"))),
+        )
+    }
+
+    /**
+     * A stock weapon built from an older library has its actions directly under the `item` and no
+     * `feature` at all. There is nothing to read, so the row is silent — the honest answer, and
+     * the one the ledger records as the state of a stock Javelin today.
+     */
+    @Test
+    fun `an item with no feature gives its actions no mastery`() {
+        assertNull(
+            masteryOf(
+                listOf(
+                    prop("w-item", "item") { put("name", "Javelin") },
+                    prop("w-attack", "action", "w-item") {
+                        put("name", "Javelin")
+                        put("actionType", "attack")
+                        tagList("tags", listOf("battleaxeWeapon"))
+                    },
+                ),
+                chosenMastery(),
+            ),
+        )
+    }
+
+    /** Most weapon features name properties and no mastery. `summary` absent is the same answer. */
+    @Test
+    fun `a feature without a Mastery line gives no mastery`() {
+        assertNull(masteryOf(weapon(summary = "Finesse, Light, Thrown"), chosenMastery()))
+        assertNull(masteryOf(weapon(summary = null), chosenMastery()))
+    }
+
+    /**
+     * R1's sharpest exclusion. A library-stock `item` carries its own `**Mastery: X.**` bullet in
+     * `description`, the probe caught that bullet **disagreeing** with the feature on a live sheet,
+     * and the operator named the Features pane — which shows the feature's `summary`. So the item's
+     * description is not a fallback, and this test is what stops one being added back as a
+     * kindness.
+     */
+    @Test
+    fun `the Mastery word in the item's own description is not read`() {
+        assertNull(
+            masteryOf(
+                weapon(
+                    summary = "Heavy, Two-Handed",
+                    itemDescription = "- **Heavy.** Small creatures have disadvantage.\n" +
+                        "- **Mastery: Cleave.** Hit a second creature within 5 feet.",
+                ),
+                chosenMastery(),
+            ),
+        )
+    }
+
+    /**
+     * R1: `inactive` is **kept**. The feature goes inactive when the weapon is unequipped, exactly
+     * as its sibling actions do — the row is dimmed already, and the mastery is a fact about the
+     * weapon rather than about whether it is in hand.
+     */
+    @Test
+    fun `an inactive feature is still read`() {
+        assertEquals("Topple", masteryOf(weapon(featureInactive = true), chosenMastery())?.name)
+    }
+
+    /**
+     * `removed` is dropped, and the *next* feature answers — the two halves of one rule. A
+     * soft-deleted feature that still won on `order` would pin the row to a mastery the sheet no
+     * longer has.
+     */
+    @Test
+    fun `a removed feature is dropped and the next one answers`() {
+        val mastery = masteryOf(
+            weapon(featureRemoved = true, summary = "Finesse\nMastery: Vex"),
+            listOf(
+                prop("w-feature-2", "feature", "w-folder") {
+                    put("name", "Battleaxe")
+                    put("order", 1)
+                    wrappedText("summary", "Versatile\nMastery: Topple")
+                },
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals("Topple", mastery?.name)
+    }
+
+    /**
+     * R1: *"first by `order` then name, one word rendered"* — never two chips.
+     *
+     * A second, *different* word is a builder finding to ledger rather than something the row
+     * shows, so this asserts both that the first wins and that the second is nowhere in the entry.
+     *
+     * **The `order = 1` feature is declared FIRST on purpose.** `sheetOf` keeps declaration order,
+     * so a walk that never sorted would answer *Vex* here; only the comparator can produce
+     * *Topple*. Review MEDIUM-1: with the winner declared first this test stayed green after the
+     * whole `sortedWith` was deleted, which made R1's tie-break — the thing that stops the badge
+     * flickering between two rebuilds of one sheet — unpinned.
+     */
+    @Test
+    fun `two features under one item render only the first by order`() {
+        val mastery = masteryOf(
+            listOf(
+                prop("w-feature-2", "feature", "w-folder") {
+                    put("name", "Battleaxe")
+                    put("order", 1)
+                    wrappedText("summary", "Finesse\nMastery: Vex")
+                },
+            ),
+            weapon(summary = "Versatile\nMastery: Topple"),
+            chosenMastery(),
+        )
+
+        assertEquals("Topple", mastery?.name)
+        assertNull("the second feature's rules text is not borrowed either", mastery?.text)
+    }
+
+    /**
+     * R1's second comparator: *"first by `order` **then name**"*.
+     *
+     * Two features sharing one `order` is the shape the tie-break exists for — without it the
+     * answer would come from whatever order the wire happened to deliver, and a badge that reads
+     * *Topple* on one rebuild and *Vex* on the next is worse than either. The `weapon()` helper's
+     * own feature is declared first here and loses on name, so declaration order and the assertion
+     * disagree in the same way the sibling test above arranges for `order`.
+     */
+    @Test
+    fun `two features sharing one order fall back to the name`() {
+        val mastery = masteryOf(
+            weapon(summary = "Versatile\nMastery: Topple"),
+            listOf(
+                prop("w-feature-2", "feature", "w-folder") {
+                    put("name", "Axe Properties")
+                    put("order", 0)
+                    wrappedText("summary", "Finesse\nMastery: Vex")
+                },
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals("Vex", mastery?.name)
+    }
+
+    /**
+     * A nested `item` neither lends its mastery to the container nor takes the container's — the
+     * downward walk stops at every `item` it meets (review MEDIUM-3, which found the guard
+     * deletable with the suite green).
+     *
+     * A container holding a weapon is a real inventory shape. One fixture pins both directions:
+     * the container's own action keeps its own word, and the nested weapon's action keeps the
+     * weapon's. The nested feature is the one with the **lower `order`**, which is what gives the
+     * test its teeth — a walk that descended would let it win the container's sort and hand the
+     * axe's mastery up to the pack.
+     */
+    @Test
+    fun `a nested item neither lends nor steals a mastery`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("outer-item", "item") { put("name", "Pack") },
+                prop("outer-feature", "feature", "outer-item") {
+                    put("name", "Pack")
+                    put("order", 1)
+                    wrappedText("summary", "Mastery: Topple")
+                },
+                prop("outer-attack", "action", "outer-item") {
+                    put("name", "Pack")
+                    put("actionType", "attack")
+                    tagList("tags", listOf("battleaxeWeapon"))
+                },
+                prop("inner-item", "item", "outer-item") { put("name", "Axe") },
+                prop("inner-feature", "feature", "inner-item") {
+                    put("name", "Axe")
+                    put("order", 0)
+                    wrappedText("summary", "Mastery: Vex")
+                },
+                prop("inner-attack", "action", "inner-item") {
+                    put("name", "Axe")
+                    put("actionType", "attack")
+                    tagList("tags", listOf("battleaxeWeapon"))
+                },
+                *chosenMastery().toTypedArray(),
+            ),
+        )
+        val masteryOfRow = board.actions.associate { it.propertyId to it.mastery?.name }
+
+        assertEquals("the container does not inherit the weapon's", "Topple", masteryOfRow["outer-attack"])
+        assertEquals("and the weapon does not inherit the container's", "Vex", masteryOfRow["inner-attack"])
+    }
+
+    /**
+     * The upward walk's bound — the same guard `damageFor` has, against a cyclic `parent` chain
+     * turning a render into a hang. Five folders between the action and its item is past it, so
+     * the row reads as having no item ancestor, which is the same silent answer a potion gets.
+     */
+    @Test
+    fun `an action buried too deep under its item finds no mastery`() {
+        val nesting = (1..5).map { depth ->
+            prop("deep-$depth", "folder", if (depth == 1) "w-item" else "deep-${depth - 1}") {
+                put("name", "Nested")
+            }
+        }
+
+        assertNull(
+            masteryOf(
+                listOf(
+                    prop("w-item", "item") { put("name", "Battleaxe") },
+                    prop("w-feature", "feature", "w-item") {
+                        put("name", "Battleaxe")
+                        wrappedText("summary", "Mastery: Topple")
+                    },
+                ),
+                nesting,
+                listOf(
+                    prop("w-attack", "action", "deep-5") {
+                        put("name", "Battleaxe")
+                        put("actionType", "attack")
+                        tagList("tags", listOf("battleaxeWeapon"))
+                    },
+                ),
+                chosenMastery(),
+            ),
+        )
+    }
+
+    /** The same bound on the downward walk: a feature six layers under its item is not found. */
+    @Test
+    fun `a feature buried too deep under its item is not found`() {
+        val nesting = (1..6).map { depth ->
+            prop("deep-$depth", "folder", if (depth == 1) "w-item" else "deep-${depth - 1}") {
+                put("name", "Nested")
+            }
+        }
+
+        assertNull(
+            masteryOf(
+                listOf(prop("w-item", "item") { put("name", "Battleaxe") }),
+                nesting,
+                listOf(
+                    prop("w-feature", "feature", "deep-6") {
+                        put("name", "Battleaxe")
+                        wrappedText("summary", "Mastery: Topple")
+                    },
+                    prop("w-attack", "action", "w-item") {
+                        put("name", "Battleaxe")
+                        put("actionType", "attack")
+                        tagList("tags", listOf("battleaxeWeapon"))
+                    },
+                ),
+                chosenMastery(),
+            ),
+        )
+    }
+
+    // ---- R7: the rules sentence ------------------------------------------------
+
+    /** The library writes both `**Mastery: X.**` and `**Mastery: X:**`; R7 accepts either. */
+    @Test
+    fun `both bullet punctuations are read`() {
+        val colon = masteryOf(
+            weapon(description = "- **Mastery: Topple:** The target makes a save."),
+            chosenMastery(),
+        )
+        val period = masteryOf(
+            weapon(description = "- **Mastery: Topple.** The target makes a save."),
+            chosenMastery(),
+        )
+
+        assertEquals("The target makes a save.", colon?.text)
+        assertEquals(period?.text, colon?.text)
+    }
+
+    /**
+     * R7: *"the rest of that line and any following lines until the next top-level `- ` bullet or
+     * the end"*. The continuation lines are kept and the emphasis markers stripped — 16 decision 4
+     * has no markdown renderer, and leaving the asterisks in would print `**` at a player.
+     */
+    @Test
+    fun `a bullet that runs onto further lines keeps them and stops at the next bullet`() {
+        val mastery = masteryOf(
+            weapon(
+                description = "- **Mastery: Topple.** If you hit a creature,\n" +
+                    "it makes a *Constitution* save.\n" +
+                    "- **Versatile.** Roll the larger die in two hands.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals(
+            "If you hit a creature,\nit makes a Constitution save.",
+            mastery?.text,
+        )
+    }
+
+    /**
+     * A nested `  - ` sub-bullet belongs to the property above it, and the mastery's text starts
+     * *below* the mastery bullet — so it stays out. Its twin is asserted in the same test: a
+     * sub-bullet that follows the mastery bullet is part of the mastery, and a rule that read
+     * indentation as "stop here" would silently truncate it.
+     */
+    @Test
+    fun `a nested sub-bullet stays with the property it belongs to`() {
+        val mastery = masteryOf(
+            weapon(
+                description = "- **Versatile.** Roll the larger die in two hands.\n" +
+                    "  - Two-handed damage is listed separately.\n" +
+                    "- **Mastery: Topple.** The target makes a save.\n" +
+                    "  - The DC is your attack DC.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals(
+            "The target makes a save.\n  - The DC is your attack DC.",
+            mastery?.text,
+        )
+    }
+
+    /** The mastery bullet is last on some weapons and first on others; position does not matter. */
+    @Test
+    fun `the mastery bullet is found first or last in the list`() {
+        val first = masteryOf(
+            weapon(
+                description = "- **Mastery: Topple.** The target makes a save.\n" +
+                    "- **Versatile.** Roll the larger die in two hands.",
+            ),
+            chosenMastery(),
+        )
+        val last = masteryOf(
+            weapon(
+                description = "- **Versatile.** Roll the larger die in two hands.\n" +
+                    "- **Mastery: Topple.** The target makes a save.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals("The target makes a save.", first?.text)
+        assertEquals("The target makes a save.", last?.text)
+    }
+
+    /**
+     * R7: *"Bullet absent → `text = null`, the block shows the heading alone; a heading with no
+     * body is still true."* A hand-made weapon naming its mastery without restating the rule is a
+     * real shape, and the badge is still the fact the operator asked for.
+     */
+    @Test
+    fun `a feature with no mastery bullet still names its mastery`() {
+        val noDescription = masteryOf(weapon(), chosenMastery())
+        val otherBullets = masteryOf(
+            weapon(description = "- **Versatile.** Roll the larger die in two hands."),
+            chosenMastery(),
+        )
+
+        assertEquals("Topple", noDescription?.name)
+        assertNull(noDescription?.text)
+        assertEquals("Topple", otherBullets?.name)
+        assertNull(otherBullets?.text)
+    }
+
+    /**
+     * R7: the bullet's name is confirmed against the summary's and *"the summary wins on a
+     * mismatch"*.
+     *
+     * What the ruling leaves open is the sentence, and the answer this wave took is that it goes
+     * with the name it belongs to: printing one mastery's rules under another's heading would be a
+     * confident, wrong statement about what the weapon does, and the heading alone is a shape the
+     * detail sheet already draws. The mismatch is a builder finding to ledger — see the wave report.
+     */
+    @Test
+    fun `a bullet naming a different mastery than the summary loses to the summary`() {
+        val mastery = masteryOf(
+            weapon(
+                summary = "Versatile\nMastery: Topple",
+                description = "- **Mastery: Vex.** You have advantage on your next attack.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals("Topple", mastery?.name)
+        assertNull("Vex's rules are not printed under Topple's name", mastery?.text)
+    }
+
+    /**
+     * Review LOW-5: the two bullet regexes disagreed. `MASTERY_BULLET` accepts `-**Mastery: X.**`
+     * with no space after the dash, and the library writes the unspaced form on some properties —
+     * but `ANY_BULLET` demanded `-\s`, so the *next* property was not recognised as a bullet and
+     * was swallowed whole into the mastery's rules text.
+     */
+    @Test
+    fun `an unspaced next bullet still ends the mastery text`() {
+        val mastery = masteryOf(
+            weapon(
+                description = "- **Mastery: Topple.** The target makes a save.\n" +
+                    "-**Versatile.** Roll the larger die in two hands.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals("The target makes a save.", mastery?.text)
+    }
+
+    /**
+     * Review LOW-5: the lookup took the first bullet that said *"Mastery"* and only then compared
+     * the name, so a second `**Mastery: …**` bullet was unreachable and a first one that
+     * disagreed with the summary dropped the sentence without looking further.
+     *
+     * The name check now rides along with the scan, so the mismatch rule is unchanged — no bullet
+     * naming the summary's mastery still yields `null`, as its own test asserts — while a
+     * description that does carry the right bullet is read wherever in the list it sits.
+     */
+    @Test
+    fun `the bullet naming the summary's mastery is found past an earlier one`() {
+        val mastery = masteryOf(
+            weapon(
+                summary = "Versatile\nMastery: Topple",
+                description = "- **Mastery: Vex.** You have advantage on your next attack.\n" +
+                    "- **Mastery: Topple.** The target makes a save.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals("Topple", mastery?.name)
+        assertEquals("The target makes a save.", mastery?.text)
+    }
+
+    /**
+     * Review LOW-5, and it cost twice: a hand-written `Mastery: **Topple**` summary badged the row
+     * *"Mastery: \*\*Topple\*\*"* **and** lost the rules sentence, because the bullet's plain
+     * `Topple` could never equal the starred word the name check compared it against. The word is
+     * markdown-stripped for the same reason the body is, and the trailing period that hides behind
+     * a closing `**` is trimmed with it.
+     */
+    @Test
+    fun `a markdown emphasised summary word is stripped and still finds its bullet`() {
+        val bold = masteryOf(
+            weapon(
+                summary = "Versatile\nMastery: **Topple**",
+                description = "- **Mastery: Topple.** The target makes a save.",
+            ),
+            chosenMastery(),
+        )
+        val boldWithPeriod = masteryOf(
+            weapon(
+                summary = "Versatile\nMastery: **Topple.**",
+                description = "- **Mastery: Topple.** The target makes a save.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals("Topple", bold?.name)
+        assertEquals("The target makes a save.", bold?.text)
+        assertEquals("Topple", boldWithPeriod?.name)
+        assertEquals("The target makes a save.", boldWithPeriod?.text)
+    }
+
+    /**
+     * Review LOW-5: stripping every `*` run also deleted a literal asterisk from prose, so a rules
+     * line reading *"2 \* your level"* rendered as *"2  your level"* — the app removing a character
+     * the server sent. Emphasis delimiters hug their text; a multiplication sign is spaced on both
+     * sides, and only that shape survives.
+     */
+    @Test
+    fun `a literal asterisk in the rules text survives while emphasis is stripped`() {
+        val mastery = masteryOf(
+            weapon(
+                description = "- **Mastery: Topple.** The target is prone for 2 * your " +
+                    "*proficiency* bonus rounds.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals(
+            "The target is prone for 2 * your proficiency bonus rounds.",
+            mastery?.text,
+        )
+    }
+
+    /**
+     * Review LOW-6: *"top-level bullet"* is read against the mastery bullet's own indent, and this
+     * is the case that tells that reading apart from a literal column-zero one — a description
+     * whose whole list is indented. A column-zero rule would find no terminator at all and run the
+     * *Two-Handed* property into the mastery's text.
+     *
+     * It also pins NIT-7's answer: the continuation sub-bullet keeps its `- ` (it has no heading
+     * of its own, unlike the mastery bullet, whose lead the sheet draws as the block's heading) but
+     * is de-indented against the bullet, so this renders **the same string** as the column-zero
+     * fixture in `a nested sub-bullet stays with the property it belongs to` — the list's own
+     * indentation does not leak into what a player reads.
+     */
+    @Test
+    fun `a wholly indented list reads the same as one at column zero`() {
+        val mastery = masteryOf(
+            weapon(
+                description = "  - **Versatile.** Roll the larger die in two hands.\n" +
+                    "  - **Mastery: Topple.** The target makes a save.\n" +
+                    "    - The DC is your attack DC.\n" +
+                    "  - **Two-Handed.** Both hands on the haft.",
+            ),
+            chosenMastery(),
+        )
+
+        assertEquals(
+            "The target makes a save.\n  - The DC is your attack DC.",
+            mastery?.text,
+        )
+    }
+
+    /**
+     * A trigger publishing no `targetTags` says nothing about what it applies to, and an empty tag
+     * set is a subset of every action's — so keeping one would badge **every** attack on the sheet.
+     * R6 describes a chosen mastery as one *"carrying `targetTags`"*; this is that clause.
+     */
+    @Test
+    fun `a trigger with no targetTags does not badge every row`() {
+        assertNull(masteryOf(weapon(), chosenMastery(targetTags = emptyList())))
+    }
+
+    /**
+     * R1: *"No item ancestor → no mastery (a feature-granted action, a potion)."*
+     *
+     * The row here is tagged and the mastery is chosen, so it passes R6's gate and fails only on
+     * having no weapon behind it — which is the ordering the engine relies on, and the case that
+     * would badge a class feature with a weapon's word if the walk defaulted to anything.
+     */
+    @Test
+    fun `an action with no item ancestor has no mastery`() {
+        assertNull(
+            masteryOf(
+                listOf(
+                    prop("f-feature", "feature") {
+                        put("name", "Martial Training")
+                        wrappedText("summary", "Mastery: Topple")
+                    },
+                    prop("f-action", "action", "f-feature") {
+                        put("name", "Martial Training")
+                        put("actionType", "action")
+                        tagList("tags", listOf("battleaxeWeapon"))
+                    },
+                ),
+                chosenMastery(),
+            ),
+        )
+    }
+
+    // -----------------------------------------------------------------------
     // Against the live capture
     // -----------------------------------------------------------------------
 

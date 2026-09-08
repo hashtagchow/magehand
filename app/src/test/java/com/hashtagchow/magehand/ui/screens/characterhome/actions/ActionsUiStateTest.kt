@@ -18,6 +18,7 @@ import com.hashtagchow.magehand.core.model.SpellListHeader
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.UseTarget
+import com.hashtagchow.magehand.core.model.WeaponMastery
 
 /**
  * The Actions surface's sectioning, search and collapse (16 decisions 3, 6 and 9).
@@ -576,6 +577,41 @@ class ActionsUiStateTest {
     fun `undoable defaults to false`() {
         assertFalse(ActionsUiState().usesAreUndoable)
         assertFalse(UseAffordance(target = UseTarget.Action("a", "A", ActionCost.FREE, null)).undoable)
+    }
+
+    /**
+     * FR-47 R7's block, at the layer the composable reads it from.
+     *
+     * `:app` has no Compose harness for the sheet's *branches*, so the three states the block has
+     * — text, no text, no mastery — are pinned here as the property the sheet draws from, and the
+     * drawing itself is asserted in `ActionsScreenRenderTest`. A spell answers `null` because
+     * `SpellEntry` has no such field: a mastery is a property of a weapon.
+     */
+    @Test
+    fun `the detail state carries an action's mastery and never a spell's`() {
+        val withText = ActionEntry(
+            propertyId = "a-m",
+            name = "Battleaxe",
+            type = ActionType.ATTACK,
+            mastery = WeaponMastery("Topple", "The target makes a save."),
+        )
+        val wordOnly = withText.copy(propertyId = "a-w", mastery = WeaponMastery("Topple"))
+        val none = withText.copy(propertyId = "a-n", mastery = null)
+        val spell = SpellEntry(propertyId = "s-m", name = "Firebolt", level = 0)
+
+        val board = toActionsUiState(
+            "c1",
+            ActionBoard(spells = listOf(spell), actions = listOf(withText, wordOnly, none)),
+        )
+
+        assertEquals(
+            WeaponMastery("Topple", "The target makes a save."),
+            board.detailFor("a-m")!!.mastery,
+        )
+        assertEquals(WeaponMastery("Topple"), board.detailFor("a-w")!!.mastery)
+        assertNull("a heading with no body is still a mastery", board.detailFor("a-w")!!.mastery?.text)
+        assertNull(board.detailFor("a-n")!!.mastery)
+        assertNull("a spell has no weapon behind it", board.detailFor("s-m")!!.mastery)
     }
 
     /** A slot row as the tracker board hands one up. See `spellSlotOptions`. */
