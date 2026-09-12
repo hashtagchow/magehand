@@ -444,6 +444,78 @@ class ActionsUiStateTest {
         assertFalse("a cantrip draws no picker at all", cantrip.confirmDisabled(false))
     }
 
+    /**
+     * **The confirm dialog's "what will this take" line, whole** — the 1.17.0 sweep's incidental
+     * observation.
+     *
+     * The dialog read `UseTarget.cost` and nothing else, so a Fireball cast from a level-5 slot
+     * was announced as *"This spends nothing."* — directly above the picker the player had just
+     * chosen that slot in. A spell slot is not an `attributesConsumed` line and neither is the
+     * row's own charge, so the sentence was answering a narrower question than it looked like.
+     *
+     * Four shapes, because each one is a different branch of what a Use can take:
+     *  - a **slot cast** takes the slot the picker chose, and nothing else;
+     *  - a **cantrip** takes nothing, which is when the old sentence was right;
+     *  - a **ritual** takes no slot even though the spell has a level and the picker has options;
+     *  - a **cost row** is carried through unchanged, and it is the case that has to keep working
+     *    on a cantrip — M3's ruling, from the other side of the same dialog.
+     */
+    @Test
+    fun `a slot cast says it spends the slot, and a cantrip still spends nothing`() {
+        val slotCast = state("s1", level = 3, ritual = false, slotsLeft = true)
+        val chosen = slotCast.defaultSlotId
+
+        with(slotCast.spend(ritual = false, slotId = chosen)) {
+            assertFalse("a slot cast does not spend nothing", isNothing)
+            assertEquals(3, slot?.level)
+            assertNull("no charges of its own", uses)
+            assertTrue(costLines.isEmpty())
+        }
+
+        with(state("s0", level = 0, ritual = false, slotsLeft = true).spend(false, null)) {
+            assertTrue("a cantrip really does spend nothing", isNothing)
+            assertNull(slot)
+        }
+
+        with(state("s1", level = 3, ritual = true, slotsLeft = true).spend(ritual = true, slotId = chosen)) {
+            assertTrue("a ritual cast spends nothing, picker or no picker", isNothing)
+            assertNull("and above all not the slot", slot)
+        }
+
+        // The same spell with the box unticked still spends its slot — the checkbox is the only
+        // difference, which is what makes it honest.
+        with(state("s1", level = 3, ritual = true, slotsLeft = true).spend(ritual = false, slotId = chosen)) {
+            assertEquals(3, slot?.level)
+        }
+    }
+
+    /** An innate spell and a limited action both name their own charge; a cost row rides along. */
+    @Test
+    fun `a use with its own charges or a cost row names them`() {
+        val cost = ActionCost(attributes = listOf(CostLine(name = "Ki", amount = 2, available = 5)))
+        val innate = UseAffordance(
+            target = UseTarget.Spell(
+                propertyId = "s1",
+                name = "Fire Bolt",
+                cost = cost,
+                uses = ActionUses(max = 3, used = 1),
+                level = 1,
+                ritual = false,
+                spendsOwnUses = true,
+            ),
+        )
+
+        with(innate.spend(ritual = false, slotId = null)) {
+            assertFalse(isNothing)
+            assertNull("a spell that spends its own charges takes no slot", slot)
+            assertEquals(2, uses?.remaining)
+            assertEquals(listOf("Ki"), costLines.map { it.name })
+        }
+
+        val free = UseAffordance(target = UseTarget.Action("a1", "Shove", ActionCost.FREE, null))
+        assertTrue("a free action still spends nothing", free.spend(false, null).isNothing)
+    }
+
     private fun state(id: String, level: Int, ritual: Boolean, slotsLeft: Boolean): UseAffordance {
         val spell = SpellEntry(propertyId = id, name = "Spell", level = level, prepared = true, ritual = ritual)
         val board = toActionsUiState(
@@ -623,4 +695,158 @@ class ActionsUiStateTest {
         total = total,
         spellSlotLevel = level,
     )
+
+    // --- FR-49 (docs/design/20-local-spells-and-attacks.md decisions 4, 5 and 9) ---------------
+
+    /**
+     * Decision 5: the upcast paragraph reaches the detail state, and only from a **spell**.
+     *
+     * Blank is normalised to absent here rather than in the composable, so the sheet's
+     * `?.let { … }` is the whole of the "no paragraph, no heading" rule — a blank string reaching
+     * the UI would draw the heading over nothing, which is this app reporting on the SRD's
+     * completeness rather than on the spell.
+     */
+    @Test
+    fun `the upcast paragraph reaches the detail state, and only from a spell`() {
+        val spell = SpellEntry(
+            propertyId = "s-fireball",
+            name = "Fireball",
+            level = 3,
+            alwaysPrepared = true,
+            higherLevels = "The damage increases by 1d6 for each slot level above 3rd.",
+        )
+        val action = ActionEntry(propertyId = "a-rage", name = "Rage", type = ActionType.BONUS)
+
+        val state = toActionsUiState(
+            creatureId = "c-1",
+            board = ActionBoard(spells = listOf(spell), actions = listOf(action)),
+            canWrite = true,
+        )
+
+        assertEquals(
+            "The damage increases by 1d6 for each slot level above 3rd.",
+            state.detailFor("s-fireball")?.higherLevels,
+        )
+        assertNull("an action does not upcast", state.detailFor("a-rage")?.higherLevels)
+        assertNull(
+            "a blank paragraph is an absent one, so no heading is drawn",
+            toActionsUiState(
+                creatureId = "c-1",
+                board = ActionBoard(spells = listOf(spell.copy(higherLevels = "   "))),
+            ).detailFor("s-fireball")?.higherLevels,
+        )
+        assertNull(
+            toActionsUiState(
+                creatureId = "c-1",
+                board = ActionBoard(spells = listOf(spell.copy(higherLevels = null))),
+            ).detailFor("s-fireball")?.higherLevels,
+        )
+    }
+
+    /**
+     * Decision 9: a local spell is **known**, so it carries no unprepared badge and its Cast
+     * affordance exists at all.
+     *
+     * The second half is the load-bearing one: `SpellEntry.isUsable` reads the badge, so a board
+     * that left `alwaysPrepared` false would have produced a null `useTarget` and a detail sheet
+     * with an "Not prepared. Prepare it in DiceCloud" sentence on a character that has no
+     * DiceCloud.
+     */
+    @Test
+    fun `a local spell is known, so it badges nothing and offers a cast`() {
+        val state = toActionsUiState(
+            creatureId = "local-1",
+            board = ActionBoard(
+                spells = listOf(
+                    SpellEntry(propertyId = "s-1", name = "Fireball", level = 3, alwaysPrepared = true),
+                ),
+            ),
+            spellSlots = listOf(slotRow("slot-3", level = 3, remaining = 2)),
+            canWrite = true,
+            usesAreUndoable = true,
+        )
+
+        val detail = checkNotNull(state.detailFor("s-1"))
+        assertNull("nothing to explain — the Use is offered", detail.unusableReason)
+        val use = checkNotNull(detail.use)
+        assertTrue(use.showsSlotPicker)
+        assertEquals(listOf("slot-3"), use.slots.map { it.propertyId })
+        assertTrue("18 decision 4: no 'can't be undone' line locally", use.undoable)
+    }
+
+    /**
+     * Decision 4's innate case: a local spell with charges of its own spends them **instead of**
+     * a slot, so the picker is not drawn.
+     *
+     * `spendsOwnUses` is a field rather than `uses != null` precisely so this does not change what
+     * a DiceCloud spell does — the assertion below it is that half.
+     */
+    @Test
+    fun `a local spell with its own uses needs no slot, and a server one still does`() {
+        fun pickerFor(spell: SpellEntry) = toActionsUiState(
+            creatureId = "c-1",
+            board = ActionBoard(spells = listOf(spell)),
+            spellSlots = listOf(slotRow("slot-2", level = 2, remaining = 3)),
+            canWrite = true,
+        ).detailFor(spell.propertyId)?.use
+
+        val innate = SpellEntry(
+            propertyId = "s-innate",
+            name = "Misty Step",
+            level = 2,
+            alwaysPrepared = true,
+            uses = ActionUses(max = 2, used = 0),
+            spendsOwnUses = true,
+        )
+        val innateUse = checkNotNull(pickerFor(innate))
+        assertFalse(innateUse.showsSlotPicker)
+        assertTrue("and nothing is offered to spend", innateUse.slots.isEmpty())
+
+        // The same entry without the flag — which is every DiceCloud spell, limited or not.
+        val serverLimited = innate.copy(propertyId = "s-server", spendsOwnUses = false)
+        val serverUse = checkNotNull(pickerFor(serverLimited))
+        assertTrue(serverUse.showsSlotPicker)
+        assertEquals(listOf("slot-2"), serverUse.slots.map { it.propertyId })
+    }
+
+    /**
+     * Decision 8: a local attack's damage and properties are text on the entry, and the detail
+     * state exposes no rollup for them.
+     *
+     * Asserted through the *state* rather than through a render, because the claim is about what
+     * the type carries: `damage` (the rollup list) stays empty and `attackRoll` stays null, which
+     * is what makes "no invented number" structural rather than a rendering choice.
+     */
+    @Test
+    fun `a local attack carries text facts and no rollups`() {
+        val state = toActionsUiState(
+            creatureId = "local-1",
+            board = ActionBoard(
+                actions = listOf(
+                    ActionEntry(
+                        propertyId = "a-sword",
+                        name = "Longsword",
+                        type = ActionType.ATTACK,
+                        damageText = "1d8 / 1d10 slashing",
+                        properties = "Versatile (1d10), Mastery: Sap",
+                        mastery = WeaponMastery("Sap"),
+                    ),
+                ),
+            ),
+            canWrite = true,
+        )
+
+        assertEquals(
+            "an attack files under Attacks",
+            listOf("group:${ActionGroup.ATTACKS.name}"),
+            state.sections.map { it.key },
+        )
+        val row = (state.sections.single().rows.single() as ActionRow.Action).entry
+        assertEquals("1d8 / 1d10 slashing", row.damageText)
+        assertEquals("Versatile (1d10), Mastery: Sap", row.properties)
+        assertTrue("20 decision 8: no rollup", row.damage.isEmpty())
+        assertNull("20 decision 8: no bonus", row.attackRoll)
+        assertEquals("Sap", state.detailFor("a-sword")?.mastery?.name)
+    }
+
 }

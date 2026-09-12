@@ -372,6 +372,20 @@
          as the FR-6 note above does: "limited-use abilities" is jargon until you are told it
          means the ones with a use count, and an example is the shortest way to say it. -->
     <string name="settings_show_limited_uses">Show limited-use abilities on tracker</string>
+    <!-- FR-49 decision 7: the About section, which exists because CC-BY-4.0 requires a visible
+         attribution for the bundled SRD catalogs and a KDoc only credits people who read source.
+
+         There is deliberately NO attribution string here (M2 [review, 2026-09-12]). The sentences
+         the section prints are `CatalogProvenance.spells.attribution` and `.weapons.attribution`,
+         read verbatim out of core/data's provenance.json and rendered as they are recorded: they
+         are the licence's required form rather than this app's copy, they carry the licence URI
+         and the CC-BY-4.0 3(a)(1) "modified" statement, and a re-fetch that changed an edition
+         changes them at the record or fails CatalogTest. A string here would be a second place to
+         edit and the only one without a test behind it — and the one that used to be here read
+         "System Reference Documents SRD 5.1 and SRD 5.2.1", with the abbreviation doubled. -->
+    <string name="settings_about">About</string>
+    <string name="settings_about_version">MageHand %1$s (%2$d)</string>
+
     <string name="settings_show_limited_uses_note">Actions and spells with a use count, like 2 per long rest.</string>
 
     <!-- FR-18: UI scale (docs/design/14-large-screen-arc.md decisions 2-4). The note is
@@ -460,6 +474,44 @@
     <string name="local_cost_none">Nothing</string>
     <string name="local_cost_unnamed_row">Unnamed row</string>
     <string name="local_error_row_cost">Pick what this spends and how many, or choose Nothing.</string>
+
+    <!-- FR-49: local spells and attacks (docs/design/20-local-spells-and-attacks.md).
+
+         `local_kind_spell` / `local_kind_attack` are the editor's kind chips and
+         `local_add_spell` / `local_add_attack` its add buttons, matching the four before them.
+
+         `local_field_spell_level` is the chip row's heading; the chips themselves print
+         `local_spell_level_cantrip` for 0 and `local_spell_level` for 1-9, because "Cantrip" is
+         what a player calls level 0 and "Level 0" is not a thing anyone says — the same
+         special-case `actions_spell_cantrips` already makes on the section header.
+
+         `local_field_slot_level` is decision 3's slot chips, and `local_slot_level_hint` is the
+         line a MIGRATED slot shows when its label carried no ordinal for the back-fill to read.
+         It is a hint and not an error: the row works perfectly as a pip row, it simply cannot be
+         cast from until somebody answers the question.
+
+         `local_error_row_spell_level` names only the missing half, because the other half a spell
+         level can be wrong in is unreachable from this screen - see LocalCharacterForm's
+         `spellLevelIsValid`. -->
+    <string name="local_kind_spell">Spell</string>
+    <string name="local_kind_attack">Attack</string>
+    <string name="local_add_spell">Add spell</string>
+    <string name="local_add_attack">Add attack</string>
+    <string name="local_field_spell_level">Spell level</string>
+    <string name="local_field_slot_level">Slot level</string>
+    <string name="local_spell_level_cantrip">Cantrip</string>
+    <string name="local_spell_level">%1$d</string>
+    <string name="local_slot_level_hint">Set a level to cast from this slot.</string>
+    <string name="local_error_row_spell_level">Choose this spell\'s level.</string>
+    <string name="local_field_casting_time">Casting time</string>
+    <string name="local_field_range">Range</string>
+    <string name="local_field_components">Components</string>
+    <string name="local_field_duration">Duration</string>
+    <string name="local_field_higher_levels">Using a higher-level slot</string>
+    <string name="local_field_concentration">Concentration</string>
+    <string name="local_field_ritual">Ritual</string>
+    <string name="local_field_damage">Damage</string>
+    <string name="local_field_properties">Properties</string>
 
 
     <!-- FR-19: DM view (docs/design/14-large-screen-arc.md decisions 11-19) -->
@@ -613,6 +665,24 @@
     <string name="actions_damage_rider">%1$s</string>
     <string name="actions_empty">Nothing to act with</string>
     <string name="actions_empty_hint">This character\'s sheet has no spells or actions on it.</string>
+    <!-- FR-49 decision 1: the local empty state is the ordinary first sight of this tab, not a
+         narrow window, because the discovery gate is retired for on-device characters. So the
+         copy says what to do rather than reporting on a sheet this character does not have — and
+         the Add button beside it is the same handler as the app bar's. -->
+    <string name="actions_empty_local_hint">Add the spells and attacks you want to track.</string>
+    <string name="actions_add">Add</string>
+    <!-- FR-49 decision 6's add sheet. `actions_add_custom` / `actions_add_from_list` are one
+         control, because the catalog and the form are one piece of state — a pick pre-fills the
+         form rather than saving, so "custom" is where you land either way. `actions_add_added` is
+         the snackbar; the sheet closes on save (unlike AddItemSheet's stay-open convention),
+         because a spell is a longer decision than a rope. -->
+    <string name="actions_add_title">Add to this character</string>
+    <string name="actions_add_custom">Write my own</string>
+    <string name="actions_add_from_list">Back to the list</string>
+    <string name="actions_add_search">Search the SRD</string>
+    <string name="actions_add_none">Nothing here matches that.</string>
+    <string name="actions_add_name">Name</string>
+    <string name="actions_add_added">Added %1$s</string>
     <string name="actions_section_expand">collapsed, tap to expand</string>
     <string name="actions_section_collapse">expanded, tap to collapse</string>
     <!-- A5 nit: RowShell's `onClickLabel` — TalkBack reads this instead of a bare
@@ -708,6 +778,23 @@
     <string name="action_detail_range">Range</string>
     <string name="action_detail_spell_level">Level %1$d spell</string>
     <string name="action_detail_cantrip">Cantrip</string>
+    <!-- FR-49 (docs/design/20-local-spells-and-attacks.md decisions 5 and 8). The first two are
+         scalars a LOCAL spell carries and a DiceCloud one does not (ActionEngine reads neither),
+         so on a server character these lines simply do not appear.
+
+         `action_detail_higher_levels` is decision 5's heading, and its wording is the SRD 5.2.1
+         one ("Using a Higher-Level Spell Slot") shortened to fit a label rather than the 5.1 "At
+         Higher Levels" — the paragraph under it is whichever edition the catalog entry came from,
+         verbatim, and the heading has to be one thing.
+
+         The last two are decision 8's text facts on a local attack. They are labelled "Damage"
+         and "Properties" and carry no number this app derived: there is no attack bonus, no
+         ability modifier and no proficiency on this path. -->
+    <string name="action_detail_components">Components</string>
+    <string name="action_detail_duration">Duration</string>
+    <string name="action_detail_higher_levels">Using a higher-level slot</string>
+    <string name="action_detail_damage">Damage</string>
+    <string name="action_detail_properties">Properties</string>
     <string name="action_detail_unusable_unprepared">Not prepared. Prepare it in DiceCloud to use it here.</string>
     <string name="action_detail_unusable_inactive">Switched off on the sheet, so there\'s nothing to use.</string>
     <string name="action_detail_unusable_resources">You don\'t have what this costs.</string>
@@ -719,6 +806,13 @@
     <string name="action_use_confirm_cast_title">Cast %1$s?</string>
     <string name="action_use_confirm_spends">This will spend:</string>
     <string name="action_use_confirm_free">This spends nothing.</string>
+    <!-- The slot and the row's own charges, as "This will spend:" bullets beside the cost lines.
+         Added because the dialog used to say "This spends nothing." on a slot cast (the 1.17.0
+         sweep's incidental observation): the sentence was derived from the row's cost lines
+         alone, and a spell slot is not one of those. "level-N slot" rather than "Nth-level slot"
+         to match the picker directly below it, which reads "Level N - x of y left". -->
+    <string name="action_use_confirm_spends_slot">1 level-%1$d slot</string>
+    <string name="action_use_confirm_spends_use">1 use of %1$s</string>
     <string name="action_use_confirm_uses_after">Uses left afterwards: %1$d of %2$d</string>
     <string name="action_use_no_undo">Can\'t be undone. Logged to the party\'s activity feed and any connected integrations.</string>
     <string name="action_use_confirm">Use</string>

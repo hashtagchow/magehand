@@ -91,6 +91,20 @@ class LocalCharacterEditorViewModel @Inject constructor(
 
     fun setRowKind(index: Int, kind: LocalRowKind) = editRow(index) { it.copy(kind = kind) }
 
+    /**
+     * FR-49 (docs/design/20-local-spells-and-attacks.md decision 2): replaces one row outright.
+     *
+     * The eleven fields FR-49 adds are all plain text or a chip choice with no per-field rule, and
+     * eleven more `setRowX` methods would have been eleven lines each saying `copy`. The rules
+     * that do exist still live where they lived: the per-kind drops in
+     * [LocalRowFormState.toRowForm], the validation in `LocalCharacterForm`. Nothing about the
+     * editing posture changes — this is [editRow] with the lambda supplied by the caller.
+     *
+     * The six FR-29 setters above are deliberately **not** converted: rewriting working callbacks
+     * mechanically is churn a review has to read in full for no behaviour.
+     */
+    fun setRow(index: Int, row: LocalRowFormState) = editRow(index) { row }
+
     fun setRowLabel(index: Int, label: String) = editRow(index) { it.copy(label = label) }
 
     fun setRowTotal(index: Int, total: String) = editRow(index) { it.copy(total = total) }

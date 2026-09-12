@@ -22,6 +22,8 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.hashtagchow.magehand.core.data.catalog.SpellCatalog
+import com.hashtagchow.magehand.core.data.catalog.WeaponCatalog
 import com.hashtagchow.magehand.core.data.local.LocalCharacterRepository
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacter
 import com.hashtagchow.magehand.core.data.local.LocalOpenCharacterFactory
@@ -44,12 +46,16 @@ import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.core.model.NewLocalRowSpec
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
+import com.hashtagchow.magehand.core.model.TrackerWriteFailure
+import com.hashtagchow.magehand.core.model.TrackerWriteKind
 import com.hashtagchow.magehand.core.model.UseTarget
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
+import com.hashtagchow.magehand.ui.screens.characterhome.USE_ERROR_IDS
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.toActionsUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryLayoutPlan
@@ -88,21 +94,20 @@ data class LocalCharacterHomeUiState(
      *
      * The same [ActionsUiState] the DiceCloud screen renders, from a board built by
      * `LocalActionBoard` instead of `ActionEngine` — the third surface this screen reuses rather
-     * than forks, on 09 decision 5's terms exactly. What differs is inside the state and not
-     * around it: no spells, no spell lists, no upcast picker, and `usesAreUndoable = true`.
+     * than forks, on 09 decision 5's terms exactly.
+     *
+     * What differs is inside the state and not around it, and FR-49 removed two of the three
+     * differences: there are spells now (20 decision 2) and the upcast picker is fed from the
+     * tracker's own slot rows (decision 3). What remains is no spell-list header — nothing here
+     * can compute a save DC (decision 9) — and `usesAreUndoable = true`, which deletes a sentence
+     * from the confirm dialog rather than adding one.
+     *
+     * There is no `hasActions` beside this any more. FR-29 had one, because the tab was
+     * discovery-gated and the chrome keyed a `remember` on it; 20 decision 1 makes the tab always
+     * present, so the question has no reader — see `localPaneSurfaces`.
      */
     val actions: ActionsUiState = ActionsUiState(),
-) {
-    /**
-     * FR-29 decision 3's discovery gate: does this character have an Actions surface at all?
-     *
-     * `CharacterHomeUiState.hasActions`'s twin, down to the recomposition argument: the chrome
-     * keys `remember(hasActions)` on this, and keying it on a list would rebuild the tab row on
-     * every Room emission. **False while loading**, which is the honest default — a tab that
-     * appeared a beat after the screen would be worse than one that appears with the data.
-     */
-    val hasActions: Boolean get() = actions.sections.isNotEmpty()
-}
+)
 
 /**
  * A local character's home (docs/design/09-local-characters.md decisions 5–8).
@@ -195,7 +200,28 @@ class LocalCharacterHomeViewModel @Inject constructor(
         }
         // `LocalOpenCharacter.writeFailures` never emits (a Room write against a row this
         // instance owns has no failure the player can act on), so there is deliberately no
-        // failure collector and no shake here.
+        // failure *collector* and no shake here. [use] emits one `TrackerEvent.Failed` of its
+        // own — L1 — for the one refusal this path can see coming: a cast whose slot gate
+        // answered synchronously.
+
+        // L4 [review, 2026-09-12]: warm the bundled catalogs off the main thread.
+        //
+        // `SpellCatalog.entries` is `by lazy` over a 365 KB JSON resource, and until this ran
+        // the first thread to touch it was whichever one opened the Add sheet — the main one,
+        // inside a composition, on the frame the sheet animates in. The lazy is thread-safe, so
+        // the worst case was never a double parse; it was a visible stall at exactly the moment
+        // the player is watching a sheet slide up.
+        //
+        // Here rather than in a `LaunchedEffect` on the Actions tab because 20 decision 1 made
+        // that tab unconditional: a local character always has one, it is one tap from this
+        // screen, and a view model that outlives a tab switch is the honest place for a warm-up
+        // that has to happen once per process. Nothing reads the result — touching the property
+        // *is* the work — and a failure here is the same packaging failure the Add sheet would
+        // have hit anyway, one screen earlier and on a thread with nothing waiting on it.
+        viewModelScope.launch(Dispatchers.Default) {
+            SpellCatalog.entries
+            WeaponCatalog.entries
+        }
     }
 
     private val character = repository.observe(characterId)
@@ -436,11 +462,22 @@ class LocalCharacterHomeViewModel @Inject constructor(
         if (local == null) {
             flowOf(ActionsUiState(creatureId = characterId, usesAreUndoable = true))
         } else {
-            combine(local.actions, local.canWrite) { board, canWrite ->
+            combine(local.actions, local.canWrite, local.board) { board, canWrite, tracker ->
                 toActionsUiState(
                     creatureId = characterId,
                     board = board,
                     canWrite = canWrite,
+                    // FR-49 decision 3/4: the tracker's own slot rows, so the upcast picker and
+                    // the pips on the Tracker tab read one number. The DiceCloud view model feeds
+                    // this from the same place and for the same reason — see
+                    // `ActionsUiState.spellSlots`, whose whole argument is that a picker fed from
+                    // anywhere else would be a second opinion about how many slots are left.
+                    //
+                    // A slot row with no level is dropped by `spellSlotOptions` rather than
+                    // offered, which is decision 3's honesty rule reaching the UI with no code
+                    // here: a migrated row whose label carried no ordinal simply is not a cast
+                    // source until the player gives it a level in the editor.
+                    spellSlots = tracker.slots,
                     usesAreUndoable = true,
                 )
             }
@@ -549,15 +586,65 @@ class LocalCharacterHomeViewModel @Inject constructor(
      */
     fun use(target: UseTarget, slotId: String?, ritual: Boolean) {
         val character = open.value ?: return
-        when (target) {
+        val dispatched = when (target) {
             is UseTarget.Action -> character.useAction(target.propertyId)
-            // Unreachable: `LocalActionBoard` emits no spells, so no `ActionRow.Spell` exists to
-            // open a detail sheet on and no `UseTarget.Spell` can be built. Branch named rather
-            // than swept into an `else`, matching this screen's posture towards `PaneSurface.SHEET`
-            // — a total `when` is how a future local spell model becomes a compile error here
-            // instead of a silently dropped tap.
-            is UseTarget.Spell -> Unit
+            // FR-49 decision 4. This branch used to be `Unit` with a KDoc explaining that no
+            // `UseTarget.Spell` could be built for a local character — which was true until
+            // `LocalActionBoard` gained spells, and the branch being *named* rather than swept
+            // into an `else` is what made adding them a one-line change here instead of a
+            // silently dropped tap. The slot and the ritual box are the shared confirm dialog's,
+            // passed straight through; `castSpell` is where they are validated against the live
+            // board and then against the committed rows.
+            is UseTarget.Spell -> character.castSpell(target.propertyId, slotId, ritual)
         }
+        // L1 [review, 2026-09-12]: the boolean used to be discarded here. `castSpell` is the one
+        // local write that can answer synchronously — decision 4's slot gate, which needs no Room
+        // read — so a `false` means the player confirmed a cast that was refused before anything
+        // was dispatched, and dropping it left them looking at an unchanged screen with no
+        // sentence on it. Surfaced through the same failure lane the DiceCloud view model uses
+        // (`CharacterHomeViewModel.use`), with `dropped = true` for the same reason: nothing was
+        // rolled back because nothing was optimistic, so there is no row to shake and
+        // `propertyId` is null.
+        //
+        // The id comes from the shared `USE_ERROR_IDS` counter rather than a second one of this
+        // class's own, which is that counter's own [A3] argument applied once more: two
+        // `AtomicLong`s starting in the same range are a Compose key waiting to collide.
+        if (!dispatched) {
+            _events.tryEmit(
+                TrackerEvent.Failed(
+                    TrackerWriteFailure(
+                        id = USE_ERROR_IDS.incrementAndGet(),
+                        kind = if (target is UseTarget.Spell) {
+                            TrackerWriteKind.CAST_SPELL
+                        } else {
+                            TrackerWriteKind.USE_ACTION
+                        },
+                        propertyId = null,
+                        targetName = target.name,
+                        reason = null,
+                        refusedOffline = false,
+                        rateLimited = false,
+                        dropped = true,
+                    ),
+                ),
+            )
+        }
+    }
+
+    /**
+     * FR-49 decision 6: the Actions tab's Add sheet saved a spell or an attack.
+     *
+     * Reaches [LocalOpenCharacter] directly rather than through [OpenCharacter], because there is
+     * nothing on that interface to reach: a DiceCloud character's spells come from their sheet, so
+     * `addActionRow` has no server counterpart and putting one there would be a capability the
+     * other implementation could only answer with a no-op. See its KDoc.
+     *
+     * No snackbar here — the screen shows *"Added Fireball"* itself, because the write files a
+     * deliberately non-undoable journal entry and the tracker's undo snackbar would draw a button
+     * with nothing behind it.
+     */
+    fun addActionRow(spec: NewLocalRowSpec) {
+        open.value?.addActionRow(spec)
     }
 
     // --- inventory tab: the same four intents, against the same interface ------------

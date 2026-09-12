@@ -168,6 +168,21 @@ data class LocalCharacterFormState(
         }
 
     /**
+     * FR-49's level message (20 decision 2): a spell row with no level chosen.
+     *
+     * One string and only about the missing case, because the other half of the rule —
+     * a level on a kind that cannot mean one — is unreachable from this screen: the chips are
+     * drawn on spell and slot rows only, and [LocalRowFormState.toRowForm] drops a stale level on
+     * the way out. `LocalCharacterForm.spellLevelIsValid`'s KDoc carries the argument for why that
+     * half is dropped rather than refused.
+     */
+    @StringRes
+    fun rowSpellLevelErrorRes(index: Int): Int? =
+        R.string.local_error_row_spell_level.takeIf {
+            visibleErrors.contains(LocalCharacterFormError.RowSpellLevelMissing(index))
+        }
+
+    /**
      * The rows the cost picker at [index] may offer — 18 decision 1's *"cost picker lists the
      * character's **other** rows (slots/resources/items)"*, with decision 2's chaining fence
      * applied.
@@ -176,10 +191,11 @@ data class LocalCharacterFormState(
      *
      *  - **The row itself**, which is what "other" means. An action that costs itself is a use
      *    that spends its own charge twice.
-     *  - **Every other action** — decision 2's v1 fence, *"a cost row cannot itself be an
-     *    action"*. Not offering one is the first half of enforcing it; `LocalCharacterForm.
-     *    validate` refusing one is the second, and both exist because a picker is a suggestion
-     *    while a validator is a guarantee.
+     *  - **Every other Actions-surface row** — decision 2's v1 fence, *"a cost row cannot itself
+     *    be an action"*, which FR-49 states over a longer enum: a spell and an attack are things
+     *    you do exactly as an action is. Not offering one is the first half of enforcing it;
+     *    `LocalCharacterForm.validate` refusing one is the second, and both exist because a picker
+     *    is a suggestion while a validator is a guarantee.
      *  - **Rows with no id**, which after FR-29 means rows built by something other than
      *    [LocalRowFormState.new] — nothing in the editor produces one, and a chip pointing at a
      *    row that cannot be named would save a cost the validator then rejects.
@@ -194,7 +210,7 @@ data class LocalCharacterFormState(
      */
     fun costOptions(index: Int): List<LocalRowFormState> {
         val row = rows.getOrNull(index) ?: return emptyList()
-        return rows.filter { it.id != null && it.id != row.id && it.kind != LocalRowKind.ACTION }
+        return rows.filter { it.id != null && it.id != row.id && !it.kind.isActionSurface }
     }
 
     private fun ability(ability: Ability): Int =
@@ -258,6 +274,32 @@ data class LocalRowFormState(
      * Ignored entirely while [costRowId] is `null` — see [toRowForm].
      */
     val costAmount: String = "1",
+    /**
+     * FR-49's fields (docs/design/20-local-spells-and-attacks.md decisions 2 and 3).
+     *
+     * [spellLevel] is an `Int?` and not a `String`, which is the one departure from this class's
+     * every-number-is-text rule and is not an exception to its reasoning: that rule exists because
+     * a **typed** number has a mid-edit state ("the box is empty") that is neither a number nor an
+     * absence. A level is *chosen from ten chips*, so the only two states are a level and
+     * not-answered-yet, and `null` says the second exactly. See `AddActionFormState.spellLevel`,
+     * which is the same field on the other form for the same reason.
+     *
+     * The rest are `String` and not `String?`, like [description] and for its stated reason: this
+     * is what a text field holds, and the blank-to-null normalisation happens once, at the
+     * boundary, which is what this class is for.
+     */
+    val spellLevel: Int? = null,
+    val higherLevels: String = "",
+    val castingTime: String = "",
+    val range: String = "",
+    val components: String = "",
+    val duration: String = "",
+    val concentration: Boolean = false,
+    val ritual: Boolean = false,
+    val damage: String = "",
+    val properties: String = "",
+    /** Provenance, never edited — carried so a re-save does not strip it. See [LocalRowForm]. */
+    val catalogId: String? = null,
 ) {
     fun toRowForm(): LocalRowForm = LocalRowForm(
         id = id,
@@ -279,12 +321,35 @@ data class LocalRowFormState(
         // screen*, while what gets saved is only ever what the kind allows. The repository forces
         // the same fence a second time, per this app's habit with anything that reaches the
         // database.
-        description = description.takeIf { kind == LocalRowKind.ACTION },
-        costRowId = costRowId?.takeIf { kind == LocalRowKind.ACTION },
+        //
+        // FR-49 widens "an action" to every Actions-surface kind here as well: a spell's rules
+        // text is its description, and 20 decision 2 allows a cost on a spell or an attack.
+        description = description.takeIf { kind.isActionSurface },
+        costRowId = costRowId?.takeIf { kind.isActionSurface },
         // The pair moves together: no cost row means no amount, whatever the box happens to hold.
         // A blank box *with* a cost row becomes the sentinel and fails validation, which is the
         // whole point of `toFormInt` — see its KDoc.
-        costAmount = if (kind == LocalRowKind.ACTION && costRowId != null) costAmount.toFormInt() else null,
+        costAmount = if (kind.isActionSurface && costRowId != null) costAmount.toFormInt() else null,
+        // FR-49's fields, dropped off every kind that cannot mean them — `reset`'s and
+        // `category`'s arrangement, for their stated reason: a row switched to a spell and back
+        // keeps what the player typed *on screen*, while what gets saved is only ever what the
+        // kind allows. The repository forces the same fence a second time.
+        //
+        // `spellLevel` survives onto **two** kinds, because the column has two readings: a
+        // spell's own level, and a slot's level for the upcast picker (decision 3).
+        spellLevel = spellLevel.takeIf { kind == LocalRowKind.SPELL || kind == LocalRowKind.SLOT },
+        higherLevels = higherLevels.takeIf { kind == LocalRowKind.SPELL },
+        castingTime = castingTime.takeIf { kind == LocalRowKind.SPELL },
+        range = range.takeIf { kind == LocalRowKind.SPELL },
+        components = components.takeIf { kind == LocalRowKind.SPELL },
+        duration = duration.takeIf { kind == LocalRowKind.SPELL },
+        concentration = kind == LocalRowKind.SPELL && concentration,
+        ritual = kind == LocalRowKind.SPELL && ritual,
+        damage = damage.takeIf { kind == LocalRowKind.ATTACK },
+        properties = properties.takeIf { kind == LocalRowKind.ATTACK },
+        // Not dropped on a kind change: it records where the row's text came from, which stays
+        // true of a row the player retyped. See `LocalCharacterRepository.save`.
+        catalogId = catalogId,
     )
 
     /** The valid range for this row's number, so the field can cap what it accepts. */
@@ -304,6 +369,17 @@ data class LocalRowFormState(
             // tapping a cost chip should land on "1", not on an empty field the player then has
             // to fill in before the form will save.
             costAmount = row.costAmount?.toString() ?: "1",
+            spellLevel = row.spellLevel,
+            higherLevels = row.higherLevels.orEmpty(),
+            castingTime = row.castingTime.orEmpty(),
+            range = row.range.orEmpty(),
+            components = row.components.orEmpty(),
+            duration = row.duration.orEmpty(),
+            concentration = row.concentration,
+            ritual = row.ritual,
+            damage = row.damage.orEmpty(),
+            properties = row.properties.orEmpty(),
+            catalogId = row.catalogId,
         )
 
         /**

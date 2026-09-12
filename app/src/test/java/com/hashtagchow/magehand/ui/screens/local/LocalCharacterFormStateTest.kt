@@ -437,4 +437,134 @@ class LocalCharacterFormStateTest {
         assertEquals(0, LocalRowFormState(kind = LocalRowKind.ACTION).totalRange.first)
     }
 
+    // --- FR-49 (docs/design/20-local-spells-and-attacks.md decisions 2 and 3) -----------------
+
+    /**
+     * A spell row's fields reach `:core:data`, and every one of them is dropped on a kind that
+     * cannot mean it while staying on screen.
+     *
+     * The staying-on-screen half is what `reset` and `category` already established and is the
+     * reason the drop lives here rather than in the editor's `onKind` handler: a player who taps
+     * *Attack* by mistake and taps *Spell* again must not have lost the range they typed.
+     */
+    @Test
+    fun `a spell row's fields survive to the form and are dropped off other kinds`() {
+        val spell = LocalRowFormState(
+            id = "row-1",
+            kind = LocalRowKind.SPELL,
+            label = "Fireball",
+            total = "0",
+            spellLevel = 3,
+            castingTime = "1 action",
+            range = "150 feet",
+            components = "V, S, M",
+            duration = "Instantaneous",
+            higherLevels = "…",
+            concentration = true,
+            ritual = true,
+            damage = "1d8 slashing",
+            properties = "Versatile",
+            catalogId = "fireball",
+        )
+
+        with(spell.toRowForm()) {
+            assertEquals(3, spellLevel)
+            assertEquals("1 action", castingTime)
+            assertEquals("150 feet", range)
+            assertEquals("V, S, M", components)
+            assertEquals("Instantaneous", duration)
+            assertEquals("…", higherLevels)
+            assertTrue(concentration)
+            assertTrue(ritual)
+            assertNull("a spell has no damage text", damage)
+            assertNull(properties)
+            assertEquals("provenance rides along", "fireball", catalogId)
+        }
+
+        with(spell.copy(kind = LocalRowKind.ATTACK).toRowForm()) {
+            assertNull(spellLevel)
+            assertNull(castingTime)
+            assertNull(higherLevels)
+            assertFalse(concentration)
+            assertEquals("1d8 slashing", damage)
+            assertEquals("Versatile", properties)
+        }
+
+        with(spell.copy(kind = LocalRowKind.RESOURCE).toRowForm()) {
+            assertNull(spellLevel)
+            assertNull(castingTime)
+            assertNull(damage)
+            assertNull(properties)
+        }
+
+        // …and the state still holds everything, so the round trip is reversible on screen.
+        assertEquals("150 feet", spell.copy(kind = LocalRowKind.ITEM).range)
+    }
+
+    /**
+     * Decision 3: a **slot** row keeps its level, which is the one field that survives onto two
+     * kinds — and it survives because the column has two readings, not because the fence leaks.
+     */
+    @Test
+    fun `a slot row keeps its level and every other kind loses it`() {
+        val slot = LocalRowFormState(id = "s", kind = LocalRowKind.SLOT, label = "3rd", spellLevel = 3)
+
+        assertEquals(3, slot.toRowForm().spellLevel)
+        assertEquals(3, slot.copy(kind = LocalRowKind.SPELL).toRowForm().spellLevel)
+        assertNull(slot.copy(kind = LocalRowKind.RESOURCE).toRowForm().spellLevel)
+        assertNull(slot.copy(kind = LocalRowKind.ITEM).toRowForm().spellLevel)
+        assertNull(slot.copy(kind = LocalRowKind.ACTION).toRowForm().spellLevel)
+    }
+
+    /** The level message points at the row that has no level, and stays quiet until a save. */
+    @Test
+    fun `a spell row with no level gets a message once the errors are on`() {
+        val state = LocalCharacterFormState(
+            name = "Brambles",
+            rows = listOf(
+                LocalRowFormState(id = "r0", kind = LocalRowKind.RESOURCE, label = "Ki", total = "5"),
+                LocalRowFormState(id = "r1", kind = LocalRowKind.SPELL, label = "Fireball", total = "0"),
+            ),
+        )
+
+        assertNull("quiet before the first save", state.rowSpellLevelErrorRes(1))
+        with(state.copy(showErrors = true)) {
+            assertNull("the resource is fine", rowSpellLevelErrorRes(0))
+            assertEquals(R.string.local_error_row_spell_level, rowSpellLevelErrorRes(1))
+        }
+        assertNull(
+            "…and it goes away when the level is chosen",
+            state.copy(
+                showErrors = true,
+                rows = state.rows.mapIndexed { i, r -> if (i == 1) r.copy(spellLevel = 3) else r },
+            ).rowSpellLevelErrorRes(1),
+        )
+    }
+
+    /**
+     * Decision 2 widens FR-29's chaining fence: the cost picker offers no spell and no attack,
+     * exactly as it offers no action.
+     */
+    @Test
+    fun `the cost picker offers no Actions-surface row of any kind`() {
+        val state = LocalCharacterFormState(
+            name = "Brambles",
+            rows = listOf(
+                LocalRowFormState(id = "ki", kind = LocalRowKind.RESOURCE, label = "Ki", total = "5"),
+                LocalRowFormState(id = "act", kind = LocalRowKind.ACTION, label = "Rage", total = "0"),
+                LocalRowFormState(id = "spell", kind = LocalRowKind.SPELL, label = "Bolt", total = "0", spellLevel = 1),
+                LocalRowFormState(id = "atk", kind = LocalRowKind.ATTACK, label = "Club", total = "0"),
+                LocalRowFormState(id = "me", kind = LocalRowKind.SPELL, label = "Smite", total = "0", spellLevel = 1),
+            ),
+        )
+
+        assertEquals(listOf("ki"), state.costOptions(4).map { it.id })
+    }
+
+    /** A spell's and an attack's number field is uses, and zero is legal there too. */
+    @Test
+    fun `a spell's and an attack's total range reaches zero`() {
+        assertEquals(0, LocalRowFormState(kind = LocalRowKind.SPELL).totalRange.first)
+        assertEquals(0, LocalRowFormState(kind = LocalRowKind.ATTACK).totalRange.first)
+    }
 }

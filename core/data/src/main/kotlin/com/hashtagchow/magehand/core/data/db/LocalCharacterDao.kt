@@ -225,6 +225,27 @@ interface LocalCharacterDao {
      *   together ([setRowQuantity]) rather than only the remaining value ([setRowCurrent]). An
      *   item's two fields are one number — see [setRowQuantity] — and writing only `current` would
      *   leave a stored `total` the inventory tab renders from.
+     *
+     * ### FR-49 adds a third row, and it is the same argument one row wider
+     *
+     * A **cast** (docs/design/20-local-spells-and-attacks.md decision 4) spends a spell-slot row
+     * as well as — or instead of — the spell's own charges, so
+     * `LocalOpenCharacter.castSpell` reaches this same method with [slotRowId] set. A second
+     * method would have been two places to state the atomicity rule and two places to get it
+     * wrong; the defect it prevents is identical to the one this method already prevents, one
+     * column along: a slot spent with the cost un-deducted is a state no tap can produce and no
+     * player could diagnose.
+     *
+     * Both new parameters default to `null`, so every existing call — the Use path and its undo —
+     * keeps meaning exactly what it meant, and the *absence* of a slot stays the ordinary case
+     * rather than something each caller has to say.
+     *
+     * @param slotRowId the SLOT row a cast spends from, or `null` — for a cantrip, a ritual cast,
+     *   an innate spell, and every [useAction] call.
+     * @param slotCurrent what that row should read afterwards. Ignored when [slotRowId] is null.
+     *   A slot is never an item, so it is written with [setRowCurrent] and never with
+     *   [setRowQuantity] — the row keeps its `total`, which is how many slots of that level the
+     *   character has.
      */
     @Transaction
     suspend fun useAction(
@@ -235,11 +256,14 @@ interface LocalCharacterDao {
         costCurrent: Int?,
         costIsItem: Boolean,
         at: Long,
+        slotRowId: String? = null,
+        slotCurrent: Int? = null,
     ) {
         if (actionCurrent != null) setRowCurrent(actionRowId, actionCurrent)
         if (costRowId != null && costCurrent != null) {
             if (costIsItem) setRowQuantity(costRowId, costCurrent) else setRowCurrent(costRowId, costCurrent)
         }
+        if (slotRowId != null && slotCurrent != null) setRowCurrent(slotRowId, slotCurrent)
         touch(characterId, at)
     }
 

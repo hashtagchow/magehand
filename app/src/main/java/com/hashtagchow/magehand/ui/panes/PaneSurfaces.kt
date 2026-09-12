@@ -117,34 +117,48 @@ fun serverHomeTabs(hasActions: Boolean): List<CharacterHomeTab> =
 val allLocalPaneSurfaces: List<PaneSurface> = LocalCharacterHomeTab.entries.map { it.surface }
 
 /**
- * The surfaces **this** on-device character has — [allLocalPaneSurfaces] with FR-29's discovery
- * gate applied (docs/design/18-table-pack.md decision 3).
+ * The surfaces an on-device character has — **all of them, always** (FR-49,
+ * docs/design/20-local-spells-and-attacks.md decision 1).
  *
- * The local twin of [serverPaneSurfaces], and deliberately the same shape rather than a shared
- * generic one: the two operate on different `PaneSurface` subsets and the server's also has a
- * Sheet to keep. Decision 3 asks for the *"same discovery-gating rule"* as FR-26, and this is what
- * "same" looks like from here — the tab and the pane both appear when the character has at least
- * one action row, and everything downstream (the picker's segments, `resolvePanes`' filtering of a
- * stored `actions` token, the fall back to Tracker when that leaves nothing) is free, exactly as
- * it was for the server path.
+ * ### FR-29's discovery gate is retired here, and the reason it existed is what retired it
  *
- * @param hasActions whether the character has any [com.hashtagchow.magehand.core.model.ActionEntry]
- *   at all — `ActionBoard.isEmpty` inverted. False while the character is still loading, which is
- *   the honest default for [serverPaneSurfaces]' stated reason.
+ * 18 decision 3 gave the local Actions tab the *"same discovery-gating rule"* as FR-26's — the
+ * tab appeared once the character had at least one action row — and that was right at the time for
+ * a reason it stated: a tab that could never fill itself is a tab with nothing behind it, and the
+ * only way to *create* a local action was the editor's *Add action* button on another screen.
+ *
+ * 20 decision 1 puts the **Add** on the tab (`AddActionSheet`, decision 6), and the justification
+ * goes with it. The gate's remaining effect was the one the operator reported on 2026-09-12: a
+ * fresh local character shows Tracker and Inventory and no way to reach the surface that would
+ * have let them add anything. A tab that owns its own empty state and its own Add is a tab that
+ * always earns its place.
+ *
+ * **The server path keeps its gate** ([serverPaneSurfaces], [serverHomeTabs]) and keeps it for the
+ * unchanged half of the same argument: a DiceCloud character with no spells and no actions still
+ * has nothing to add, because their sheet is where actions come from and this app does not write
+ * one. That asymmetry is the whole of why these are two functions rather than one.
+ *
+ * A value rather than a function now, matching [allLocalPaneSurfaces] and for the same reason the
+ * server's became a function: what a character *has* stopped depending on the character's data, so
+ * there is nothing left to pass in. Callers that used to key a `remember` on `hasActions` no longer
+ * need to — see `LocalCharacterHomeScreen`.
+ *
+ * It is therefore an **alias for [allLocalPaneSurfaces]** today, and is kept rather than collapsed
+ * into it because the two answer different questions: that one is the vocabulary a local character
+ * is drawn from, this one is what *this* character has. They agree at the moment, as they did
+ * before FR-29 introduced a gate at all, and a caller asking the second question should not have to
+ * know that. `PaneSelectionTest` pins this and [localHomeTabs] agreeing, which is the property that
+ * actually matters — a tab present with its pane absent, or the reverse, is the bug.
  */
-fun localPaneSurfaces(hasActions: Boolean): List<PaneSurface> =
-    if (hasActions) allLocalPaneSurfaces else allLocalPaneSurfaces - PaneSurface.ACTIONS
+val localPaneSurfaces: List<PaneSurface> = allLocalPaneSurfaces
 
 /**
- * The tabs the row draws for this on-device character — the tab-side twin of [localPaneSurfaces],
+ * The tabs the row draws for an on-device character — the tab-side twin of [localPaneSurfaces],
  * exactly as [serverHomeTabs] is of [serverPaneSurfaces] and for the reason stated there.
+ *
+ * Every tab, always, since FR-49 — see [localPaneSurfaces] for why the gate went.
  */
-fun localHomeTabs(hasActions: Boolean): List<LocalCharacterHomeTab> =
-    if (hasActions) {
-        LocalCharacterHomeTab.entries
-    } else {
-        LocalCharacterHomeTab.entries - LocalCharacterHomeTab.Actions
-    }
+val localHomeTabs: List<LocalCharacterHomeTab> = LocalCharacterHomeTab.entries
 
 /**
  * The picker's label for a surface — the *same* strings the tab row uses.

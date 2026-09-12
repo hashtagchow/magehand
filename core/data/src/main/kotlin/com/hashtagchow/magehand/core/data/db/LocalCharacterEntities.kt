@@ -208,6 +208,83 @@ data class LocalTrackerRowEntity(
      */
     val costRowId: String? = null,
     val costAmount: Int? = null,
+    /**
+     * The eleven columns schema **version 8** adds (FR-49,
+     * docs/design/20-local-spells-and-attacks.md decision 2).
+     *
+     * ```
+     * local_tracker_rows += catalogId     TEXT
+     *                    += spellLevel    INTEGER
+     *                    += higherLevels  TEXT
+     *                    += castingTime   TEXT
+     *                    += range         TEXT
+     *                    += components    TEXT
+     *                    += duration      TEXT
+     *                    += concentration INTEGER NOT NULL DEFAULT 0
+     *                    += ritual        INTEGER NOT NULL DEFAULT 0
+     *                    += damage        TEXT
+     *                    += properties    TEXT
+     * ```
+     *
+     * ### Eleven columns on one shared table, and why that is still the right shape
+     *
+     * This is the biggest single widening `local_tracker_rows` has taken, and the case for a
+     * second table gets stronger every time — so it is worth writing down why it is still
+     * declined. The table is the **unit of a player's row list**: `sortIndex` orders across kinds,
+     * `costRowId` references across kinds, `save` upserts the whole list in one transaction, and
+     * `deleteRowsMissing` reaps by the set the form still holds. Splitting spells out would mean
+     * two tables joined on a shared order, a cost reference with two possible targets, and a save
+     * that is atomic across both — which is a great deal of machinery bought to avoid nullable
+     * columns the other kinds simply do not read. [weightLb]'s own argument, at scale: *one unused
+     * field on a shared row type is cheaper than a second row type, and every consumer already
+     * switches on [kind]*.
+     *
+     * ### Nine nullable, two `NOT NULL DEFAULT 0`
+     *
+     * The same discipline every column since v4 has followed, read from both ends.
+     * [concentration] and [ritual] are booleans with no third state — a spell either needs
+     * concentration or it does not — so they are `NOT NULL`, which SQLite then requires a
+     * `DEFAULT` for on a populated table, which the `@ColumnInfo` here has to declare or a fresh
+     * install's `CREATE TABLE` would disagree with the migrated schema. `0` is also the fact
+     * rather than a chosen reading: no row predating v8 is a spell, so none of them concentrates.
+     *
+     * The other nine are nullable and take **no** default, matching v7's pair: `NULL` is what the
+     * existing rows get and `NULL` is what they mean — a row that is not a spell has no casting
+     * time, and a row that is not an attack has no damage text. There is no reading to choose here
+     * of the kind v5's `'gear'` had to make.
+     *
+     * ### `spellLevel` is the one column with two meanings, and the migration back-fills it
+     *
+     * On a SPELL row it is the spell's level; on a SLOT row it is the slot's (decision 3), which
+     * is what lets `toTrackedResource` publish a real `spellSlotLevel` and the existing
+     * `spellSlotOptions` offer a local slot unchanged. [MIGRATION_7_8] back-fills the SLOT half
+     * from the label's leading integer. See [LocalTrackerRow.spellLevel].
+     *
+     * ### `damage` is TEXT, and that is decision 8 in the schema
+     *
+     * Not a dice expression to be evaluated and not a foreign key to a damage row: a local
+     * character has no sheet to resolve either against, so the column holds the SRD's own words
+     * and the app renders them. See [LocalTrackerRow.damage].
+     */
+    val catalogId: String? = null,
+    val spellLevel: Int? = null,
+    val higherLevels: String? = null,
+    val castingTime: String? = null,
+    /**
+     * The spell's range.
+     *
+     * Named `range` on the entity and therefore in SQL too. `range` is not a SQLite keyword (it is
+     * not reserved in any SQLite version), and Room quotes every identifier in the DDL it
+     * generates and the statements it compiles, so the column needs no alias. Worth stating
+     * because the name looks like one.
+     */
+    val range: String? = null,
+    val components: String? = null,
+    val duration: String? = null,
+    @ColumnInfo(defaultValue = "0") val concentration: Boolean = false,
+    @ColumnInfo(defaultValue = "0") val ritual: Boolean = false,
+    val damage: String? = null,
+    val properties: String? = null,
 ) {
     companion object {
         const val RESET_NONE: String = "none"
@@ -301,6 +378,23 @@ fun LocalTrackerRowEntity.toDomain(): LocalTrackerRow? {
         // cost", which is the state every pre-v7 row is in.
         costRowId = costRowId?.takeIf { it.isNotBlank() && costAmount != null },
         costAmount = costAmount?.takeIf { !costRowId.isNullOrBlank() },
+        // FR-49's eleven, straight across. Nothing is normalised on the way out — unlike the cost
+        // pair above, which has a half-filled state the form refuses to create and this refuses to
+        // return. These have no such pairing: a spell with a range and no duration is an ordinary
+        // spell, and a blank string is the player's own empty field rather than a broken record.
+        // Blank-to-absent happens where it is *rendered* (`LocalActionBoard`), so the editor still
+        // shows the player exactly what they typed.
+        catalogId = catalogId,
+        spellLevel = spellLevel,
+        higherLevels = higherLevels,
+        castingTime = castingTime,
+        range = range,
+        components = components,
+        duration = duration,
+        concentration = concentration,
+        ritual = ritual,
+        damage = damage,
+        properties = properties,
     )
 }
 
@@ -320,4 +414,15 @@ fun LocalTrackerRow.toEntity(): LocalTrackerRowEntity = LocalTrackerRowEntity(
     category = category.storedValue,
     costRowId = costRowId,
     costAmount = costAmount,
+    catalogId = catalogId,
+    spellLevel = spellLevel,
+    higherLevels = higherLevels,
+    castingTime = castingTime,
+    range = range,
+    components = components,
+    duration = duration,
+    concentration = concentration,
+    ritual = ritual,
+    damage = damage,
+    properties = properties,
 )

@@ -142,6 +142,13 @@ fun ActionDetailSheet(
                 MasteryBlock(mastery)
             }
 
+            // FR-49 decision 5, immediately above the Use block — see [HigherLevelsBlock] for why
+            // "immediately above" is the decision and not a layout preference.
+            state.higherLevels?.let {
+                HorizontalDivider()
+                HigherLevelsBlock(it)
+            }
+
             HorizontalDivider()
 
             val use = state.use
@@ -218,7 +225,14 @@ private fun UnusableReason?.labelRes(): Int = when (this) {
     UnusableReason.NO_RESOURCES, null -> R.string.action_detail_unusable_resources
 }
 
-/** The spell-shaped facts (16 decision 4's scalars, plus the level the picker keys on). */
+/**
+ * The spell-shaped facts (16 decision 4's scalars, plus the level the picker keys on).
+ *
+ * FR-49 adds components and duration, which are `null` on every DiceCloud row — see
+ * [com.hashtagchow.magehand.core.model.SpellEntry.components] for why they are fields rather than a
+ * line folded into `summary`. Absent halves simply do not appear; there is no placeholder, because
+ * a placeholder is a claim.
+ */
 @Composable
 private fun SpellFacts(row: ActionRow.Spell) {
     val entry = row.entry
@@ -234,11 +248,57 @@ private fun SpellFacts(row: ActionRow.Spell) {
         )
         entry.castingTime?.let { Fact(stringResource(R.string.action_detail_casting_time), it) }
         entry.range?.let { Fact(stringResource(R.string.action_detail_range), it) }
+        entry.components?.let { Fact(stringResource(R.string.action_detail_components), it) }
+        entry.duration?.let { Fact(stringResource(R.string.action_detail_duration), it) }
         entry.damage.forEach { DamageFacts(it) }
     }
 }
 
-/** The action-shaped facts. `attackRoll` is real here — see [com.hashtagchow.magehand.core.model.SpellEntry]. */
+/**
+ * FR-49 decision 5's *"Using a higher-level slot"* block — the catalog's own paragraph, under its
+ * own heading, **verbatim**.
+ *
+ * ### The app computes nothing from it, and there is nowhere here for a computation to go
+ *
+ * Decision 5: *"No per-level damage table, no dice arithmetic, no 'at level 5: 3d8' annotation on
+ * picker rows."* 16 decision 4's rule holds for a local character for a sharper reason than it does
+ * on the server path — there is no sheet to compute *from* — and FR-36's post-release review is the
+ * record of what client arithmetic costs when it is wrong. So this is a heading and a string, and
+ * the only thing that could be added to it is a second string.
+ *
+ * ### Where it sits, and why that is the decision rather than a layout preference
+ *
+ * Directly **above the Use block**, which is where the confirm dialog's slot picker is reached
+ * from, *"so the paragraph and the picker's level rows read together"*. A player deciding which
+ * slot to burn is answering the question this paragraph is the answer to, and putting it up with
+ * the scalars would have left them scrolling back for it with the dialog open.
+ *
+ * A spell with no such paragraph draws nothing at all — no heading, no divider. Most spells do not
+ * upcast (229 of the SRD's 319), so an empty heading would be the common case rather than an edge
+ * one, and it would be this app reporting on the SRD's completeness rather than on the spell.
+ */
+@Composable
+private fun HigherLevelsBlock(text: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.testTag("actions:detail:higher-levels"),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(
+            text = stringResource(R.string.action_detail_higher_levels),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Text(text = text, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+/**
+ * The action-shaped facts. `attackRoll` is real here — see [com.hashtagchow.magehand.core.model.SpellEntry].
+ *
+ * FR-49's two text facts are `null` on every server row and are the *whole* of what a local attack
+ * has to say about its numbers (20 decision 8): no bonus, no modifier, no proficiency, and the
+ * damage as a [Fact] rather than as a [DamageLine] with riders to itemise.
+ */
 @Composable
 private fun ActionFacts(row: ActionRow.Action) {
     val entry = row.entry
@@ -251,6 +311,8 @@ private fun ActionFacts(row: ActionRow.Action) {
             )
         }
         entry.damage.forEach { DamageFacts(it) }
+        entry.damageText?.let { Fact(stringResource(R.string.action_detail_damage), it) }
+        entry.properties?.let { Fact(stringResource(R.string.action_detail_properties), it) }
     }
 }
 
@@ -425,12 +487,34 @@ private fun UseConfirmDialog(
                     .verticalScroll(rememberScrollState())
                     .semantics { testTagsAsResourceId = true },
             ) {
-                val cost = use.target.cost
-                if (cost.isFree) {
+                // The sweep's incidental observation (1.17.0): this used to read
+                // `use.target.cost` alone, so a Fireball cast from a level-5 slot was announced
+                // as *"This spends nothing."* directly above the picker the player had just
+                // chosen that slot in. `spend` answers the whole question — slot, own charges,
+                // cost lines — and is a pure function of the affordance plus the two live
+                // choices, so `ActionsUiStateTest` owns the rule and this owns the words.
+                val spend = use.spend(ritual = ritual, slotId = slotId)
+                if (spend.isNothing) {
                     Text(stringResource(R.string.action_use_confirm_free))
                 } else {
                     Text(stringResource(R.string.action_use_confirm_spends))
-                    cost.lines.forEach { line ->
+                    // The slot first: it is the thing the picker below is about, and on a slot
+                    // cast it is the whole of what is spent.
+                    spend.slot?.let { slot ->
+                        Text(
+                            text = "•  ${stringResource(R.string.action_use_confirm_spends_slot, slot.level)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.testTag("actions:use:spend:slot"),
+                        )
+                    }
+                    spend.uses?.let {
+                        Text(
+                            text = "•  ${stringResource(R.string.action_use_confirm_spends_use, use.target.name)}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.testTag("actions:use:spend:uses"),
+                        )
+                    }
+                    spend.costLines.forEach { line ->
                         Text(
                             text = "•  ${line.label()}",
                             style = MaterialTheme.typography.bodyMedium,

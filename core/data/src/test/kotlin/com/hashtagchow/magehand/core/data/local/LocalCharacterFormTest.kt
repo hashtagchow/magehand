@@ -1,12 +1,15 @@
 package com.hashtagchow.magehand.core.data.local
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.hashtagchow.magehand.core.data.local.LocalCharacterForm.Companion.totalRange
 import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.AbilityScores
 import com.hashtagchow.magehand.core.model.LocalRowKind
+import com.hashtagchow.magehand.core.model.LocalTrackerRow
+import com.hashtagchow.magehand.core.model.NewLocalRowSpec
 import com.hashtagchow.magehand.core.model.ResetRule
 
 /**
@@ -305,5 +308,148 @@ class LocalCharacterFormTest {
         assertTrue(LocalCharacterFormError.RowLabelRequired(0) in errors)
         assertTrue(LocalCharacterFormError.RowTotalOutOfRange(0, LocalRowKind.ACTION) in errors)
         assertTrue(LocalCharacterFormError.RowCostInvalid(0) in errors)
+    }
+
+    // --- FR-49 (docs/design/20-local-spells-and-attacks.md decisions 2 and 3) -----------------
+
+    /**
+     * A **spell** row must state its level; an attack must not; a slot may.
+     *
+     * The middle clause is the one that looks pedantic and is not: `spellLevel` is one column with
+     * two readings ([LocalTrackerRow.spellLevel]), so a level on a row that is neither a spell nor
+     * a slot would be a value nothing can interpret. The third is decision 3's honest half — a
+     * migrated slot whose label carried no ordinal has no level, and refusing to save such a
+     * character would make the form un-saveable for a player who has done nothing wrong.
+     */
+    @Test
+    fun `a spell states its level, an attack states none, and a slot may have none`() {
+        fun errorsFor(kind: LocalRowKind, level: Int?) = LocalCharacterForm(
+            name = "Brambles",
+            rows = listOf(LocalRowForm(id = "r", kind = kind, label = "Row", total = 1, spellLevel = level)),
+        ).validate()
+
+        assertTrue(
+            "a spell with no level cannot be filed under a section header",
+            LocalCharacterFormError.RowSpellLevelMissing(0) in errorsFor(LocalRowKind.SPELL, null),
+        )
+        assertTrue(
+            LocalCharacterFormError.RowSpellLevelMissing(0) in errorsFor(LocalRowKind.SPELL, 10),
+        )
+        assertTrue("a cantrip is level 0 and is valid", errorsFor(LocalRowKind.SPELL, 0).isEmpty())
+        assertTrue(errorsFor(LocalRowKind.SPELL, 9).isEmpty())
+
+        assertTrue("an attack has no level", errorsFor(LocalRowKind.ATTACK, null).isEmpty())
+        assertTrue(
+            // Dropped on the way out, not refused — see `spellLevelIsValid`'s own KDoc for why
+            // this one is deliberately unlike the cost fence: there is no chip on screen for a
+            // resource's level, so a refusal would be a Save button that does nothing.
+            "a stray level is dropped by the save path, never refused by the validator",
+            errorsFor(LocalRowKind.ATTACK, 3).isEmpty(),
+        )
+
+        assertTrue("a migrated slot may have none", errorsFor(LocalRowKind.SLOT, null).isEmpty())
+        assertTrue(errorsFor(LocalRowKind.SLOT, 1).isEmpty())
+        assertTrue(
+            "there is no level-0 spell slot",
+            LocalCharacterFormError.RowSpellLevelMissing(0) in errorsFor(LocalRowKind.SLOT, 0),
+        )
+    }
+
+    /**
+     * Decision 2's cost fence, widened: a cost may not name **any** Actions-surface row.
+     *
+     * 18 decision 2 fenced chaining out of v1 with "a cost row cannot itself be an action", and
+     * FR-49 adds two more kinds that are things-you-do. Each is asserted separately because the
+     * implementation is now a predicate over the enum — so a future kind that forgets to answer
+     * `isActionSurface` correctly fails here rather than shipping a chainable cost.
+     */
+    @Test
+    fun `a cost may not name a spell or an attack any more than it may name an action`() {
+        listOf(LocalRowKind.ACTION, LocalRowKind.SPELL, LocalRowKind.ATTACK).forEach { kind ->
+            val errors = LocalCharacterForm(
+                name = "Brambles",
+                rows = listOf(
+                    LocalRowForm(
+                        id = "target",
+                        kind = kind,
+                        label = "Target",
+                        total = 1,
+                        spellLevel = if (kind == LocalRowKind.SPELL) 1 else null,
+                    ),
+                    LocalRowForm(
+                        id = "spender",
+                        kind = LocalRowKind.ACTION,
+                        label = "Spender",
+                        total = 0,
+                        costRowId = "target",
+                        costAmount = 1,
+                    ),
+                ),
+            ).validate()
+
+            assertTrue(
+                "$kind should not be a cost target",
+                LocalCharacterFormError.RowCostInvalid(1) in errors,
+            )
+        }
+    }
+
+    /** A cost naming a slot or a resource is still perfectly valid — the fence is not a ban. */
+    @Test
+    fun `a spell may cost a resource row`() {
+        val errors = LocalCharacterForm(
+            name = "Brambles",
+            rows = listOf(
+                LocalRowForm(id = "ki", kind = LocalRowKind.RESOURCE, label = "Ki", total = 5),
+                LocalRowForm(
+                    id = "spell",
+                    kind = LocalRowKind.SPELL,
+                    label = "Eldritch Smite",
+                    total = 0,
+                    spellLevel = 1,
+                    costRowId = "ki",
+                    costAmount = 2,
+                ),
+            ),
+        ).validate()
+
+        assertTrue(errors.isEmpty())
+    }
+
+    /**
+     * The two new kinds reuse ACTION's uses range, zero included — 20 decision 2's *"`total == 0`
+     * is unlimited, ACTION's convention"*.
+     */
+    @Test
+    fun `a spell and an attack use the action uses range, zero meaning unlimited`() {
+        assertEquals(LocalCharacterForm.ACTION_USES_RANGE, LocalRowKind.SPELL.totalRange())
+        assertEquals(LocalCharacterForm.ACTION_USES_RANGE, LocalRowKind.ATTACK.totalRange())
+        assertTrue(0 in LocalRowKind.SPELL.totalRange())
+    }
+
+    /**
+     * `NewLocalRowSpec` validates the same three things this form does.
+     *
+     * The add sheet cannot reach `LocalCharacterForm` — it edits one row, not a character — so the
+     * spec restates the rules, and its own KDoc says the ranges are restated because `:core:model`
+     * cannot see `:core:data`. This is the check that would otherwise be that comment.
+     */
+    @Test
+    fun `the add sheet's spec agrees with this form about levels and uses`() {
+        assertEquals(LocalCharacterForm.SPELL_LEVEL_RANGE, NewLocalRowSpec.SPELL_LEVELS)
+        assertEquals(LocalCharacterForm.ACTION_USES_RANGE, NewLocalRowSpec.USES_RANGE)
+
+        assertTrue(NewLocalRowSpec(LocalRowKind.SPELL, "Fireball", spellLevel = 3).isValid)
+        assertFalse(NewLocalRowSpec(LocalRowKind.SPELL, "Fireball").isValid)
+        assertFalse(NewLocalRowSpec(LocalRowKind.SPELL, " ", spellLevel = 3).isValid)
+        assertFalse(NewLocalRowSpec(LocalRowKind.SPELL, "Fireball", spellLevel = 10).isValid)
+        assertTrue(NewLocalRowSpec(LocalRowKind.ATTACK, "Longsword").isValid)
+        assertFalse(
+            // The *spec* is stricter than the form for the reason the form cannot be: the add
+            // sheet builds one per row from a kind the player just chose, so a mismatched pair
+            // there is a construction error rather than a stale field on a form being edited.
+            NewLocalRowSpec(LocalRowKind.ATTACK, "Longsword", spellLevel = 1).isValid,
+        )
+        assertFalse(NewLocalRowSpec(LocalRowKind.SPELL, "Fireball", spellLevel = 3, uses = 1000).isValid)
     }
 }

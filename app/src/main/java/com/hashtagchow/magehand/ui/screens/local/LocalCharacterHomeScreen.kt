@@ -22,16 +22,19 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
 import com.hashtagchow.magehand.core.model.RestKind
@@ -54,6 +57,7 @@ import com.hashtagchow.magehand.ui.window.LocalExpandedWidth
 import com.hashtagchow.magehand.ui.screens.characterhome.HomeAppBar
 import com.hashtagchow.magehand.ui.screens.characterhome.TrackerEvent
 import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsScreen
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.AddActionSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.AddItemSheet
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryActions
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryCustomizeSheet
@@ -136,16 +140,19 @@ fun LocalCharacterHomeScreen(
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var hpPadOpen by rememberSaveable { mutableStateOf(false) }
     var addItemOpen by rememberSaveable { mutableStateOf(false) }
+    /** FR-49 decision 6's add sheet, on its own flag for the reason every other sheet here is. */
+    var addActionOpen by rememberSaveable { mutableStateOf(false) }
     var detailItemId by rememberSaveable { mutableStateOf<String?>(null) }
     var restToConfirm by rememberSaveable { mutableStateOf<RestKind?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
-    // FR-29 decision 3's one-tab-drop, the DiceCloud screen's rule arriving here: the Actions tab
-    // exists only for a character with at least one action row. `remember(hasActions)` and not a
-    // bare `remember`, because this now depends on data that arrives after the first composition
-    // — the old `remember { entries }` would have frozen the pre-discovery answer forever.
-    val hasActions = uiState.hasActions
-    val tabs = remember(hasActions) { localHomeTabs(hasActions) }
-    val availablePanes = remember(hasActions) { localPaneSurfaces(hasActions) }
+    // FR-49 decision 1: **always present**. FR-29 decision 3 gave this screen the DiceCloud
+    // one-tab-drop gate — the Actions tab existed only once the character had an action row — and
+    // that was right while the only way to create one was the editor's button on another screen.
+    // Decision 6 puts the Add on the tab itself, so the justification is gone and with it the
+    // `remember(hasActions)` keying these two used to need: what this character *has* no longer
+    // depends on the character's data. The server screen keeps its gate; see `localPaneSurfaces`.
+    val tabs = localHomeTabs
+    val availablePanes = localPaneSurfaces
     // 14 decisions 5 + 10, exactly as on the DiceCloud screen: both halves of the state are read
     // and one is rendered, so crossing the width gate loses neither.
     val panes by viewModel.panes.collectAsStateWithLifecycle()
@@ -165,10 +172,21 @@ fun LocalCharacterHomeScreen(
     // The undo snackbar, identical to the DiceCloud tracker's — `showSnackbar` suspends until
     // the snackbar goes away, so a burst of taps queues rather than stacking.
     val undoLabel = stringResource(R.string.action_undo)
+    // FR-49 decision 6's *"the snackbar reads 'Added Fireball'"*. The resources handle rather than
+    // the formatted string, because `stringResource` is a composable call and the sheet's `onAdd`
+    // lambda is not one — and because formatting it there is what NIT 7 [review, 2026-09-12] was
+    // about: `String.format(format, arg)` formats in `Locale.getDefault()`, which is the *system*
+    // locale and not necessarily the one this app's resources were resolved in. `getString` with
+    // the argument formats in the configuration's own locale, so the sentence and the name it
+    // carries can no longer come from two different ones.
+    val resources = LocalContext.current.resources
+    // L1 [review, 2026-09-12]: the one refusal this screen can be told about — a cast whose slot
+    // gate answered synchronously and returned false. The DiceCloud screen's own wording for the
+    // same event, because it is the same event.
+    val useDroppedMessage = stringResource(R.string.action_use_dropped)
+    val scope = rememberCoroutineScope()
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
-            // `LocalOpenCharacter.writeFailures` never emits, so `Failed` is unreachable here;
-            // the `when` stays total rather than assuming that from a KDoc.
             when (event) {
                 is TrackerEvent.Wrote -> {
                     if (!event.write.undoable) {
@@ -184,7 +202,23 @@ fun LocalCharacterHomeScreen(
                     if (result == SnackbarResult.ActionPerformed) viewModel.undoLastWrite()
                 }
 
-                is TrackerEvent.Failed -> Unit
+                // `LocalOpenCharacter.writeFailures` never emits, so the only `Failed` that
+                // reaches here is the one `LocalCharacterHomeViewModel.use` mints itself (L1).
+                // Handled exactly as the DiceCloud screen handles it, minus the shake: the
+                // failure carries no `propertyId` because nothing was rolled back, so there is
+                // no row to shake — and a confirmation already on screen is superseded rather
+                // than queued behind, for `CharacterHomeScreen`'s stated reason.
+                is TrackerEvent.Failed -> {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    snackbarHostState.showSnackbar(
+                        message = if (event.failure.dropped) {
+                            useDroppedMessage
+                        } else {
+                            event.failure.describe()
+                        },
+                        duration = SnackbarDuration.Short,
+                    )
+                }
             }
         }
     }
@@ -214,6 +248,12 @@ fun LocalCharacterHomeScreen(
                 onShortRest = { restToConfirm = RestKind.SHORT },
                 onLongRest = { restToConfirm = RestKind.LONG },
                 onAddItem = { addItemOpen = true },
+                // FR-49 decision 6's top-bar half of the one Add handler. Gated on the Actions
+                // surface being on screen, exactly as the item Add is gated on the Inventory one:
+                // an Add that appeared over the tracker would point at a screen the player is not
+                // looking at.
+                actionsShowing = LocalCharacterHomeTab.Actions.isShowing(chrome),
+                onAddAction = { addActionOpen = true },
             ) {
                 // 1.9.1: the wrench(es), pane-order and Edit — every low-frequency action
                 // this bar carries — collapse into one overflow menu, the DiceCloud
@@ -315,6 +355,10 @@ fun LocalCharacterHomeScreen(
                 ActionsScreen(
                     state = uiState.actions,
                     onUse = viewModel::use,
+                    // FR-49 decisions 1 and 6: the empty state's button and the app bar's action
+                    // are **one handler**, and this is it. `null` on the DiceCloud screen, where
+                    // there is nothing an Add could do — see `ActionsScreen`.
+                    onAdd = { addActionOpen = true },
                 )
             }
 
@@ -387,6 +431,24 @@ fun LocalCharacterHomeScreen(
                 moveTargets = uiState.inventory.moveTargetsFor(row),
                 onDelete = viewModel::removeItem,
                 onMove = viewModel::moveItem,
+            )
+        }
+
+        if (addActionOpen) {
+            AddActionSheet(
+                onAdd = { spec ->
+                    viewModel.addActionRow(spec)
+                    // The snackbar rather than the tracker's undo one: this write files a
+                    // non-undoable journal entry (see `LocalOpenCharacter.addActionRow`), so the
+                    // event collector above would show it with no button and no name. This says
+                    // what was added, which is the fact the player wants confirmed.
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            resources.getString(R.string.actions_add_added, spec.label.trim()),
+                        )
+                    }
+                },
+                onDismiss = { addActionOpen = false },
             )
         }
 

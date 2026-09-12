@@ -57,11 +57,11 @@ class PaneSelectionTest {
     private val server = serverPaneSurfaces(hasActions = true)
     private val serverNoActions = serverPaneSurfaces(hasActions = false)
     private val serverTabs = serverHomeTabs(hasActions = true)
-    // FR-29 made the local side a function too, for the same reason FR-26 made the server side
-    // one: the Actions tab is discovery-gated on both screens now. `local` is a character WITH
-    // action rows, which is what every pre-FR-29 fixture below means by "a local character".
-    private val local = localPaneSurfaces(hasActions = true)
-    private val localNoActions = localPaneSurfaces(hasActions = false)
+    // FR-29 made the local side a function too, and **FR-49 made it a value again**: 20 decision
+    // 1 retires the local discovery gate, because the tab now owns the Add that fills it. The
+    // server side stays a function — a DiceCloud character with no actions still has nothing to
+    // add — and that asymmetry is what these fixtures now say.
+    private val local = localPaneSurfaces
 
     /**
      * An arrangement of open surfaces, in this order — the shape every value a released build
@@ -116,7 +116,6 @@ class PaneSelectionTest {
         // the structure a future edit to `LocalCharacterHomeTab` would quietly undo.
         assertEquals(listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS), local)
         assertFalse(PaneSurface.SHEET in local)
-        assertFalse(PaneSurface.SHEET in localNoActions)
         assertEquals(LocalCharacterHomeTab.entries.map { it.surface }, local)
     }
 
@@ -124,20 +123,33 @@ class PaneSelectionTest {
      * FR-29 decision 3, and the retirement of 16 decision 1's local exclusion.
      *
      * That decision read *"Local characters: no Actions surface in v1 (**no local model**)"*, and
-     * this test used to assert the surface could not exist at all. 18 decision 1 supplies the
-     * model, so the guarantee **changes shape rather than weakening**: it is no longer "a local
-     * character never has an Actions pane", it is the same discovery gate the server side has had
-     * since FR-26 — *"the tab/pane appears when ≥1 action row exists"*.
+     * this test used to assert the surface could not exist at all. 18 decision 1 supplied the
+     * model and replaced that with FR-26's discovery gate; **FR-49 decision 1 retires the gate
+     * too**, and the guarantee changes shape a second time rather than weakening again.
      *
-     * Both directions, because only one of them is the interesting one: a character with actions
-     * gets the surface, and — the half that would rot silently — one without does not, which is
-     * what keeps a blank column off the screen of every local character who never typed an action.
+     * The claim now is the plainest one this surface has ever made: an on-device character has an
+     * Actions surface, always, from the moment it is created. That is not the gate being forgotten
+     * — it is the gate's own justification expiring. FR-29 gated the tab because the only way to
+     * create a local action was a button on *another screen*, so a tab could open onto something
+     * the player had no way to fill; 20 decision 6 puts the Add on the tab, and the operator's
+     * 2026-09-12 report is what the gate cost in the meantime (a fresh local character showed
+     * Tracker and Inventory and no route to either).
+     *
+     * The **server** side keeps its gate, and the assertion below it in this file is what holds
+     * that: a DiceCloud character with no spells and no actions still has nothing to add, because
+     * their sheet is where actions come from and this app does not write one.
      */
     @Test
-    fun `an on-device character's Actions surface is discovery-gated in both directions`() {
+    fun `an on-device character always has an Actions surface`() {
         assertTrue(PaneSurface.ACTIONS in local)
-        assertFalse(PaneSurface.ACTIONS in localNoActions)
-        assertEquals(listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY), localNoActions)
+        assertEquals(
+            listOf(PaneSurface.TRACKER, PaneSurface.INVENTORY, PaneSurface.ACTIONS),
+            local,
+        )
+        // The other half of the asymmetry, asserted here rather than only in the server test
+        // above: the two screens answer this question differently on purpose, and a future wave
+        // "tidying" them into one rule has to delete this line to do it.
+        assertFalse(PaneSurface.ACTIONS in serverNoActions)
     }
 
     /**
@@ -150,13 +162,7 @@ class PaneSelectionTest {
      */
     @Test
     fun `the local tab row and the local pane list agree about Actions`() {
-        listOf(true, false).forEach { hasActions ->
-            assertEquals(
-                "tabs and panes disagree for hasActions=$hasActions",
-                localPaneSurfaces(hasActions),
-                localHomeTabs(hasActions).map { it.surface },
-            )
-        }
+        assertEquals(localPaneSurfaces, localHomeTabs.map { it.surface })
     }
 
     // ---- resolvePaneLayout / resolvePanes (decisions 6, 7, 8; FR-27 decisions 1 and 3) ------

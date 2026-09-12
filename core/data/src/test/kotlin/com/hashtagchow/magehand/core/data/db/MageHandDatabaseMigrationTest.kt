@@ -8,7 +8,11 @@ import com.hashtagchow.magehand.core.data.local.LocalActionBoard
 import com.hashtagchow.magehand.core.data.local.LocalInventoryBoard
 import com.hashtagchow.magehand.core.data.local.LocalTrackerBoard
 import com.hashtagchow.magehand.core.model.CatalogCategory
+import com.hashtagchow.magehand.core.model.ActionGroup
 import com.hashtagchow.magehand.core.model.EquipGroup
+import com.hashtagchow.magehand.core.model.TrackerKind
+import com.hashtagchow.magehand.core.model.spellSlotOptions
+import com.hashtagchow.magehand.core.model.toTrackedResource
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -1179,13 +1183,356 @@ class MageHandDatabaseMigrationTest {
         assertTrue("rows outlived their character", dao.getRows("local-1").isEmpty())
     }
 
+    // --- v7 → v8 (FR-49) ----------------------------------------------------
+
+    /**
+     * The v6→v7 preservation test, one release on and against the widest `ALTER` this table has
+     * taken: **eleven** columns at once.
+     *
+     * Every earlier local column is populated for the reason that test states — a migration that
+     * added its eleven correctly while dropping a purse would pass a narrower test — and v7's cost
+     * pair is populated too, wired between two real rows, because v8 is the first migration that
+     * lands on a table with a soft reference already in it.
+     */
+    @Test
+    fun `migrating v7 to v8 preserves every local character, row and earlier column`() = runTest {
+        createDatabaseAtVersion(7).use { v7 ->
+            v7.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "deathSuccesses, deathFailures, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', 3, 8, 14, 12, 16, 10, 13, 22, 17, 15, " +
+                    "1, 109, 57, 351, 1, 2, 100, 200)",
+            )
+            v7.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category, " +
+                    "costRowId, costAmount) " +
+                    "VALUES ('rage', 'local-1', 'resource', 'Rage', 3, 2, 'longRest', 0, " +
+                    "null, null, null, 0, 'gear', null, null)",
+            )
+            v7.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category, " +
+                    "costRowId, costAmount) " +
+                    "VALUES ('staff', 'local-1', 'item', 'Quarterstaff', 1, 1, 'none', 1, " +
+                    "4.0, 0.2, 'A simple melee weapon.', 1, 'weapon', null, null)",
+            )
+            v7.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category, " +
+                    "costRowId, costAmount) " +
+                    "VALUES ('reckless', 'local-1', 'action', 'Reckless Attack', 0, 0, 'none', 2, " +
+                    "null, null, 'Advantage on Strength attacks.', 0, 'gear', 'rage', 1)",
+            )
+        }
+
+        val db = openCurrent()
+        assertEquals(CURRENT_VERSION, db.openHelper.readableDatabase.version)
+
+        val dao = db.localCharacterDao()
+        with(dao.find("local-1")!!) {
+            assertEquals("Brambles", name)
+            assertEquals(3, level)
+            assertEquals(17, currentHp)
+            assertEquals(109, gp)
+            assertEquals(351, cp)
+            assertEquals(1, deathSuccesses)
+            assertEquals(2, deathFailures)
+            assertEquals(100L, createdAt)
+        }
+
+        val rows = dao.getRows("local-1")
+        assertEquals(listOf("rage", "staff", "reckless"), rows.map { it.id })
+        assertEquals("one charge already spent — still spent", 2, rows.first().current)
+        with(rows[1]) {
+            assertEquals(4.0, weight)
+            assertEquals(0.2, value)
+            assertEquals("A simple melee weapon.", description)
+            assertEquals(true, equipped)
+            assertEquals("weapon", category)
+        }
+        with(rows[2]) {
+            // v7's soft reference, still pointing at the row it pointed at.
+            assertEquals("rage", costRowId)
+            assertEquals(1, costAmount)
+        }
+    }
+
+    /**
+     * **Decision 3's back-fill, both halves**, which is what makes this migration different from
+     * the seven before it: it is the first that writes data rather than only adding columns.
+     *
+     * The labels are the ones a player actually types, and `TrackerEngine.LEADING_ORDINAL`'s own
+     * regex is the rule being reproduced — so this is also the test that would catch the back-fill
+     * being widened into a guess. Four rows, chosen so each states a different thing:
+     *
+     *  - `"1st Level"` and `"3rd"` back-fill, which is the case the migration exists for;
+     *  - `"2 · Pact"` back-fills too, because the ordinal leads even though the word does not;
+     *  - `"Pact Magic"` does **not**, and stays a perfectly good pip row that is simply not
+     *    offered as a cast source — the honest half;
+     *  - `"10th Circle"` does not either, because there is no tenth-level slot in 5e and reading
+     *    a leading `10` as a level would be the invention this back-fill exists to avoid.
+     *
+     * The **resource** row is here for the other half of the fence: the `UPDATE` is scoped to
+     * `kind = 'slot'`, so a resource whose label happens to start with a digit must come out with
+     * no level at all. Without that clause "3 Ki Points" would have become a castable level-3 slot.
+     */
+    @Test
+    fun `the v8 back-fill reads a slot level off the label and only off a slot label`() = runTest {
+        createDatabaseAtVersion(7).use { v7 ->
+            v7.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "deathSuccesses, deathFailures, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 10, 10, " +
+                    "0, 0, 0, 0, 0, 0, 1, 1)",
+            )
+            listOf(
+                Triple("slot-1", "1st Level", "slot"),
+                Triple("slot-3", "3rd", "slot"),
+                Triple("slot-pact", "2 · Pact", "slot"),
+                Triple("slot-named", "Pact Magic", "slot"),
+                Triple("slot-ten", "10th Circle", "slot"),
+                Triple("ki", "3 Ki Points", "resource"),
+            ).forEachIndexed { index, (id, label, kind) ->
+                v7.execSQL(
+                    "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                        "resetRule, sortIndex, weight, value, description, equipped, category, " +
+                        "costRowId, costAmount) " +
+                        "VALUES ('$id', 'local-1', '$kind', '$label', 4, 4, 'longRest', $index, " +
+                        "null, null, null, 0, 'gear', null, null)",
+                )
+            }
+        }
+
+        val rows = openCurrent().localCharacterDao().getRows("local-1").associateBy { it.id }
+
+        assertEquals("'1st Level' leads with 1", 1, rows.getValue("slot-1").spellLevel)
+        assertEquals("'3rd' leads with 3", 3, rows.getValue("slot-3").spellLevel)
+        assertEquals("'2 · Pact' leads with 2", 2, rows.getValue("slot-pact").spellLevel)
+        assertNull(
+            "a label with no leading ordinal keeps working as a pip row and is not a cast source",
+            rows.getValue("slot-named").spellLevel,
+        )
+        assertNull(
+            "there is no tenth-level slot in 5e, so a leading 10 is not a level",
+            rows.getValue("slot-ten").spellLevel,
+        )
+        assertNull(
+            "the back-fill is scoped to slots — a resource labelled '3 Ki Points' is not level 3",
+            rows.getValue("ki").spellLevel,
+        )
+
+        // The consequence, through the board the screen draws: the three back-filled rows are
+        // offerable to the upcast picker and the other two are dropped from it, which is
+        // `spellSlotOptions`' honesty rule reached by data rather than by a special case.
+        val slots = rows.values.mapNotNull { it.toDomain() }.mapNotNull { it.toTrackedResource() }
+        assertEquals(
+            listOf(1, 3, 2, null, null),
+            slots.filter { it.kind == TrackerKind.SPELL_SLOT }.map { it.spellSlotLevel },
+        )
+        assertEquals(
+            listOf("slot-1", "slot-pact", "slot-3"),
+            spellSlotOptions(slots, spellLevel = 1).map { it.propertyId },
+        )
+    }
+
+    /**
+     * The nine nullable columns are `NULL` and the two `NOT NULL` ones are `0`, on every row that
+     * already existed — v7's assertion with a second half, because v8 is the first migration since
+     * v6 to add a `NOT NULL` column at all.
+     *
+     * `NULL` is not a chosen reading here any more than it was for v7's cost pair: no row
+     * predating v8 is a spell or an attack, because neither kind existed, so none of them has a
+     * casting time or a damage line to preserve or to guess at. `concentration` and `ritual` are
+     * `0` for the same reason and not as a default standing in for a lost fact.
+     *
+     * Asserted on the domain object as well as on the row, because `toDomain` is where a
+     * mis-mapped column would surface — and twenty-six columns is enough for an off-by-one to hide
+     * in.
+     */
+    @Test
+    fun `the new v8 spell columns are absent on rows that predate them`() = runTest {
+        createDatabaseAtVersion(7).use { v7 ->
+            v7.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "deathSuccesses, deathFailures, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 10, 10, " +
+                    "0, 0, 0, 0, 0, 0, 1, 1)",
+            )
+            v7.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category, " +
+                    "costRowId, costAmount) " +
+                    "VALUES ('row-1', 'local-1', 'resource', 'Rage', 3, 3, 'longRest', 0, " +
+                    "null, null, null, 0, 'gear', null, null)",
+            )
+        }
+
+        val row = openCurrent().localCharacterDao().getRows("local-1").single()
+
+        assertNull("no row predating FR-49 is a spell, so none has a level", row.spellLevel)
+        assertNull(row.catalogId)
+        assertNull(row.higherLevels)
+        assertNull(row.castingTime)
+        assertNull(row.range)
+        assertNull(row.components)
+        assertNull(row.duration)
+        assertNull(row.damage)
+        assertNull(row.properties)
+        assertEquals(false, row.concentration)
+        assertEquals(false, row.ritual)
+        with(row.toDomain()!!) {
+            assertNull(spellLevel)
+            assertNull(catalogId)
+            assertNull(higherLevels)
+            assertNull(castingTime)
+            assertNull(range)
+            assertNull(components)
+            assertNull(duration)
+            assertNull(damage)
+            assertNull(properties)
+            assertEquals(false, concentration)
+            assertEquals(false, ritual)
+        }
+    }
+
+    /**
+     * **The migration, then the feature it exists for**, end to end — v6→v7's board assertion one
+     * release on, and the same argument: a column that migrated correctly and mapped wrongly would
+     * leave the Actions surface empty on a character who has a spell, which is the one thing FR-49
+     * exists to render.
+     *
+     * So this stores a real spell and a real attack through the DAO on a **migrated** database and
+     * reads them back through `LocalActionBoard` — the board the screen actually draws — checking
+     * the four things 20 decisions 2, 5, 8 and 9 name: the level a section header keys on, the
+     * upcast paragraph, the attack's damage as *text* under the Attacks group, and the badge that
+     * is missing because it must be (`showsUnpreparedBadge`).
+     */
+    @Test
+    fun `the migrated database stores a local spell and an attack and both reach the actions board`() =
+        runTest {
+            createDatabaseAtVersion(7).close()
+            val dao = openCurrent().localCharacterDao()
+
+            dao.save(
+                LocalCharacterEntity(
+                    id = "local-1",
+                    name = "Brambles",
+                    level = 5,
+                    strength = 10,
+                    dexterity = 10,
+                    constitution = 10,
+                    intelligence = 10,
+                    wisdom = 10,
+                    charisma = 10,
+                    maxHp = 30,
+                    currentHp = 30,
+                    armorClass = 14,
+                    createdAt = 1,
+                    updatedAt = 1,
+                ),
+                listOf(
+                    LocalTrackerRowEntity(
+                        id = "fireball",
+                        characterId = "local-1",
+                        kind = "spell",
+                        label = "Fireball",
+                        total = 0,
+                        current = 0,
+                        resetRule = LocalTrackerRowEntity.RESET_NONE,
+                        sortIndex = 0,
+                        description = "A bright streak flashes from your pointing finger.",
+                        catalogId = "fireball",
+                        spellLevel = 3,
+                        higherLevels = "The damage increases by 1d6 for each slot level above 3rd.",
+                        castingTime = "1 action",
+                        range = "150 feet",
+                        components = "V, S, M",
+                        duration = "Instantaneous",
+                    ),
+                    LocalTrackerRowEntity(
+                        id = "longsword",
+                        characterId = "local-1",
+                        kind = "attack",
+                        label = "Longsword",
+                        total = 0,
+                        current = 0,
+                        resetRule = LocalTrackerRowEntity.RESET_NONE,
+                        sortIndex = 1,
+                        catalogId = "longsword",
+                        damage = "1d8 / 1d10 slashing",
+                        properties = "Versatile (1d10), Mastery: Sap",
+                    ),
+                ),
+            )
+
+            val board = LocalActionBoard.build(dao.getRows("local-1").mapNotNull { it.toDomain() })
+
+            with(board.spells.single()) {
+                assertEquals("Fireball", name)
+                assertEquals(3, level)
+                assertEquals("1 action", castingTime)
+                assertEquals("150 feet", range)
+                assertEquals("V, S, M", components)
+                assertEquals("Instantaneous", duration)
+                assertEquals(
+                    "The damage increases by 1d6 for each slot level above 3rd.",
+                    higherLevels,
+                )
+                assertFalse("20 decision 9: known, not prepared", showsUnpreparedBadge)
+            }
+            with(board.actions.single()) {
+                assertEquals("Longsword", name)
+                assertEquals(ActionGroup.ATTACKS, group)
+                assertEquals("1d8 / 1d10 slashing", damageText)
+                assertEquals("Versatile (1d10), Mastery: Sap", properties)
+                // 20 decision 8: text, never a rollup, and never a bonus.
+                assertTrue(damage.isEmpty())
+                assertNull(attackRoll)
+                // FR-47's badge, lifted out of the property string rather than stored twice.
+                assertEquals("Sap", mastery?.name)
+            }
+        }
+
+    /** The foreign key, checked again against the table as v8 leaves it. */
+    @Test
+    fun `the cascade still works after the v8 spell columns are added`() = runTest {
+        createDatabaseAtVersion(7).use { v7 ->
+            v7.execSQL(
+                "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
+                    "intelligence, wisdom, charisma, maxHp, currentHp, armorClass, pp, gp, sp, cp, " +
+                    "deathSuccesses, deathFailures, createdAt, updatedAt) " +
+                    "VALUES ('local-1', 'Brambles', null, 10, 10, 10, 10, 10, 10, 10, 10, 10, " +
+                    "0, 0, 0, 0, 0, 0, 1, 1)",
+            )
+            v7.execSQL(
+                "INSERT INTO local_tracker_rows (id, characterId, kind, label, total, current, " +
+                    "resetRule, sortIndex, weight, value, description, equipped, category, " +
+                    "costRowId, costAmount) " +
+                    "VALUES ('row-1', 'local-1', 'slot', '1st Level', 3, 3, 'longRest', 0, " +
+                    "null, null, null, 0, 'gear', null, null)",
+            )
+        }
+
+        val dao = openCurrent().localCharacterDao()
+        assertEquals(1, dao.getRows("local-1").size)
+
+        dao.delete("local-1")
+
+        assertNull(dao.find("local-1"))
+        assertTrue("rows outlived their character", dao.getRows("local-1").isEmpty())
+    }
+
     /**
      * **The chained path, with data at the bottom of it.**
      *
      * `migrating from v1 crosses every migration and keeps the account` already proves the chain
      * runs and the validator accepts the result. This proves the other half, which no single-step
      * test can: a character created on **1.2.x** (schema v3, before the coin columns, the
-     * category, the death saves and now the cost pair) crosses *four* `ALTER TABLE` migrations in
+     * category, the death saves and now the cost pair) crosses *five* `ALTER TABLE` migrations in
      * one open and comes out with every value it started with, plus correct defaults for each
      * column it never had.
      *
@@ -1193,7 +1540,7 @@ class MageHandDatabaseMigrationTest {
      * actually takes, and it is the one shape the per-step tests cannot cover between them.
      */
     @Test
-    fun `a v3 character survives the whole chain to v7 with correct defaults`() = runTest {
+    fun `a v3 character survives the whole chain to v8 with correct defaults`() = runTest {
         createDatabaseAtVersion(3).use { v3 ->
             v3.execSQL(
                 "INSERT INTO local_characters (id, name, level, strength, dexterity, constitution, " +
@@ -1212,7 +1559,7 @@ class MageHandDatabaseMigrationTest {
 
         with(dao.find("local-1")!!) {
             assertEquals("Brambles", name)
-            assertEquals(17, currentHp) // v3's play state, four migrations later
+            assertEquals(17, currentHp) // v3's play state, five migrations later
             assertEquals(100L, createdAt)
             assertEquals("v4's coins default to broke", 0, gp)
             assertEquals("v6's marks default to none", 0, deathSuccesses)
@@ -1225,7 +1572,25 @@ class MageHandDatabaseMigrationTest {
             assertEquals(false, equipped)
             assertNull("v7's cost is absent, because no v3 row could be an action", costRowId)
             assertNull(costAmount)
+            // v8's back-fill reaches all the way back: a slot labelled in 1.2.x becomes a cast
+            // source without the player re-opening the editor. This is the case FR-49 decision 3
+            // exists for, at the longest range it can be taken.
+            assertEquals("v8 back-fills the level out of '1st Level'", 1, spellLevel)
+            assertNull("v8's spell columns are absent — no v3 row could be a spell", castingTime)
+            assertNull(higherLevels)
+            assertNull(catalogId)
+            assertEquals(false, concentration)
+            assertEquals(false, ritual)
         }
+
+        // …and the level reaches the board as a real `spellSlotLevel`, which is the whole point of
+        // back-filling it: `spellSlotOptions` drops a level-less slot, so a migration that added
+        // the column and left it null would have left this player's upcast picker empty.
+        val slot = LocalTrackerBoard
+            .build(dao.find("local-1")!!.toDomain(), dao.getRows("local-1").mapNotNull { it.toDomain() })
+            .slots
+            .single()
+        assertEquals(1, slot.spellSlotLevel)
     }
 
     // --- fresh install / re-open --------------------------------------------
@@ -1280,6 +1645,6 @@ class MageHandDatabaseMigrationTest {
 
     private companion object {
         /** Keep in step with `@Database(version = …)`. */
-        const val CURRENT_VERSION = 7
+        const val CURRENT_VERSION = 8
     }
 }

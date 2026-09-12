@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -26,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -51,6 +53,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.ui.components.CategoryChooser
 import com.hashtagchow.magehand.ui.components.screenContentWindowInsets
+import com.hashtagchow.magehand.ui.components.scrollableFooterPadding
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.SpellLevelChips
 import com.hashtagchow.magehand.core.data.local.LocalCharacterForm
 import com.hashtagchow.magehand.core.model.Ability
 import com.hashtagchow.magehand.core.model.CatalogCategory
@@ -167,7 +171,17 @@ fun LocalCharacterEditorScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp, vertical = 16.dp)
+                // Defect 1 (sweep-1.17.0): the bottom padding is *inside* the scroll and unions
+                // the navigation-bar inset, because the footer below is six tappable buttons on
+                // two `FlowRow` lines and the scroll's own maximum rests the last line against
+                // the bottom of the screen — inside the gesture-navigation strip, which eats the
+                // tap before the app sees it. See `scrollableFooterPadding`.
+                .padding(
+                    start = 24.dp,
+                    end = 24.dp,
+                    top = 16.dp,
+                    bottom = 16.dp + scrollableFooterPadding,
+                )
                 .semantics { testTagsAsResourceId = true },
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -253,8 +267,10 @@ fun LocalCharacterEditorScreen(
                     labelErrorRes = uiState.rowLabelErrorRes(index),
                     totalErrorRes = uiState.rowTotalErrorRes(index),
                     costErrorRes = uiState.rowCostErrorRes(index),
+                    spellLevelErrorRes = uiState.rowSpellLevelErrorRes(index),
                     costOptions = uiState.costOptions(index),
                     onKind = { viewModel.setRowKind(index, it) },
+                    onRow = { viewModel.setRow(index, it) },
                     onLabel = { viewModel.setRowLabel(index, it) },
                     onTotal = { viewModel.setRowTotal(index, it) },
                     onReset = { viewModel.setRowReset(index, it) },
@@ -343,8 +359,23 @@ private fun RowEditor(
     @StringRes labelErrorRes: Int?,
     @StringRes totalErrorRes: Int?,
     @StringRes costErrorRes: Int?,
+    @StringRes spellLevelErrorRes: Int?,
     costOptions: List<LocalRowFormState>,
     onKind: (LocalRowKind) -> Unit,
+    /**
+     * FR-49's fields, edited as a **whole row** rather than through eleven more `onX` lambdas.
+     *
+     * The nine callbacks above are FR-29's shape and are left exactly as they were; adding eleven
+     * more of them would have made this function's signature longer than its body, for fields that
+     * are all plain text with no filtering and no per-field rule. The one gesture that *does* need
+     * a rule — the level chips — still goes through it, because the rule lives in
+     * [LocalCharacterFormState] either way.
+     *
+     * Recorded as this wave's judgement call. The existing nine are not converted: a
+     * mechanical rewrite of working callbacks is the kind of churn a review has to read in full
+     * for no behaviour.
+     */
+    onRow: (LocalRowFormState) -> Unit,
     onLabel: (String) -> Unit,
     onTotal: (String) -> Unit,
     onReset: (ResetRule?) -> Unit,
@@ -410,7 +441,10 @@ private fun RowEditor(
                     // unlimited)" because zero is a *choice* here rather than an error — see
                     // `LocalTrackerRow.total` — and a field whose valid range starts at a value
                     // that means something else entirely has to say so where it is typed.
-                    LocalRowKind.ACTION -> R.string.local_field_uses
+                    // FR-49's two kinds reuse that meaning exactly (20 decision 2), so they reuse
+                    // the label rather than getting a third word for the same column.
+                    LocalRowKind.ACTION, LocalRowKind.SPELL, LocalRowKind.ATTACK ->
+                        R.string.local_field_uses
                     LocalRowKind.SLOT, LocalRowKind.RESOURCE -> R.string.local_field_total
                 },
                 errorRes = totalErrorRes,
@@ -453,8 +487,100 @@ private fun RowEditor(
                 )
             }
 
-            // FR-29 (18 decisions 1 and 2). Actions only, for the reset chips' reason exactly.
-            if (row.kind == LocalRowKind.ACTION) {
+            // FR-49 decision 3: a SLOT row's level, so `toTrackedResource` can publish a real
+            // `spellSlotLevel` and the existing upcast picker can offer this slot. 1-9 and no
+            // "None" chip — a slot row without a level is only ever a **migrated** legacy row
+            // (MIGRATION_7_8 found no leading ordinal in its label), never one a player chose, so
+            // the hint below states the consequence rather than offering the state back.
+            if (row.kind == LocalRowKind.SLOT) {
+                SpellLevelChips(
+                    level = row.spellLevel,
+                    onLevel = { onRow(row.copy(spellLevel = it)) },
+                    testTagPrefix = "local:row:$index:level",
+                    levels = LocalCharacterForm.SLOT_LEVEL_RANGE,
+                    labelRes = R.string.local_field_slot_level,
+                )
+                if (row.spellLevel == null) {
+                    Text(
+                        text = stringResource(R.string.local_slot_level_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag("local:row:$index:level:hint"),
+                    )
+                }
+            }
+
+            // FR-49 decision 2: the spell row's own fields. Level first, because it is the one
+            // that is required and the one the section headers and the slot picker key on.
+            if (row.kind == LocalRowKind.SPELL) {
+                SpellLevelChips(
+                    level = row.spellLevel,
+                    onLevel = { onRow(row.copy(spellLevel = it)) },
+                    testTagPrefix = "local:row:$index:level",
+                )
+                FieldError(spellLevelErrorRes)
+
+                RowTextField(
+                    value = row.castingTime,
+                    onValueChange = { onRow(row.copy(castingTime = it)) },
+                    labelRes = R.string.local_field_casting_time,
+                    testTag = "local:row:$index:castingTime",
+                )
+                RowTextField(
+                    value = row.range,
+                    onValueChange = { onRow(row.copy(range = it)) },
+                    labelRes = R.string.local_field_range,
+                    testTag = "local:row:$index:range",
+                )
+                RowTextField(
+                    value = row.components,
+                    onValueChange = { onRow(row.copy(components = it)) },
+                    labelRes = R.string.local_field_components,
+                    testTag = "local:row:$index:components",
+                )
+                RowTextField(
+                    value = row.duration,
+                    onValueChange = { onRow(row.copy(duration = it)) },
+                    labelRes = R.string.local_field_duration,
+                    testTag = "local:row:$index:duration",
+                )
+                SwitchRow(
+                    labelRes = R.string.local_field_concentration,
+                    checked = row.concentration,
+                    onChange = { onRow(row.copy(concentration = it)) },
+                    testTag = "local:row:$index:concentration",
+                )
+                SwitchRow(
+                    labelRes = R.string.local_field_ritual,
+                    checked = row.ritual,
+                    onChange = { onRow(row.copy(ritual = it)) },
+                    testTag = "local:row:$index:ritual",
+                )
+            }
+
+            // FR-49 decision 8: an attack's two text facts. **Text**, both of them — there is no
+            // attack bonus field here and there is not going to be one, because a local character
+            // records no proficiencies and inventing "+5" is the class of arithmetic that shipped
+            // wrong in FR-36.
+            if (row.kind == LocalRowKind.ATTACK) {
+                RowTextField(
+                    value = row.damage,
+                    onValueChange = { onRow(row.copy(damage = it)) },
+                    labelRes = R.string.local_field_damage,
+                    testTag = "local:row:$index:damage",
+                )
+                RowTextField(
+                    value = row.properties,
+                    onValueChange = { onRow(row.copy(properties = it)) },
+                    labelRes = R.string.local_field_properties,
+                    testTag = "local:row:$index:properties",
+                )
+            }
+
+            // FR-29 (18 decisions 1 and 2), widened by FR-49 to every Actions-surface kind: a
+            // spell's rules text is its description, and 20 decision 2 allows a cost on a spell or
+            // an attack (a warlock's invocation costing a resource row is the case it names).
+            if (row.kind.isActionSurface) {
                 OutlinedTextField(
                     value = row.description,
                     onValueChange = onDescription,
@@ -470,6 +596,22 @@ private fun RowEditor(
                     label = { Text(stringResource(R.string.local_field_description)) },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
                 )
+
+                // FR-49 decision 5, after the rules text because it is a rider on it — the same
+                // order the detail sheet draws them in.
+                if (row.kind == LocalRowKind.SPELL) {
+                    OutlinedTextField(
+                        value = row.higherLevels,
+                        onValueChange = { onRow(row.copy(higherLevels = it)) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("local:row:$index:higherLevels"),
+                        singleLine = false,
+                        maxLines = 4,
+                        label = { Text(stringResource(R.string.local_field_higher_levels)) },
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+                    )
+                }
 
                 Text(
                     text = stringResource(R.string.local_field_cost),
@@ -529,6 +671,61 @@ private fun RowEditor(
                 }
             }
         }
+    }
+}
+
+/**
+ * One of FR-49's plain text fields on a row — a label, a value, and nothing else.
+ *
+ * No error slot, because none of them can be wrong: every one is optional prose or an SRD string
+ * the player may rewrite, and the only rules on a spell or attack row are the label and the level,
+ * which have their own controls. [FieldError]'s always-render argument therefore does not apply —
+ * there is no message that could appear and shift the layout.
+ */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun RowTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    @StringRes labelRes: Int,
+    testTag: String,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag(testTag),
+        singleLine = true,
+        label = { Text(stringResource(labelRes)) },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+    )
+}
+
+/** A labelled switch, 48 dp tall so the whole row is the target. */
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun SwitchRow(
+    @StringRes labelRes: Int,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+    testTag: String,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(labelRes),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
+        )
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 
@@ -643,6 +840,8 @@ private val LocalRowKind.labelRes: Int
         LocalRowKind.RESOURCE -> R.string.local_kind_resource
         LocalRowKind.ITEM -> R.string.local_kind_item
         LocalRowKind.ACTION -> R.string.local_kind_action
+        LocalRowKind.SPELL -> R.string.local_kind_spell
+        LocalRowKind.ATTACK -> R.string.local_kind_attack
     }
 
 /** The "add a row of this kind" buttons. */
@@ -652,6 +851,8 @@ private val LocalRowKind.addLabelRes: Int
         LocalRowKind.RESOURCE -> R.string.local_add_resource
         LocalRowKind.ITEM -> R.string.local_add_item
         LocalRowKind.ACTION -> R.string.local_add_action
+        LocalRowKind.SPELL -> R.string.local_add_spell
+        LocalRowKind.ATTACK -> R.string.local_add_attack
     }
 
 /** `null` is "none" — 09 decision 4's third reset option, named rather than implied. */

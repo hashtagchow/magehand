@@ -41,6 +41,7 @@ import com.hashtagchow.magehand.core.data.settings.SelectedRollStore
 import java.io.File
 import com.hashtagchow.magehand.core.model.AbilityScores
 import com.hashtagchow.magehand.core.model.CatalogCategory
+import com.hashtagchow.magehand.core.model.CoinPurse
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.ResetRule
 
@@ -563,6 +564,55 @@ class LocalCharacterRepositoryTest {
         }
     }
 
+    // --- BUG-23: the purse and the death saves are not the form's to rewrite ----
+
+    /**
+     * The reported gesture, exactly: seed a wallet and a death-save tally through the paths the
+     * app itself writes them with ([LocalCharacterDao.setCoins] behind the inventory pane's coin
+     * rows, [LocalCharacterDao.setDeathSaves] behind the tracker's marks), then re-open the
+     * editor and change *only* the name.
+     *
+     * `save` rebuilds the whole `LocalCharacterEntity` from the form and upserts it, so any
+     * column it does not name is written back at its `@ColumnInfo(defaultValue = "0")` default —
+     * which is how renaming a character emptied its purse and cleared its marks in one save.
+     * `currentHp` is asserted alongside them because it is the carry these six are modelled on:
+     * if this test ever fails on HP too, the carrying is gone rather than incomplete.
+     */
+    @Test
+    fun `editing a character keeps its coins and its death saves`() = runTest {
+        val id = saveOrFail(form(maxHp = 20))
+        dao.setCoins(id, pp = 1, gp = 42, sp = 7, cp = 3, at = clock)
+        dao.setDeathSaves(id, successes = 2, failures = 1, at = clock)
+        dao.setCurrentHp(id, 6, at = clock)
+
+        // The player re-opens the editor only to fix the name.
+        saveOrFail(repository.formFor(id)!!.copy(name = "Brambles the Bold"))
+
+        with(repository.find(id)!!) {
+            assertEquals("Brambles the Bold", name)
+            assertEquals(
+                "an edit must not empty the wallet",
+                CoinPurse(platinum = 1, gold = 42, silver = 7, copper = 3),
+                coins,
+            )
+            assertEquals("an edit must not clear a death-save tally", 2, deathSuccesses)
+            assertEquals(1, deathFailures)
+            assertEquals("the carry these six are modelled on", 6, currentHp)
+        }
+    }
+
+    /** The other half of the carry: a character nobody has played yet starts at zero. */
+    @Test
+    fun `a new character starts with an empty purse and no death saves`() = runTest {
+        val id = saveOrFail(form())
+
+        with(repository.find(id)!!) {
+            assertEquals(CoinPurse(), coins)
+            assertEquals(0, deathSuccesses)
+            assertEquals(0, deathFailures)
+        }
+    }
+
     @Test
     fun `an item's quantity is whatever the form last said`() = runTest {
         val id = saveOrFail(
@@ -924,6 +974,202 @@ class LocalCharacterRepositoryTest {
         with(repository.observe(id).first()!!) {
             assertEquals(AbilityScores(strength = 8, dexterity = 14, constitution = 15), abilities)
             assertEquals(-1, abilities.modifier(com.hashtagchow.magehand.core.model.Ability.STR))
+        }
+    }
+
+    // --- FR-49 (docs/design/20-local-spells-and-attacks.md) ------------------
+
+    /**
+     * Every FR-49 field round-trips through `formFor` → `save` unchanged — which is what makes
+     * *"the form is the editor"* true for a spell as well as for a character.
+     *
+     * The defect this guards is the one the FR-8 columns already had and the 1.6.0 review found:
+     * `LocalCharacterDao.save` upserts **whole rows**, so a field the form does not carry is a
+     * field that gets written back at its Kotlin default. Saving the editor after fixing a typo in
+     * the character's name would then silently blank every spell's range, components and upcast
+     * paragraph — and nothing would say so.
+     */
+    @Test
+    fun `a spell row survives a round trip through the editor with every field intact`() = runTest {
+        val id = saveOrFail(
+            form(
+                rows = listOf(
+                    LocalRowForm(
+                        kind = LocalRowKind.SPELL,
+                        label = "Fireball",
+                        total = 0,
+                        spellLevel = 3,
+                        description = "A bright streak flashes from your pointing finger.",
+                        higherLevels = "The damage increases by 1d6 for each slot level above 3rd.",
+                        castingTime = "1 action",
+                        range = "150 feet",
+                        components = "V, S, M",
+                        duration = "Instantaneous",
+                        concentration = false,
+                        ritual = false,
+                        catalogId = "fireball",
+                    ),
+                ),
+            ),
+        )
+
+        // An unrelated edit: the exact gesture that used to strip the columns the form did not
+        // carry.
+        saveOrFail(repository.formFor(id)!!.copy(name = "Brambles the Bold"))
+
+        with(repository.rows(id).single()) {
+            assertEquals(LocalRowKind.SPELL, kind)
+            assertEquals("Fireball", label)
+            assertEquals(3, spellLevel)
+            assertEquals("1 action", castingTime)
+            assertEquals("150 feet", range)
+            assertEquals("V, S, M", components)
+            assertEquals("Instantaneous", duration)
+            assertEquals("The damage increases by 1d6 for each slot level above 3rd.", higherLevels)
+            assertEquals("A bright streak flashes from your pointing finger.", description)
+            assertEquals("provenance survives an edit", "fireball", catalogId)
+        }
+    }
+
+    /** The same claim for an attack's two text facts. */
+    @Test
+    fun `an attack row survives a round trip with its damage and properties`() = runTest {
+        val id = saveOrFail(
+            form(
+                rows = listOf(
+                    LocalRowForm(
+                        kind = LocalRowKind.ATTACK,
+                        label = "Longsword",
+                        total = 0,
+                        damage = "1d8 / 1d10 slashing",
+                        properties = "Versatile (1d10), Mastery: Sap",
+                        catalogId = "longsword",
+                    ),
+                ),
+            ),
+        )
+
+        saveOrFail(repository.formFor(id)!!.copy(armorClass = 16))
+
+        with(repository.rows(id).single()) {
+            assertEquals("1d8 / 1d10 slashing", damage)
+            assertEquals("Versatile (1d10), Mastery: Sap", properties)
+            assertNull("an attack states no level", spellLevel)
+        }
+    }
+
+    /**
+     * **Retyping a spell into a resource drops every claim it made about being a spell** — the
+     * *"a slot that once was an item must not keep claiming to be a sword"* rule, applied to the
+     * eleven columns FR-49 added.
+     *
+     * `catalogId` is the deliberate exception and is asserted as one: it records *where the row's
+     * text came from*, which stays true of a row the player retyped. Everything else is a claim
+     * about what the row **is**, and the row is not that any more.
+     */
+    @Test
+    fun `retyping a spell into a resource drops its spell fields and keeps its provenance`() =
+        runTest {
+            val id = saveOrFail(
+                form(
+                    rows = listOf(
+                        LocalRowForm(
+                            id = "row-1",
+                            kind = LocalRowKind.SPELL,
+                            label = "Fireball",
+                            total = 0,
+                            spellLevel = 3,
+                            castingTime = "1 action",
+                            range = "150 feet",
+                            components = "V, S, M",
+                            duration = "Instantaneous",
+                            higherLevels = "…",
+                            concentration = true,
+                            ritual = true,
+                            catalogId = "fireball",
+                        ),
+                    ),
+                ),
+            )
+
+            val retyped = repository.formFor(id)!!.let { loaded ->
+                loaded.copy(
+                    rows = loaded.rows.map {
+                        it.copy(kind = LocalRowKind.RESOURCE, label = "Sorcery Points", total = 5)
+                    },
+                )
+            }
+            saveOrFail(retyped)
+
+            with(repository.rows(id).single()) {
+                assertEquals(LocalRowKind.RESOURCE, kind)
+                assertNull(spellLevel)
+                assertNull(castingTime)
+                assertNull(range)
+                assertNull(components)
+                assertNull(duration)
+                assertNull(higherLevels)
+                assertEquals(false, concentration)
+                assertEquals(false, ritual)
+                assertEquals("where the text came from is still true", "fireball", catalogId)
+            }
+        }
+
+    /**
+     * A **slot** row keeps its level across an edit, and a spell's level does not leak onto the
+     * other kinds.
+     *
+     * The column has two readings (`LocalTrackerRow.spellLevel`) and this is the assertion that
+     * they stay in their lanes: a level surviving onto an item would be a claim nothing can read,
+     * and a level dropped off a slot would silently remove it from the upcast picker — which is
+     * exactly what decision 3 exists to put right.
+     */
+    @Test
+    fun `a slot row keeps its level and no other kind gains one`() = runTest {
+        val id = saveOrFail(
+            form(
+                rows = listOf(
+                    LocalRowForm(kind = LocalRowKind.SLOT, label = "3rd Level", total = 3, spellLevel = 3),
+                    LocalRowForm(kind = LocalRowKind.ITEM, label = "Arrows", total = 20),
+                ),
+            ),
+        )
+
+        saveOrFail(repository.formFor(id)!!.copy(name = "Brambles the Bold"))
+
+        val rows = repository.rows(id)
+        assertEquals(3, rows.first { it.kind == LocalRowKind.SLOT }.spellLevel)
+        assertNull(rows.first { it.kind == LocalRowKind.ITEM }.spellLevel)
+    }
+
+    /**
+     * A cost on a spell survives a round trip — 20 decision 2 allows one, and the save path's kind
+     * fence had to widen from "actions only" to every Actions-surface kind to let it.
+     */
+    @Test
+    fun `a spell keeps its cost across an edit`() = runTest {
+        val id = saveOrFail(
+            form(
+                rows = listOf(
+                    LocalRowForm(id = "ki", kind = LocalRowKind.RESOURCE, label = "Ki", total = 5),
+                    LocalRowForm(
+                        id = "smite",
+                        kind = LocalRowKind.SPELL,
+                        label = "Eldritch Smite",
+                        total = 0,
+                        spellLevel = 1,
+                        costRowId = "ki",
+                        costAmount = 2,
+                    ),
+                ),
+            ),
+        )
+
+        saveOrFail(repository.formFor(id)!!.copy(name = "Brambles the Bold"))
+
+        with(repository.rows(id).first { it.kind == LocalRowKind.SPELL }) {
+            assertEquals("ki", costRowId)
+            assertEquals(2, costAmount)
         }
     }
 }

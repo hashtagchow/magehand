@@ -101,6 +101,24 @@ class LocalCharacterRepository(
                     description = row.description,
                     costRowId = row.costRowId,
                     costAmount = row.costAmount,
+                    // FR-49. `category`'s argument, eleven fields along: the form is authoritative
+                    // for these, so it has to open on what the row already says or re-saving an
+                    // untouched spell would blank its range and drop its upcast paragraph. Loaded
+                    // for **every** kind rather than only for spells and attacks — the kind fork
+                    // belongs on the way *out* ([save] and `LocalRowFormState.toRowForm`, which
+                    // both have it), and a third copy of it here would be a third place for it to
+                    // drift.
+                    spellLevel = row.spellLevel,
+                    higherLevels = row.higherLevels,
+                    castingTime = row.castingTime,
+                    range = row.range,
+                    components = row.components,
+                    duration = row.duration,
+                    concentration = row.concentration,
+                    ritual = row.ritual,
+                    damage = row.damage,
+                    properties = row.properties,
+                    catalogId = row.catalogId,
                 )
             },
         )
@@ -125,6 +143,21 @@ class LocalCharacterRepository(
      * - **`currentHp`** — likewise clamped into the new `maxHp`. Lowering max HP below the
      *   current value and leaving the character above its own maximum would put the HP row in
      *   a state the tracker's own clamps say is impossible.
+     * - **The purse and the death saves** — `pp`/`gp`/`sp`/`cp` (FR-13, 10 decision 10) and
+     *   `deathSuccesses`/`deathFailures` (FR-16, 15 decision 13). BUG-23: this entity is rebuilt
+     *   from the form, so a column the constructor below does not *name* is written back at its
+     *   `@ColumnInfo(defaultValue = "0")` default — and [LocalCharacterDao.save] upserts the whole
+     *   row. Renaming a character therefore emptied its wallet and cleared its death-save tally,
+     *   in one save, silently. The rule that would have caught it is the one the four row columns
+     *   below already state: **the form owns what it shows; the sheet keeps what it doesn't.**
+     *   The form has no coin field and no death-save field — the wallet is spent in the inventory
+     *   pane and the marks are rolled on the tracker — so neither is a *form* field, and this
+     *   screen has no business rewriting either. Same class of defect as the FR-8 note directly
+     *   below, one level up: that one loses columns off a **row** rebuilt from a `LocalRowForm`,
+     *   this one loses columns off the **character** rebuilt from the `LocalCharacterForm`, for
+     *   word-for-word the same reason. Reported on 1.16.0; pinned by
+     *   `LocalCharacterRepositoryTest`.
+     *
      * - **A row's `weight`, `value`, `description` and `equipped`** — the four FR-8 inventory
      *   columns (10 decision 10). The form has never had fields for them, and
      *   [LocalCharacterDao.save] upserts **whole rows**, so building the entity from the form
@@ -198,6 +231,17 @@ class LocalCharacterRepository(
             // A new character arrives at full health; an edited one keeps what it had.
             currentHp = existing?.currentHp?.coerceIn(0, form.maxHp) ?: form.maxHp,
             armorClass = form.armorClass,
+            // BUG-23. The four FR-13 coin columns and the two FR-16 death-save counters, carried
+            // for `currentHp`'s reason and written out one by one because the entity is rebuilt
+            // from the form: a column this constructor does not name takes its `@ColumnInfo`
+            // default, and `LocalCharacterDao.save` upserts the **whole row**. A new character
+            // has an empty purse and no marks; an edited one keeps what it had.
+            pp = existing?.pp ?: 0,
+            gp = existing?.gp ?: 0,
+            sp = existing?.sp ?: 0,
+            cp = existing?.cp ?: 0,
+            deathSuccesses = existing?.deathSuccesses ?: 0,
+            deathFailures = existing?.deathFailures ?: 0,
             createdAt = existing?.createdAt ?: at,
             updatedAt = at,
         )
@@ -211,7 +255,10 @@ class LocalCharacterRepository(
             // still an item? A row whose kind changed keeps its id and its `current`, and loses
             // everything that was a claim about an object.
             val isItem = row.kind == LocalRowKind.ITEM
-            val isAction = row.kind == LocalRowKind.ACTION
+            // FR-49's three more questions the columns below turn on.
+            val isSpell = row.kind == LocalRowKind.SPELL
+            val isAttack = row.kind == LocalRowKind.ATTACK
+            val isActionSurface = row.kind.isActionSurface
             val current = when {
                 // An item's quantity *is* what the form typed — there is no separate
                 // "remaining" for it, so an edit sets it outright.
@@ -245,8 +292,12 @@ class LocalCharacterRepository(
                 // stored value instead would make the description un-editable. Every other kind
                 // drops it, exactly as it drops `weight` and `equipped`: a spell-slot row does
                 // not describe itself.
+                // FR-49 puts spells and attacks on the form-authoritative side with actions: a
+                // spell's rules text and an attack's note are both fields the editor draws, so
+                // the fork is "every Actions-surface kind takes the form's value; an item takes
+                // the stored one; everything else has none".
                 description = when {
-                    isAction -> row.description?.trim()?.takeIf { it.isNotBlank() }
+                    isActionSurface -> row.description?.trim()?.takeIf { it.isNotBlank() }
                     isItem -> previous?.description
                     else -> null
                 },
@@ -260,8 +311,35 @@ class LocalCharacterRepository(
                 // `category`'s reason: a resource that once was an action must not keep claiming
                 // to spend something. `validate` has already refused a half-filled pair, so this
                 // is the kind fence rather than a second consistency check.
-                costRowId = row.costRowId?.takeIf { isAction && row.costAmount != null },
-                costAmount = row.costAmount?.takeIf { isAction && row.costRowId != null },
+                //
+                // **FR-49 widens "actions only" to every Actions-surface kind.** 20 decision 2
+                // allows a cost on a spell or an attack — a warlock's invocation costing a
+                // resource row is the case it names — so the fence is the predicate rather than
+                // the single kind it used to be.
+                costRowId = row.costRowId?.takeIf { isActionSurface && row.costAmount != null },
+                costAmount = row.costAmount?.takeIf { isActionSurface && row.costRowId != null },
+                // FR-49's eleven, each dropped off the kinds it cannot mean anything on — the same
+                // "a row that stopped being a sword must not keep claiming to weigh 3 lb" rule,
+                // applied to a spell that was retyped into a resource.
+                //
+                // `spellLevel` is the one that survives onto **two** kinds, and it is not a
+                // widening of the rule but the rule applied to a column with two readings
+                // (`LocalTrackerRow.spellLevel`): a SPELL row's own level, or a SLOT row's level
+                // for the upcast picker (decision 3). Every other kind drops it.
+                spellLevel = row.spellLevel?.takeIf { isSpell || row.kind == LocalRowKind.SLOT },
+                higherLevels = row.higherLevels?.trim()?.takeIf { isSpell && it.isNotBlank() },
+                castingTime = row.castingTime?.trim()?.takeIf { isSpell && it.isNotBlank() },
+                range = row.range?.trim()?.takeIf { isSpell && it.isNotBlank() },
+                components = row.components?.trim()?.takeIf { isSpell && it.isNotBlank() },
+                duration = row.duration?.trim()?.takeIf { isSpell && it.isNotBlank() },
+                concentration = isSpell && row.concentration,
+                ritual = isSpell && row.ritual,
+                damage = row.damage?.trim()?.takeIf { isAttack && it.isNotBlank() },
+                properties = row.properties?.trim()?.takeIf { isAttack && it.isNotBlank() },
+                // Provenance, and the one FR-49 field that is **not** dropped on a kind change:
+                // it records where the row's text came from, and that stays true of a spell the
+                // player retyped into an action. It is dropped only when there was never one.
+                catalogId = row.catalogId?.takeIf { it.isNotBlank() },
             )
         }
 

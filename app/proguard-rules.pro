@@ -50,3 +50,24 @@
 # and rename the source file to a constant so it leaks nothing.
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
+
+# ---------------------------------------------------------------------------
+# Bundled SRD catalogs (FR-49)
+# ---------------------------------------------------------------------------
+# Belt to the braces of M1 [review, 2026-09-12]. `SpellCatalog.readCatalog` and
+# `CatalogProvenance` now name their serializers statically
+# (`SpellJson.serializer()` + `ListSerializer`), so no reflective `typeOf` lookup
+# is left for R8 to defeat — a stripped or renamed `$serializer` would have
+# crashed the Add sheet and Settings' About section in the release variant only,
+# with every debug build and every JVM test green.
+#
+# This rule is kept anyway, in the navigation block's style, because the wire
+# shapes are private `@Serializable` data classes whose only references are the
+# `serializer()` calls themselves: exactly the shape R8 is most willing to
+# decide is dead, and the failure it would cause is release-only.
+-keep,allowobfuscation @kotlinx.serialization.Serializable class com.hashtagchow.magehand.core.data.catalog.** { *; }
+-keepclassmembers class com.hashtagchow.magehand.core.data.catalog.** {
+    *** Companion;
+    *** INSTANCE;
+    kotlinx.serialization.KSerializer serializer(...);
+}

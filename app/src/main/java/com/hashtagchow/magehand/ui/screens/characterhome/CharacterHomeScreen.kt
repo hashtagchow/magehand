@@ -624,6 +624,10 @@ fun CharacterHomeScreen(
  * @param trackerShowing whether the Tracker surface is on screen — a tab selected, or a pane open.
  *   In pane mode both it and [inventoryShowing] can be true and both sets of actions belong here;
  *   see `isShowing`.
+ * @param actionsShowing the same question for the Actions surface (FR-49). Defaulted false, so the
+ *   DiceCloud screen's call is unchanged.
+ * @param onAddAction FR-49 decision 6's Add, or `null` on a character that cannot have rows added
+ *   to it — which is every DiceCloud one. Defaulted null for the same reason.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -637,6 +641,9 @@ internal fun HomeAppBar(
     onShortRest: () -> Unit,
     onLongRest: () -> Unit,
     onAddItem: () -> Unit,
+    actionsShowing: Boolean = false,
+    onAddAction: (() -> Unit)? = null,
+    // Last, so it stays the trailing lambda both screens pass as a block.
     overflow: @Composable () -> Unit,
 ) = BoxWithConstraints {
     // The bar asks how much room it was given, not how large the user's text is. See
@@ -706,6 +713,28 @@ internal fun HomeAppBar(
                     Icon(
                         imageVector = Icons.Filled.Add,
                         contentDescription = stringResource(R.string.inventory_add),
+                    )
+                }
+            }
+            // FR-49 decision 6's top-bar Add, on the same terms as the item Add above it and in
+            // the same slot: it belongs to *one tab*, and the bar is where this screen already
+            // puts per-tab actions. `null` by default and on the DiceCloud screen — a sheet's
+            // spells are the sheet's, so there is nothing to add and the control must not exist
+            // (`ActionsScreen.onAdd` carries the whole argument).
+            //
+            // Both halves of decision 6's *"one handler"* therefore reach the same lambda: this
+            // one and the empty state's button, which is what stops the two drifting into two
+            // slightly different sheets.
+            val addAction = onAddAction
+            if (actionsShowing && addAction != null) {
+                IconButton(
+                    onClick = addAction,
+                    colors = mageHandIconButtonColors(),
+                    modifier = Modifier.testTag("actions:add"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Add,
+                        contentDescription = stringResource(R.string.actions_add),
                     )
                 }
             }

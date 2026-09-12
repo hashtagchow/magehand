@@ -328,3 +328,126 @@ val MIGRATION_6_7: Migration = object : Migration(6, 7) {
         db.execSQL("ALTER TABLE `local_tracker_rows` ADD COLUMN `costAmount` INTEGER")
     }
 }
+
+/**
+ * v7 → v8: local spells and attacks (FR-49,
+ * docs/design/20-local-spells-and-attacks.md decisions 2 and 3).
+ *
+ * ```
+ * local_tracker_rows += catalogId, higherLevels, castingTime, range,
+ *                       components, duration, damage, properties  TEXT
+ *                    += spellLevel                                INTEGER
+ *                    += concentration, ritual                     INTEGER NOT NULL DEFAULT 0
+ * ```
+ * …and then **one `UPDATE`** — the first data-touching statement in this file. See below.
+ *
+ * **Additive in [MIGRATION_4_5]'s sense**, eleven times over: eleven `ALTER TABLE … ADD COLUMN`s
+ * against `local_tracker_rows`, no table re-created, so there is no copy step that could drop a
+ * row, no temporary table, and no window in which the foreign key to `local_characters` does not
+ * exist. Nothing on `local_characters` is touched at all.
+ *
+ * ### The mix of defaults, and what each kind means
+ *
+ * Nine nullable columns take **no** `DEFAULT`, for [MIGRATION_6_7]'s reason exactly: SQLite's
+ * refusal only applies to `NOT NULL`, and `NULL` is the honest value — no row predating v8 is a
+ * spell or an attack (neither kind existed), so none of them has a casting time or a damage line
+ * to preserve or to guess at.
+ *
+ * `concentration` and `ritual` are `NOT NULL`, so they *must* name a default, and `0` is again the
+ * fact rather than a chosen reading: nothing that predates this migration concentrates. The
+ * matching `@ColumnInfo(defaultValue = "0")` on [LocalTrackerRowEntity] is what keeps the exported
+ * v8 schema saying the same thing as these two statements — the discipline v4's coin columns set,
+ * read from the other end.
+ *
+ * ### The back-fill, which is what makes this migration different from the seven before it
+ *
+ * Decision 3 gives SLOT rows a level so that `toTrackedResource` can publish a real
+ * `spellSlotLevel` and the existing `spellSlotOptions` can offer a local slot to the upcast
+ * picker. A player upgrading from 1.16.0 has slot rows already — *"1st Level"*, *"3rd"*,
+ * *"2 · Pact"* — and leaving every one of them level-less would mean a caster whose picker is
+ * empty until they re-open the editor and re-answer a question they already answered in the label.
+ *
+ * So the `UPDATE` reads the label's **leading number** and keeps it when it is 1–9. This is not a
+ * new rule and not a guess: it is SQLite's leading-number parse, which agrees with
+ * `TrackerEngine.LEADING_ORDINAL`'s `^\s*(\d+)` — the regex the *server* path has always used to
+ * recover a slot's level from its name when the field is absent — on every label the editor
+ * produces, and is more permissive than it only on a signed or decimal prefix, which the `BETWEEN
+ * 1 AND 9` then has to agree with. It is applied to the one place a local label carries the same
+ * information, and expressed in SQL rather than by reading rows into Kotlin and writing them back,
+ * because a migration that iterates a table is a migration whose cost grows with the player's data
+ * and whose failure mode is a partial pass.
+ *
+ * **A label that does not start with a digit stays `NULL`**, and that is the honest half. Such a
+ * row keeps working as the pip row it has always been; it is simply not offered as a cast source,
+ * which is the same rule the server path follows for a slot whose level neither the field nor the
+ * name resolves (see `spellSlotOptions`, which *drops* rather than guesses). The editor shows it
+ * with no chip selected and a one-line hint, so the player can answer the question once.
+ *
+ * `10` and above are excluded as well as `0`: there is no tenth-level slot in 5e, so a leading
+ * `10` is part of a label the player wrote for something else, and reading it as a level would be
+ * inventing exactly the kind of data this back-fill exists to avoid inventing. `MIGRATION_7_8`'s
+ * two test cases are the row that back-fills and the row that does not.
+ *
+ * ### Twelve statements, one migration
+ *
+ * [MIGRATION_5_6]'s note, unchanged: SQLite's `ALTER TABLE` adds one column per statement, and
+ * Room runs a migration inside a transaction — so a failure anywhere in the chain, the `UPDATE`
+ * included, rolls all of it back and the database stays at v7 rather than landing half-migrated
+ * with some columns added and no levels filled in.
+ *
+ * As with every migration before it, this is proven rather than trusted:
+ * `MageHandDatabaseMigrationTest` builds a real v7 database from the **committed** v7 JSON,
+ * populates both local tables, runs this migration, and lets Room's own validator compare the
+ * result against the compiled v8 expectation.
+ */
+val MIGRATION_7_8: Migration = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        for (column in NULLABLE_TEXT_COLUMNS_V8) {
+            db.execSQL("ALTER TABLE `local_tracker_rows` ADD COLUMN `$column` TEXT")
+        }
+        db.execSQL("ALTER TABLE `local_tracker_rows` ADD COLUMN `spellLevel` INTEGER")
+        db.execSQL(
+            "ALTER TABLE `local_tracker_rows` ADD COLUMN `concentration` INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL("ALTER TABLE `local_tracker_rows` ADD COLUMN `ritual` INTEGER NOT NULL DEFAULT 0")
+
+        // Decision 3's back-fill — see the KDoc. `CAST(… AS INTEGER)` is SQLite's own
+        // **leading-number** parse: it skips leading whitespace, reads a numeric prefix and stops.
+        // That agrees with `TrackerEngine.LEADING_ORDINAL`'s `^\s*(\d+)` on every label the
+        // editor produces, and is *more permissive* than it on a signed or decimal prefix — "-3"
+        // and "1.9" cast to -3 and 1, where the regex matches neither (L5 [review, 2026-09-12];
+        // the two used to be claimed identical). The extra readings are then caught by the range:
+        // a no-match casts to 0, a negative is below 1, and "1.9" would have been read as "1" by
+        // a human too. So `BETWEEN 1 AND 9` is the range check and the no-match case in one
+        // condition rather than two that could disagree.
+        //
+        // No `TRIM`: `CAST` skips leading whitespace itself, so wrapping the column added a
+        // second scan of every label and changed no answer. `MageHandDatabaseMigrationTest`
+        // passes unchanged without it.
+        db.execSQL(
+            "UPDATE `local_tracker_rows` " +
+                "SET `spellLevel` = CAST(`label` AS INTEGER) " +
+                "WHERE `kind` = 'slot' AND CAST(`label` AS INTEGER) BETWEEN 1 AND 9",
+        )
+    }
+}
+
+/**
+ * v8's eight nullable `TEXT` columns, in the order [LocalTrackerRowEntity] declares them.
+ *
+ * A list rather than eight `execSQL` lines for the one reason a loop ever beats repetition here:
+ * eight near-identical statements differing in a single identifier is eight chances to typo an
+ * identifier, and a typo'd column name is caught by Room's validator as *"expected … found …"*
+ * over a schema with forty columns in it. The two `NOT NULL` columns and the `INTEGER` one stay
+ * written out, because each says something the others do not.
+ */
+private val NULLABLE_TEXT_COLUMNS_V8 = listOf(
+    "catalogId",
+    "higherLevels",
+    "castingTime",
+    "range",
+    "components",
+    "duration",
+    "damage",
+    "properties",
+)

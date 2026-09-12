@@ -5,6 +5,7 @@ import com.hashtagchow.magehand.core.model.ActionCost
 import com.hashtagchow.magehand.core.model.ActionEntry
 import com.hashtagchow.magehand.core.model.ActionGroup
 import com.hashtagchow.magehand.core.model.ActionUses
+import com.hashtagchow.magehand.core.model.CostLine
 import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.SpellListHeader
 import com.hashtagchow.magehand.core.model.SpellSlotOption
@@ -232,6 +233,21 @@ data class ActionDetailState(
         }?.takeIf { it.isNotBlank() }
 
     /**
+     * FR-49 decision 5's upcast paragraph, or `null` — the catalog's own text, verbatim.
+     *
+     * A **spell** row only, and written as a cast for [mastery]'s reason in the opposite
+     * direction: a `when` over the sealed pair would need an action branch returning `null` that
+     * reads as "not yet implemented", and this is "an action does not upcast". `null` on every
+     * DiceCloud spell too, because `ActionEngine` does not read the field — see
+     * [com.hashtagchow.magehand.core.model.SpellEntry.higherLevels].
+     *
+     * Blank is normalised to absent here rather than at the sheet, so the composable's
+     * `?.let { … }` is the whole of the "no paragraph, no heading" rule.
+     */
+    val higherLevels: String?
+        get() = (row as? ActionRow.Spell)?.entry?.higherLevels?.takeIf { it.isNotBlank() }
+
+    /**
      * FR-47 R7's mastery block — the word and, when the sheet carries one, its rules sentence.
      *
      * An action row only, and `null` for every spell: [WeaponMastery] is a property of a weapon,
@@ -355,6 +371,69 @@ data class UseAffordance(
      *   needs no slot at all, so an empty picker is moot for it.
      */
     fun confirmDisabled(ritual: Boolean): Boolean = showsSlotPicker && !ritual && slots.isEmpty()
+
+    /**
+     * **What this use will actually spend**, given the dialog's live choices.
+     *
+     * ### The defect this replaces
+     *
+     * The 1.17.0 device sweep's incidental observation: the confirm dialog read *"This spends
+     * nothing."* on a Fireball cast from a level-5 slot. It was reading [UseTarget.cost], which is
+     * the row's `attributesConsumed` / `itemsConsumed` — a spell slot is neither, and neither is
+     * the row's own charge. So the one line the dialog gives to *"what is this about to take"* was
+     * answering a narrower question than it appeared to, and answering it confidently.
+     *
+     * A slot cast is the case that matters, because the slot is the whole point of the dialog's
+     * picker sitting directly below that sentence — the player had just been asked to choose one.
+     *
+     * ### Why it takes the two live values
+     *
+     * The ritual checkbox and the picked slot are the dialog's own state, not this type's: they
+     * change between frames while the affordance does not. Passing them keeps this a pure
+     * function of `(affordance, choices)` — [confirmDisabled]'s shape, for its reason
+     * (`ActionsUiStateTest` can check it with no Compose harness).
+     *
+     * @param ritual the ritual checkbox's live state. A ritual cast spends no slot, which is what
+     *   the checkbox promises and 20 decision 4's `ritualCast` branch does.
+     * @param slotId the picker's live choice.
+     */
+    fun spend(ritual: Boolean, slotId: String?): UseSpend {
+        val ritualCast = ritual && showsRitual
+        return UseSpend(
+            slot = if (!ritualCast && showsSlotPicker) {
+                slots.firstOrNull { it.propertyId == slotId }
+            } else {
+                null
+            },
+            // Deliberately the same condition the dialog's existing "Uses left afterwards" line
+            // already uses, so the two halves cannot say different things about one row.
+            uses = target.uses,
+            costLines = target.cost.lines,
+        )
+    }
+}
+
+/**
+ * The three things a Use can take, as one answer — see [UseAffordance.spend].
+ *
+ * Kept as a value rather than as three getters on the affordance because [isNothing] is the
+ * question the dialog actually asks first, and *"is every one of these absent"* is a rule that has
+ * to live in one place or be re-derived wherever somebody prints the sentence.
+ *
+ * @property slot the spell slot this cast will burn. `null` for an action, a cantrip, a ritual
+ *   cast, a spell that spends its own charges, and a picker the player has not answered.
+ * @property uses the row's own charges, when it has them; the dialog prints both the spend and the
+ *   count left afterwards from this.
+ * @property costLines `attributesConsumed` + `itemsConsumed`, the lines this type used to be the
+ *   whole of.
+ */
+data class UseSpend(
+    val slot: SpellSlotOption?,
+    val uses: ActionUses?,
+    val costLines: List<CostLine>,
+) {
+    /** Whether *"This spends nothing."* is the truth. */
+    val isNothing: Boolean get() = slot == null && uses == null && costLines.isEmpty()
 }
 
 /**

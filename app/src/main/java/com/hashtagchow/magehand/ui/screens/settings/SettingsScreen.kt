@@ -41,7 +41,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hashtagchow.magehand.BuildConfig
 import com.hashtagchow.magehand.R
+import com.hashtagchow.magehand.core.data.catalog.CatalogProvenance
 import com.hashtagchow.magehand.core.data.settings.UiScale
 import com.hashtagchow.magehand.ui.components.RadioRow
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.MINUS
@@ -229,6 +231,10 @@ fun SettingsScreen(
                         .testTag("settings:show-limited-uses"),
                 )
             }
+
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+            AboutSection()
         }
     }
 
@@ -485,3 +491,84 @@ internal fun uiScaleValueDescription(scale: UiScale): String =
     } else {
         stringResource(R.string.settings_ui_scale_value_description, stringResource(uiScaleLabel(scale)))
     }
+
+/**
+ * **About** — the app's version and the SRD attribution CC-BY-4.0 requires (FR-49,
+ * docs/design/20-local-spells-and-attacks.md decision 7).
+ *
+ * ### This section exists because a licence term has to be visible
+ *
+ * The bundled spell and weapon catalogs are the System Reference Document's own text, reproduced
+ * under the Creative Commons Attribution 4.0 International licence, and CC-BY's one obligation is
+ * **attribution**. The catalogs' KDoc carries it for a reader of the source; this carries it for a
+ * reader of the app, which is the half that actually discharges the term. Decision 7 in as many
+ * words: *"There is no About screen; add an About section at the bottom of Settings."*
+ *
+ * The `ItemCatalog` gear entries have been SRD 5.1 since FR-8 with no user-visible credit at all,
+ * so this covers them too — which is why the sentence names both editions rather than only the
+ * ones FR-49 added.
+ *
+ * ### The strings are read, not restated — which they now actually are
+ *
+ * `CatalogProvenance` reads `provenance.json`, and that file is what `CatalogTest` pins against
+ * the data. So the attribution a user sees, the attribution the repository records and the data it
+ * is about cannot drift apart — a re-fetch that changed an edition changes these lines, or fails a
+ * test. A hard-coded sentence here would have been a fourth place for the same fact.
+ *
+ * **M2 [review, 2026-09-12]: this KDoc used to be wrong.** The section composed its own sentence
+ * from `strings.xml` and substituted only the two *edition names* out of the record, so the words
+ * a user read were this file's and the recorded attribution was printed nowhere — which is the
+ * failure mode the paragraph above claims to have avoided, and it also read *"System Reference
+ * Documents SRD 5.1 and SRD 5.2.1"*, with the abbreviation doubled. `CatalogSource.attribution` is
+ * now rendered **verbatim**, one sentence per catalog, and each of those sentences carries the
+ * licence URI and the CC-BY-4.0 §3(a)(1) statement that the material was modified. There is no
+ * attribution string in `strings.xml` any more; there is nothing left here to restate.
+ *
+ * ### Two sentences, not one
+ *
+ * They were one line while this file was writing it, because two credits a reader has to match up
+ * with two files is worse copy than one claim about one app. Printing the record instead settles
+ * it the other way: the recorded sentences are per catalog — that is what a CC-BY attribution *is*
+ * — and splicing two of them into one sentence would be composing again, in a place with no test.
+ *
+ * ### At the bottom, and last
+ *
+ * It is the one block on this screen with no control in it. Every section above answers *"what do
+ * you want the app to do?"*; this answers *"what is this?"*, which is the question a reader asks
+ * after the others or not at all.
+ */
+@Composable
+private fun AboutSection(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("settings:about"),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = stringResource(R.string.settings_about),
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Text(
+            text = stringResource(
+                R.string.settings_about_version,
+                BuildConfig.VERSION_NAME,
+                BuildConfig.VERSION_CODE,
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.testTag("settings:about:version"),
+        )
+        // The recorded sentences, verbatim and in the record's own order (M2). Not
+        // `stringResource`: these are not this app's words to translate or to edit — they are the
+        // licence's required form as `provenance.json` states it, and `CatalogTest` asserts that
+        // each one names its edition, carries `contentLicenceUrl` and says it was modified.
+        listOf(CatalogProvenance.spells, CatalogProvenance.weapons).forEach { source ->
+            Text(
+                text = source.attribution,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("settings:about:attribution:${source.edition}"),
+            )
+        }
+    }
+}

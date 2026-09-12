@@ -69,7 +69,39 @@ data class LocalCharacterForm(
                 add(LocalCharacterFormError.RowTotalOutOfRange(index, row.kind))
             }
             if (!row.costIsValid(rowsById)) add(LocalCharacterFormError.RowCostInvalid(index))
+            if (!row.spellLevelIsValid()) add(LocalCharacterFormError.RowSpellLevelMissing(index))
         }
+    }
+
+    /**
+     * FR-49 decision 2's one new field rule: **a spell states its level.**
+     *
+     * Required on a [LocalRowKind.SPELL] because the level decides which section header the row
+     * files under and which slots can cast it — a spell with no level is a row the Actions surface
+     * cannot place and the picker cannot match. Range-checked on a [LocalRowKind.SLOT] but
+     * **optional** there, because decision 3's back-fill leaves a legacy row without one on
+     * purpose (a label with no leading ordinal) and refusing to save such a character would make a
+     * migrated player's form un-saveable until they answered a question about every slot they own.
+     *
+     * ### A level on some other kind is dropped and **not** refused, unlike the cost fence
+     *
+     * The two look like the same kind of rule and are not. A cost naming an action is a *pair* of
+     * rows disagreeing, which the player chose and can see and can fix — so the picker declines to
+     * offer it and the validator refuses it, and the message points at a control on screen.
+     *
+     * A level left on a row the player has just retyped from a spell into a resource is neither
+     * chosen nor visible: the chips are drawn on spells and slots only, so there is no red field
+     * to point at and no gesture that clears it. Refusing the save would have produced the worst
+     * failure a form can have — a Save button that does nothing, for a reason the screen cannot
+     * state. So it follows `reset`, `category` and `description`'s arrangement instead: the value
+     * is dropped on the way out, at `LocalRowFormState.toRowForm` and again at
+     * `LocalCharacterRepository.save`, and nothing that reaches storage carries a claim its kind
+     * cannot mean.
+     */
+    private fun LocalRowForm.spellLevelIsValid(): Boolean = when (kind) {
+        LocalRowKind.SPELL -> spellLevel in SPELL_LEVEL_RANGE
+        LocalRowKind.SLOT -> spellLevel == null || spellLevel in SLOT_LEVEL_RANGE
+        LocalRowKind.RESOURCE, LocalRowKind.ITEM, LocalRowKind.ACTION, LocalRowKind.ATTACK -> true
     }
 
     /**
@@ -90,6 +122,12 @@ data class LocalCharacterForm(
      *  4. **The target** must be a row of this character that is not itself an action —
      *     decision 2's v1 fence, and the reason the picker never offers one. Enforced here as well
      *     as in the picker, per this app's habit with anything that reaches the database.
+     *     **FR-49 widens "an action" to every Actions-surface kind** ([LocalRowKind.isActionSurface]
+     *     — action, spell, attack), which is not a new rule but the same one stated over a longer
+     *     enum: chaining is fenced out of v1 because a cost that spends a thing-you-do is a use
+     *     that triggers a use, and a spell is no less a thing you do than a rage is. Written as the
+     *     predicate rather than as three comparisons, so the *next* non-tracker kind is covered by
+     *     construction instead of by somebody remembering this line.
      *
      * A cost naming a row the form has **not saved yet** (`LocalRowForm.id == null`) is rejected by
      * clause 4, and that is correct rather than a gap: an unsaved row has no id for anything to
@@ -101,7 +139,7 @@ data class LocalCharacterForm(
         if (costRowId == null || costAmount == null) return false
         if (costAmount < COST_AMOUNT_RANGE.first || costAmount > COST_AMOUNT_RANGE.last) return false
         val target = rowsById[costRowId] ?: return false
-        return target.kind != LocalRowKind.ACTION
+        return !target.kind.isActionSurface
     }
 
     val isValid: Boolean get() = validate().isEmpty()
@@ -134,9 +172,25 @@ data class LocalCharacterForm(
         /** How many of the cost row one use may spend. At least one, or it is not a cost. */
         val COST_AMOUNT_RANGE: IntRange = 1..999
 
+        /**
+         * A **spell's** own level: `0` is a cantrip, 9 is 5e's ceiling (FR-49 decision 2).
+         *
+         * Two ranges rather than one with a note, for [ACTION_USES_RANGE]'s stated reason: a spell
+         * of level 0 is a cantrip — a real and common thing — and a *slot* of level 0 is not
+         * anything. They agree on a bound at one end today and mean different things at the other,
+         * and two names is what stops a change to one silently moving the other.
+         */
+        val SPELL_LEVEL_RANGE: IntRange = 0..9
+
+        /** A **slot's** level, 1..9 — decision 3's chip row. There is no level-0 spell slot. */
+        val SLOT_LEVEL_RANGE: IntRange = 1..9
+
         fun LocalRowKind.totalRange(): IntRange = when (this) {
             LocalRowKind.ITEM -> ITEM_QUANTITY_RANGE
-            LocalRowKind.ACTION -> ACTION_USES_RANGE
+            // FR-49: a spell's and an attack's uses are an action's uses — 20 decision 2 reuses
+            // the ACTION convention verbatim ("`total == 0` is unlimited"), so they share its
+            // range rather than getting a fourth that would have to be kept equal to it.
+            LocalRowKind.ACTION, LocalRowKind.SPELL, LocalRowKind.ATTACK -> ACTION_USES_RANGE
             LocalRowKind.SLOT, LocalRowKind.RESOURCE -> COUNTED_TOTAL_RANGE
         }
     }
@@ -214,6 +268,38 @@ data class LocalRowForm(
     val costRowId: String? = null,
     /** How many of [costRowId] one use spends. `null` exactly when [costRowId] is. */
     val costAmount: Int? = null,
+    /**
+     * FR-49's fields, carried on the form for [description]'s reason at greater length
+     * (docs/design/20-local-spells-and-attacks.md decisions 2, 3 and 6).
+     *
+     * **The form is authoritative for all of them**, on the kinds that have them, because all of
+     * them are fields the editor draws — a spell's level and scalars, an attack's damage and
+     * properties. That is the same relationship [description] has for an action row and the
+     * opposite of the one it has for an item, and `LocalCharacterRepository.save`'s `when` is
+     * still where the fork is written.
+     *
+     * [spellLevel] is the one that reaches a row of a kind the *player* did not type it on: a SLOT
+     * row carries it too (decision 3), which is what lets `toTrackedResource` publish a real
+     * `spellSlotLevel` and the existing upcast picker offer a local slot. See
+     * [LocalCharacterForm.SPELL_LEVEL_RANGE] and [LocalCharacterForm.SLOT_LEVEL_RANGE] for why the
+     * two readings get two ranges.
+     *
+     * [catalogId] is provenance and is never edited — the form carries it only so that re-saving a
+     * catalog-created row does not silently strip the record of where it came from. Decision 6's
+     * *"the saved row copies the fields and keeps `catalogId`"*, on the round trip rather than only
+     * on the insert.
+     */
+    val spellLevel: Int? = null,
+    val higherLevels: String? = null,
+    val castingTime: String? = null,
+    val range: String? = null,
+    val components: String? = null,
+    val duration: String? = null,
+    val concentration: Boolean = false,
+    val ritual: Boolean = false,
+    val damage: String? = null,
+    val properties: String? = null,
+    val catalogId: String? = null,
 )
 
 /**
@@ -247,6 +333,17 @@ sealed interface LocalCharacterFormError {
      * player would read one.
      */
     data class RowCostInvalid(val index: Int) : LocalCharacterFormError
+
+    /**
+     * A [LocalRowKind.SPELL] row with no level, or a row of some other kind carrying one
+     * (FR-49, 20 decision 2) — see `LocalCharacterForm.spellLevelIsValid` for both halves.
+     *
+     * Named for the half a **player** can cause, because the other half cannot be reached from the
+     * editor at all: the level chips are drawn on spell and slot rows only, and switching a row's
+     * kind drops the level on the way to storage. The message the screen shows is therefore about
+     * the missing level, which is the only one anybody will read.
+     */
+    data class RowSpellLevelMissing(val index: Int) : LocalCharacterFormError
 }
 
 /** What [LocalCharacterRepository.save] did. */

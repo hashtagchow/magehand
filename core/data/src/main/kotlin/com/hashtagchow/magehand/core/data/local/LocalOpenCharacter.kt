@@ -38,6 +38,7 @@ import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.LocalRowKind
 import com.hashtagchow.magehand.core.model.NewItemSpec
+import com.hashtagchow.magehand.core.model.NewLocalRowSpec
 import com.hashtagchow.magehand.core.model.QuestEntry
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.RestKind
@@ -452,10 +453,15 @@ class LocalOpenCharacter(
      * about what the character has — a Use spends a row the tracker is drawing, and both re-emit
      * off the one Room invalidation.
      *
-     * The gate is the shared one: `ActionBoard.isEmpty` decides whether the tab and pane exist at
-     * all, exactly as it does for a DiceCloud character (`localPaneSurfaces(hasActions)`). A local
-     * character with no action rows therefore has no Actions surface, which is the same answer the
-     * old constant gave — reached by discovery rather than by decree.
+     * FR-29 gated the tab on `ActionBoard.isEmpty`, exactly as the DiceCloud screen does, so a
+     * local character with no action rows had no Actions surface at all — the same answer the old
+     * constant gave, reached by discovery rather than by decree.
+     *
+     * **FR-49 decision 1 retires that gate for local characters**: the tab is always present,
+     * because 20 decision 6 puts the Add on it and a tab that owns its own Add can always be
+     * filled. An empty board is now an empty *state* with a button in it. The server screen keeps
+     * the gate — a DiceCloud character with no actions still has nothing to add — and
+     * `localPaneSurfaces` is where that asymmetry is written down.
      */
     override val actions: StateFlow<ActionBoard> = rowsFlow
         .map { rows -> LocalActionBoard.build(rows) }
@@ -534,7 +540,14 @@ class LocalOpenCharacter(
             // leaning on the same inherited argument as everything else: a row id that somehow
             // named a DIFFERENT local character's row must refuse exactly as a missing one does.
             if (stored.characterId != creatureId) return@dispatch
-            if (LocalRowKind.fromStored(stored.kind) != LocalRowKind.ACTION) return@dispatch
+            // FR-49: an ATTACK row with uses is FR-29's Use, unchanged (20 decision 8 — *"with
+            // uses it is FR-29's Use"*), so it passes this gate. A SPELL row deliberately does
+            // **not**: a cast spends a slot as well as, or instead of, its own charges, and that
+            // is [castSpell]'s transaction. Named as two kinds rather than as
+            // `LocalRowKind.isActionSurface`, precisely so a spell cannot slip through a predicate
+            // that is true of it for a different reason.
+            val usedKind = LocalRowKind.fromStored(stored.kind)
+            if (usedKind != LocalRowKind.ACTION && usedKind != LocalRowKind.ATTACK) return@dispatch
 
             // `total == 0` is an unlimited action (see `LocalTrackerRow.total`), which spends no
             // uses and can never be exhausted. Anything else must have a charge left.
@@ -583,20 +596,159 @@ class LocalOpenCharacter(
     }
 
     /**
-     * No-op returning success, per FR-28 decision 10 — and unlike [useAction], this one stays a
-     * no-op.
+     * FR-49 decision 4's **Cast**: a real, undoable local transaction.
      *
-     * `castSpell` asks DiceCloud to spend a slot and run a spell's effect tree. 18 decision 1 gives
-     * local characters actions and deliberately **not** spells: there is no local spell, no level,
-     * no preparation and no spell list, so [LocalActionBoard] emits no [ActionBoard.spells] and
-     * `ActionsUiState` therefore has no spell row to open a detail sheet on. Nothing can reach
-     * this.
+     * ### This used to be a documented no-op, and the reason it was has been removed
      *
-     * Silent rather than throwing, matching [toggle] and [moveItem] below: an exception on a path
-     * the surface cannot construct would be dead code with a crash in it. `true` for [useAction]'s
-     * stated reason — this is a silent success, not a refusal to be routed into the failure lane.
+     * FR-28 decision 10 made it `= true` and 18 decision 1 justified it: *"there is no local
+     * spell, no level, no preparation and no spell list, so `LocalActionBoard` emits no spells and
+     * nothing can reach this."* docs/design/20-local-spells-and-attacks.md decision 2 supplies the
+     * model the parenthesis was about, so the argument is gone rather than weakened, and this
+     * becomes what [useAction] already is: two columns of a table this app owns, written in one
+     * Room transaction, journalled with an inverse.
+     *
+     * ### Three kinds of cast, and what each one spends
+     *
+     * Decision 4, whole:
+     *
+     *  - **Cantrip** (`spellLevel == 0`) or **ritual cast** (`ritual` asked for on a row whose
+     *    ritual flag is set) — spends **no slot and no charge**; its cost row, if any, is
+     *    deducted as ever, and that deduction is undoable. The journal records the cast either
+     *    way, because *"Cast Detect Magic"* is a thing that happened and a history sheet that
+     *    silently omitted the free casts would be a history of the expensive ones. An inverse is
+     *    filed only when something actually **moved**, so a cantrip with no cost row offers no
+     *    UNDO — it would be a button that restores nothing — and a cantrip with one offers a
+     *    real UNDO for the resource it spent.
+     *
+     *    M3 [architect ruling, 2026-09-12]: this bullet used to read *"spends nothing … No
+     *    inverse is filed"* flat, which is not what the code below has ever done and must not
+     *    become. Decision 2 lets a spell of any level carry `costRowId`, and `CostLine.satisfied`
+     *    is what `isUsable` gates the Use button on — so the player has already been shown the
+     *    cost, and is refused the cast outright when it is not funded. A Use that shows a cost
+     *    and then declines to take it would make the button and the write disagree about the
+     *    same row, and would leave the player to notice for themselves that their resource was
+     *    never spent.
+     *  - **Innate / limited** (`total > 0`) — spends one of the row's own uses, plus its cost row
+     *    if it has one, and **ignores [slotId]** entirely. This is [useAction]'s transaction with
+     *    a different journal label, reached through the same DAO method for the same atomicity
+     *    reason.
+     *  - **Slot cast** (`total == 0`, level ≥ 1) — decrements the chosen SLOT row's `current` by
+     *    one, with the cost row in the same transaction.
+     *
+     * ### The one method in this class that can return `false`, and why it can
+     *
+     * [useAction]'s KDoc argues at length that a local write's return value means *"accepted for
+     * dispatch"*, because every gate needs a Room read and a composable's `onClick` cannot block
+     * on one. That argument still holds for the gates below the dispatch — and decision 4 asks for
+     * one gate **above** it: *"a `slotId` that fails those checks returns `false`"*.
+     *
+     * It can, because that particular check needs no Room read. [board] and [actions] are
+     * `StateFlow`s built from the same `rowsFlow` the write will land in, so the spell's level and
+     * the slot's remaining charges are already in memory — which is 17 decision 6's *"validate ids
+     * against the live board before calling"*, the server path's own first gate, available here
+     * synchronously for once. So an impossible cast is refused before anything is dispatched and
+     * the caller learns about it, while the *reachable* refusals stay unreachable: the picker
+     * cannot offer a slot that fails these checks, so this is a fence rather than a path.
+     *
+     * The second gate is still the committed rows, re-read inside the write's critical section —
+     * so a cast that raced an edit refuses there, silently, exactly as [useAction] does.
+     *
+     * @return `false` when the id names no spell of this character, or when a slot cast names a
+     *   slot that is missing, level-less, too small or already empty. `true` otherwise, meaning
+     *   "accepted for dispatch" in [useAction]'s sense.
      */
-    override fun castSpell(spellId: String, slotId: String?, ritual: Boolean) = true
+    override fun castSpell(spellId: String, slotId: String?, ritual: Boolean): Boolean {
+        val spell = actions.value.spells.firstOrNull { it.propertyId == spellId } ?: return false
+        // A ritual cast and a cantrip both spend nothing; an innate spell spends its own uses.
+        // What is left is the slot cast, and it is the only one with a slot to validate.
+        val ritualCast = ritual && spell.ritual
+        val spendsSlot = !ritualCast && spell.level > 0 && spell.uses == null
+        if (spendsSlot) {
+            val slot = board.value.slots.firstOrNull { it.propertyId == slotId } ?: return false
+            val level = slot.spellSlotLevel ?: return false
+            if (level < spell.level) return false
+            if (slot.value <= 0) return false
+        }
+
+        dispatch {
+            val stored = dao.findRow(spellId) ?: return@dispatch
+            // [useAction]'s L-batch scoping check, for its stated reason: a row id that somehow
+            // named another local character's row must refuse exactly as a missing one does.
+            if (stored.characterId != creatureId) return@dispatch
+            if (LocalRowKind.fromStored(stored.kind) != LocalRowKind.SPELL) return@dispatch
+
+            val limited = stored.total > 0
+            if (!ritualCast && limited && stored.current <= 0) return@dispatch
+            // The row's own charges move only for an innate cast. A cantrip has none to spend and
+            // a slot cast spends the slot instead — writing `current` in either case would be
+            // taking a charge off a row that does not have one.
+            val spendsUses = !ritualCast && limited
+            val nextUses = if (spendsUses) stored.current - 1 else null
+
+            // The SLOT row, re-resolved against storage rather than trusted from the board the
+            // synchronous gate read. Between that gate and here the player may have edited the
+            // row down, or another screen may have spent it.
+            val slotRow = if (spendsSlot) {
+                val row = dao.findRow(slotId.orEmpty()) ?: return@dispatch
+                if (row.characterId != creatureId) return@dispatch
+                if (LocalRowKind.fromStored(row.kind) != LocalRowKind.SLOT) return@dispatch
+                if (row.current <= 0) return@dispatch
+                row
+            } else {
+                null
+            }
+
+            val costRow = stored.costRowId
+                ?.takeIf { stored.costAmount != null }
+                ?.let { dao.findRow(it) }
+            val costAmount = stored.costAmount ?: 0
+            // `CostLine.satisfied`'s asymmetry, as [useAction] has it: a cost naming a row that is
+            // gone is permitted, because the board renders it as permitted and the button and the
+            // write must not disagree about the same row.
+            if (costRow != null && costRow.current < costAmount) return@dispatch
+
+            // **One transaction over up to three rows.** `useAction` already writes the acting row
+            // and the cost row together; a slot cast has a third, so the slot is threaded through
+            // the same method rather than written beside it — see `LocalCharacterDao.useAction`,
+            // whose atomicity argument is exactly "a spend that lands half-way leaves a state no
+            // tap can produce", and a spent slot with the cost un-deducted is that state.
+            dao.useAction(
+                characterId = creatureId,
+                actionRowId = stored.id,
+                actionCurrent = nextUses,
+                costRowId = costRow?.id,
+                costCurrent = costRow?.let { it.current - costAmount },
+                costIsItem = LocalRowKind.fromStored(costRow?.kind) == LocalRowKind.ITEM,
+                slotRowId = slotRow?.id,
+                slotCurrent = slotRow?.let { it.current - 1 },
+                at = now(),
+            )
+            journal(
+                kind = TrackerWriteKind.CAST_SPELL,
+                targetName = stored.label,
+                amount = 1,
+                // A cast that spent nothing files no inverse — see the KDoc's cantrip bullet.
+                // `Undoable.Use` carries the two rows it moved and, since FR-49, the slot; when
+                // all three are absent there is nothing for an UNDO to restore. The condition is
+                // the three *movements* and deliberately not the kind of cast: a cantrip or a
+                // ritual with a cost row moved something, so it gets its inverse (M3 [architect
+                // ruling, 2026-09-12]).
+                undo = if (!spendsUses && slotRow == null && costRow == null) {
+                    null
+                } else {
+                    Undoable.Use(
+                        actionRowId = stored.id,
+                        previousUses = if (spendsUses) stored.current else null,
+                        costRowId = costRow?.id,
+                        previousCost = costRow?.current,
+                        slotRowId = slotRow?.id,
+                        previousSlot = slotRow?.current,
+                    )
+                },
+            )
+        }
+        return true
+    }
 
     /**
      * **Never emits.** FR-31's prompt has no source on an on-device character.
@@ -710,6 +862,77 @@ class LocalOpenCharacter(
             )
             dao.touch(creatureId, now())
             journal(TrackerWriteKind.ITEM_CREATE, spec.name, spec.quantity, undo = null)
+        }
+    }
+
+    /**
+     * Adds a spell or an attack row from the Actions tab's **Add** sheet (FR-49,
+     * docs/design/20-local-spells-and-attacks.md decision 6).
+     *
+     * ### Not on [OpenCharacter], deliberately
+     *
+     * Every other write in this class implements an interface method, because every other one has
+     * a DiceCloud counterpart — [addItem] is `creatureProperties.insert`, [useAction] is
+     * `doAction`. This one has none and can have none: a DiceCloud character's spells come from
+     * their sheet, and a method on the shared interface would be a capability the server
+     * implementation could only answer with a no-op. So it is a method on the concrete type, which
+     * is what the local view model already holds, and `WritePostureTest`'s pinned seam is
+     * untouched. [addItem]'s shape, minus the interface.
+     *
+     * ### One save for both halves of the sheet
+     *
+     * Decision 6: *"a catalog pick pre-fills the custom form … so there is one form, one
+     * validation and one save"*. [NewLocalRowSpec] is that one thing; a spec built by
+     * `NewLocalRowSpec.ofSpell` and a spec the player typed are indistinguishable here, exactly as
+     * [NewItemSpec]'s two paths are indistinguishable to [addItem].
+     *
+     * ### Not undoable, for [addItem]'s reason rather than a weaker one
+     *
+     * The inverse is *delete the row we just inserted*, and this class knows perfectly well how to
+     * do it — which is precisely why it must not. Deleting a spell row is the editor's gesture,
+     * behind its own confirm; an UNDO on a snackbar that hard-deleted a row would be that
+     * capability reached through a door nobody is watching, and a row deleted here is gone for
+     * good (`deleteRow` is a real `DELETE`). The sheet's snackbar says *"Added Fireball"* and
+     * offers no button, matching the add-item path a tab away.
+     *
+     * `current == total`, so a limited spell starts with every charge — the state a player expects
+     * a freshly written row to be in, and the one `rest` will return it to.
+     */
+    fun addActionRow(spec: NewLocalRowSpec) {
+        if (!spec.isValid) return
+        dispatch {
+            // Fails closed on a character deleted underneath an open screen, exactly as [addItem]
+            // does: the FK would reject the insert anyway, and checking is cheaper than catching.
+            dao.find(creatureId) ?: return@dispatch
+            val sortIndex = (dao.maxSortIndex(creatureId) ?: -1) + 1
+            dao.upsertRows(
+                listOf(
+                    LocalTrackerRowEntity(
+                        id = newRowId(),
+                        characterId = creatureId,
+                        kind = spec.kind.storedValue,
+                        label = spec.label.trim(),
+                        total = spec.uses,
+                        current = spec.uses,
+                        resetRule = spec.reset?.wireValue ?: LocalTrackerRowEntity.RESET_NONE,
+                        sortIndex = sortIndex,
+                        description = spec.description?.takeIf { it.isNotBlank() },
+                        catalogId = spec.catalogId,
+                        spellLevel = spec.spellLevel,
+                        higherLevels = spec.higherLevels?.takeIf { it.isNotBlank() },
+                        castingTime = spec.castingTime?.takeIf { it.isNotBlank() },
+                        range = spec.range?.takeIf { it.isNotBlank() },
+                        components = spec.components?.takeIf { it.isNotBlank() },
+                        duration = spec.duration?.takeIf { it.isNotBlank() },
+                        concentration = spec.concentration,
+                        ritual = spec.ritual,
+                        damage = spec.damage?.takeIf { it.isNotBlank() },
+                        properties = spec.properties?.takeIf { it.isNotBlank() },
+                    ),
+                ),
+            )
+            dao.touch(creatureId, now())
+            journal(TrackerWriteKind.ITEM_CREATE, spec.label.trim(), amount = 1, undo = null)
         }
     }
 
@@ -979,6 +1202,12 @@ class LocalOpenCharacter(
                 // branch below: floor a resource that no longer has one, or ceiling-clamp an item
                 // that never had a `total` worth clamping to.
                 val costIsItem = LocalRowKind.fromStored(costRow?.kind) == LocalRowKind.ITEM
+                // FR-49: the slot a cast spent, restored in the same transaction as the other two
+                // — see [Undoable.Use.slotRowId]. Re-read and ceiling-clamped like the uses row
+                // above and for the identical reason: the form is the editor, and a slot row's
+                // total can have been lowered between the cast and the undo. Never floor-only,
+                // because a slot always has a ceiling; that is what distinguishes it from an item.
+                val slotRow = entry.slotRowId?.let { dao.findRow(it) }
                 dao.useAction(
                     characterId = creatureId,
                     actionRowId = entry.actionRowId,
@@ -995,6 +1224,8 @@ class LocalOpenCharacter(
                     },
                     costIsItem = costIsItem,
                     at = now(),
+                    slotRowId = slotRow?.id,
+                    slotCurrent = entry.previousSlot?.coerceIn(0, slotRow?.total ?: 0),
                 )
             }
         }
@@ -1244,12 +1475,23 @@ class LocalOpenCharacter(
          * an item-turned-resource undone with `setRowQuantity` invents a ceiling the row never
          * had. `undoLastWrite` re-derives it from the row it re-reads instead, matching
          * [useAction]'s own write-time derivation rather than replaying a stale snapshot of it.
+         *
+         * @param slotRowId the SLOT row a **cast** spent (FR-49, 20 decision 4), or `null` for
+         *   every Use and for a cantrip, ritual or innate cast. Its own field rather than a second
+         *   `Undoable` filed beside the first, for this class's stated reason one row wider: the
+         *   write is one transaction over up to three rows, and an undo that put back the charge
+         *   but not the slot would leave the same broken pair, arrived at from the other
+         *   direction. All three, or none.
+         * @param previousSlot what that row read before the cast. `null` exactly when
+         *   [slotRowId] is.
          */
         data class Use(
             val actionRowId: String,
             val previousUses: Int?,
             val costRowId: String?,
             val previousCost: Int?,
+            val slotRowId: String? = null,
+            val previousSlot: Int? = null,
             override val writeId: Long = 0,
         ) : Undoable, Pending {
             override fun withWriteId(id: Long) = copy(writeId = id)

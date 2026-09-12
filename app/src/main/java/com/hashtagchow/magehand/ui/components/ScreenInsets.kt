@@ -1,10 +1,14 @@
 package com.hashtagchow.magehand.ui.components
 
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 
 /**
  * The content window insets that **every** screen-level `Scaffold` in this app must use.
@@ -46,3 +50,57 @@ import androidx.compose.runtime.Composable
  */
 val screenContentWindowInsets: WindowInsets
     @Composable get() = ScaffoldDefaults.contentWindowInsets.union(WindowInsets.ime)
+
+/**
+ * The bottom padding a screen must put **inside** its scrolling content when the last thing in
+ * that content is something the player taps.
+ *
+ * WHY THIS EXISTS (Defect 1, `docs/verification/sweep-1.17.0/summary.md`)
+ *
+ * FR-49 added two buttons to the local editor's kind-chooser footer, which took it from four
+ * buttons (one `FlowRow` line) to six (two). Scrolled to the absolute end, the second line came to
+ * rest against the bottom of the screen — the sweep's accessibility trace recorded a button with
+ * `boundsInScreen` bottom **2425 on a 2400 px display**, and taps Maestro computed as on-screen
+ * did not reach the button at all, because that strip belongs to the system's gesture navigation.
+ * No error, no row added; the player taps *Add spell* and nothing happens.
+ *
+ * WHY THE SCAFFOLD'S OWN INSETS WERE NOT ENOUGH
+ *
+ * [screenContentWindowInsets] is applied by the `Scaffold` and arrives as `innerPadding`, which
+ * the editor puts **outside** its `verticalScroll` — correct, and it is what stops the content
+ * starting under the status bar. What it cannot do is guarantee a resting position: the scroll's
+ * own maximum puts the last pixel of content at the last pixel of the viewport, and a system
+ * gesture region is not a rectangle content merely has to avoid *drawing* in — it is a region
+ * whose touches the app does not receive. So the guarantee has to be padding the scroll itself
+ * carries, which is what this is.
+ *
+ * `navigationBars` rather than `systemBars`: the top half is already handled and re-adding it
+ * inside the scroll would push the first field down for no reason. The margin on top of it is
+ * because the gesture strip is not the whole story — a touch that *starts* within a few dp of the
+ * edge can be claimed by the system's edge-swipe detector before the app sees it, so a control
+ * resting exactly at the inset's edge is still a control that sheds taps.
+ *
+ * Zero-inset devices (three-button navigation on some OEM builds, and Robolectric) get
+ * [FOOTER_TAP_MARGIN] alone, which is the floor this is allowed to reach.
+ */
+val scrollableFooterPadding: Dp
+    @Composable get() = footerBottomPadding(
+        WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding(),
+    )
+
+/**
+ * [scrollableFooterPadding]'s rule, as a pure function so it can be pinned without a device.
+ *
+ * @param navigationBarBottom the bottom inset the navigation bar claims, in dp.
+ */
+internal fun footerBottomPadding(navigationBarBottom: Dp): Dp =
+    navigationBarBottom + FOOTER_TAP_MARGIN
+
+/**
+ * The clearance between a tappable footer and the navigation bar.
+ *
+ * Not a design token and not tuned: it is one 24 dp step of the spacing this app already uses,
+ * chosen to be comfortably larger than the edge-swipe slop and small enough that it reads as the
+ * end of a form rather than as a gap. The number matters much less than its being non-zero.
+ */
+internal val FOOTER_TAP_MARGIN = 24.dp

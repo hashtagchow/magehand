@@ -549,13 +549,35 @@ sealed interface UseTarget {
         override val uses: ActionUses?,
         val level: Int,
         val ritual: Boolean,
+        /**
+         * Whether this spell's own charges are spent **instead of** a slot (FR-49,
+         * docs/design/20-local-spells-and-attacks.md decision 4's *innate* case).
+         *
+         * ### Why the question needs a field rather than `uses != null`
+         *
+         * On a **local** character the answer is knowable: a spell row with `total > 0` states
+         * *"this many castings"* and casts nothing else, because that is what the form collects.
+         * On a **DiceCloud** sheet it is not: a spell property carrying `uses` may be an innate
+         * casting that spends no slot, or an ordinary spell with a per-day cap that spends one
+         * anyway, and the document does not say which. Deriving this from [uses] would therefore
+         * have taken a guess on the server path — removing the upcast picker from every limited
+         * spell on a real sheet — to save a field on the one path that actually knows.
+         *
+         * So it is `false` by default and the server path never sets it, which leaves [needsSlot]
+         * exactly the `level > 0` it has always been there. `LocalActionBoard` sets it from the
+         * row's own `total`.
+         */
+        val spendsOwnUses: Boolean = false,
     ) : UseTarget {
         /**
          * Cantrips skip the picker (17 decision 3). Not because a cantrip has no slot it *could*
          * take — it is that spending one on a cantrip is never what a player meant, and a picker
          * whose only honest option is "none" is a dialog that exists to be dismissed.
+         *
+         * So does a spell that spends its own charges — see [spendsOwnUses], and 20 decision 4's
+         * `needsSlot = spellLevel > 0 && total == 0`.
          */
-        val needsSlot: Boolean get() = level > 0
+        val needsSlot: Boolean get() = level > 0 && !spendsOwnUses
     }
 }
 
@@ -616,6 +638,38 @@ data class SpellEntry(
     val inactive: Boolean = false,
     val castingTime: String? = null,
     val range: String? = null,
+    /**
+     * The spell's components — *"V, S, M (a tiny ball of bat guano and sulfur)"* — or `null`.
+     *
+     * ### Added by FR-49 for the *local* path, and null on every server row
+     *
+     * `ActionEngine` does not fill these two in: a DiceCloud spell carries its components and
+     * duration in fields 16 decision 4 never asked for, and reading them now would be a server
+     * behaviour change in a wave about local characters. They default to `null`, so every existing
+     * construction and every existing test says exactly what it said before.
+     *
+     * They are **fields** rather than a line folded into [summary], which was
+     * docs/design/20-local-spells-and-attacks.md decision 2's other option and is left on the
+     * table with its reason: `summary` is only ever *read* as the fallback half of
+     * `ActionDetailState.body` (`description ?: summary`), so a spell that has rules text — which
+     * is every catalog spell — would have shown its components nowhere at all. The builder's call
+     * D2 invites, recorded here: the detail sheet wants them separately, so they are separate.
+     */
+    val components: String? = null,
+    /** The spell's duration — *"Instantaneous"*, *"Concentration, up to 1 minute"*. See [components]. */
+    val duration: String? = null,
+    /**
+     * The *"Using a Higher-Level Spell Slot"* paragraph, verbatim, or `null` (FR-49, 20 decision 5).
+     *
+     * **Nothing is computed from it**, and there is nowhere in this type for a computation to be
+     * put — the same structural argument this class's KDoc makes about the missing hit bonus,
+     * applied to the other number a reader would be tempted to derive. A spell with no such
+     * paragraph is `null` and draws no heading.
+     *
+     * `null` on every server row for [components]' reason: `ActionEngine` does not read it, and
+     * making it do so is a separate question about a separate sheet.
+     */
+    val higherLevels: String? = null,
     /** `description.text`, plain. No markdown rendering in v1 (decision 4, recorded as polish). */
     val description: String? = null,
     /** `summary.text`, plain. */
@@ -626,6 +680,14 @@ data class SpellEntry(
     val cost: ActionCost = ActionCost.FREE,
     /** 17 decision 1's **Uses**, or `null` when the spell is not use-limited. */
     val uses: ActionUses? = null,
+    /**
+     * Whether [uses] are spent **instead of** a spell slot — see [UseTarget.Spell.spendsOwnUses],
+     * which carries the whole argument for why this is a field and not `uses != null`.
+     *
+     * `false` on every server row, so the upcast picker behaves on a DiceCloud sheet exactly as it
+     * did before FR-49.
+     */
+    val spendsOwnUses: Boolean = false,
     val sortOrder: Int = 0,
 ) {
     /**
@@ -694,6 +756,7 @@ data class SpellEntry(
                 uses = uses,
                 level = level,
                 ritual = ritual,
+                spendsOwnUses = spendsOwnUses,
             )
         }
 }
@@ -787,6 +850,32 @@ data class ActionEntry(
     val description: String? = null,
     val summary: String? = null,
     val damage: List<DamageLine> = emptyList(),
+    /**
+     * A **local** attack's damage as plain text — *"1d8 slashing"* — or `null`, which is every
+     * server row (FR-49, docs/design/20-local-spells-and-attacks.md decision 8).
+     *
+     * ### Why this is not a [DamageLine], stated where somebody would add one
+     *
+     * [damage] above is a list of *rollups*: a base the server computed, riders the server
+     * resolved, and a headline folded from both. Every number in one is an answer DiceCloud
+     * already worked out. A local character has no sheet, so there is no base to resolve, no
+     * effect to fold and no arithmetic that could be right — 20 decision 8 keeps attack bonuses,
+     * ability modifiers and proficiency off this path entirely, because inventing *"+5"* is the
+     * class of client arithmetic FR-36 shipped wrong.
+     *
+     * So the two coexist and neither is the other's fallback: a server weapon fills [damage] and
+     * leaves this null, a local attack fills this and leaves [damage] empty. The rendering differs
+     * to match — a rollup gets its riders itemised, this gets a `Fact`.
+     */
+    val damageText: String? = null,
+    /**
+     * A **local** attack's SRD property list as one string — *"Versatile (1d10), Heavy"* — or
+     * `null`, which is every server row. Rendered as a fact; see [damageText] for the argument.
+     *
+     * The string is also where [mastery] comes from on the local path: `LocalActionBoard` lifts a
+     * `Mastery: X` entry out of it rather than storing the word twice.
+     */
+    val properties: String? = null,
     /** 17 decision 1's **Cost**. [ActionCost.FREE] when the action consumes nothing. */
     val cost: ActionCost = ActionCost.FREE,
     /** 17 decision 1's **Uses**, or `null` when the action is not use-limited. */

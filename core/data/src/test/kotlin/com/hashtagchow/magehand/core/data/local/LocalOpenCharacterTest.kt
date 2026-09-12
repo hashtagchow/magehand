@@ -32,16 +32,19 @@ import com.hashtagchow.magehand.core.data.fake.FakeInventoryLayoutStore
 import com.hashtagchow.magehand.core.data.fake.FakePaneLayoutStore
 import com.hashtagchow.magehand.core.data.fake.FakeSelectedRollStore
 import com.hashtagchow.magehand.core.data.session.OpenCharacter
+import com.hashtagchow.magehand.core.model.CatalogSpell
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.ExactQuantity
 import com.hashtagchow.magehand.core.model.LocalRowKind
+import com.hashtagchow.magehand.core.model.NewLocalRowSpec
 import com.hashtagchow.magehand.core.model.ResetRule
 import com.hashtagchow.magehand.core.model.RestKind
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerOverride
 import com.hashtagchow.magehand.core.model.TrackerWriteKind
+import com.hashtagchow.magehand.core.model.spellSlotOptions
 
 /**
  * The intent surface of a local character (docs/design/09-local-characters.md decision 5).
@@ -158,6 +161,30 @@ class LocalOpenCharacterTest {
 
     private fun open(): LocalOpenCharacter =
         LocalOpenCharacter(characterId, dao, equippableOverrides, scope, now = { clock })
+
+    /**
+     * Suspends until [LocalOpenCharacter.board] and [LocalOpenCharacter.actions] have both caught
+     * up with what is in storage.
+     *
+     * Both are `stateIn(…, Eagerly)` over Room flows, so their *first* value is the EMPTY seed and
+     * the real one lands a dispatch later. Every write in this class re-reads storage inside its
+     * own critical section, so that gap has never mattered — except for FR-49's `castSpell`, which
+     * is the one method with a gate that reads the **live board** synchronously (17 decision 6's
+     * first gate; see its KDoc for why it can). Production cannot observe the gap, because a
+     * player can only tap a row that has rendered; a test calling `castSpell` on the line after
+     * `open()` very much can, and would be asserting against a board that has not loaded rather
+     * than against the rule under test.
+     *
+     * Derived from storage rather than passed in, so a test that adds a row to its fixture does
+     * not also have to remember to update a count here.
+     */
+    private suspend fun LocalOpenCharacter.awaitLoaded() {
+        val rows = dao.getRows(characterId)
+        val slots = rows.count { LocalRowKind.fromStored(it.kind) == LocalRowKind.SLOT }
+        val spells = rows.count { LocalRowKind.fromStored(it.kind) == LocalRowKind.SPELL }
+        board.first { it.hp != null && it.slots.size == slots }
+        actions.first { it.spells.size == spells }
+    }
 
     // --- posture ------------------------------------------------------------
 
@@ -903,6 +930,83 @@ class LocalOpenCharacterTest {
     )
 
     /**
+     * A **spell** row (FR-49, docs/design/20-local-spells-and-attacks.md decision 2).
+     *
+     * `uses = 0` is unlimited — the ACTION convention these kinds reuse — which for a leveled
+     * spell means *"cast from a slot"*, so the default builds the ordinary slot-casting spell that
+     * most of the tests below are about. A non-zero [uses] makes it decision 4's **innate** case.
+     */
+    private fun spellRow(
+        id: String = "spell",
+        level: Int,
+        label: String = "Fireball",
+        uses: Int = 0,
+        usesLeft: Int = uses,
+        reset: ResetRule? = null,
+        ritual: Boolean = false,
+        costRowId: String? = null,
+        costAmount: Int? = null,
+        sortIndex: Int = 0,
+    ) = LocalTrackerRowEntity(
+        id = id,
+        characterId = characterId,
+        kind = LocalRowKind.SPELL.storedValue,
+        label = label,
+        total = uses,
+        current = usesLeft,
+        resetRule = reset?.wireValue ?: LocalTrackerRowEntity.RESET_NONE,
+        sortIndex = sortIndex,
+        costRowId = costRowId,
+        costAmount = costAmount,
+        spellLevel = level,
+        ritual = ritual,
+    )
+
+    /** An **attack** row — damage and properties as text, per 20 decision 8. */
+    private fun attackRow(
+        id: String = "attack",
+        uses: Int = 0,
+        usesLeft: Int = uses,
+        reset: ResetRule? = null,
+        sortIndex: Int = 0,
+    ) = LocalTrackerRowEntity(
+        id = id,
+        characterId = characterId,
+        kind = LocalRowKind.ATTACK.storedValue,
+        label = "Longsword",
+        total = uses,
+        current = usesLeft,
+        resetRule = reset?.wireValue ?: LocalTrackerRowEntity.RESET_NONE,
+        sortIndex = sortIndex,
+        damage = "1d8 / 1d10 slashing",
+        properties = "Versatile (1d10), Mastery: Sap",
+    )
+
+    /**
+     * A **slot** row with decision 3's level.
+     *
+     * [level] is nullable on purpose: a migrated row whose label carried no leading ordinal has
+     * none, and that row has to keep working as a pip row while being refused as a cast source.
+     */
+    private fun slotRow(
+        id: String,
+        level: Int?,
+        total: Int,
+        current: Int = total,
+        sortIndex: Int = 0,
+    ) = LocalTrackerRowEntity(
+        id = id,
+        characterId = characterId,
+        kind = LocalRowKind.SLOT.storedValue,
+        label = level?.let { "$it Level" } ?: "Pact Magic",
+        total = total,
+        current = current,
+        resetRule = ResetRule.LONG_REST.wireValue,
+        sortIndex = sortIndex,
+        spellLevel = level,
+    )
+
+    /**
      * Decision 3: 16 decision 1's *"no local model"* exclusion is retired, and the surface is
      * gated on discovery instead.
      *
@@ -1148,21 +1252,451 @@ class LocalOpenCharacterTest {
         assertTrue(character.writeHistory.value.single().undoable)
     }
 
+    // --- FR-49: casting (docs/design/20-local-spells-and-attacks.md decision 4) --------------
+
     /**
-     * A **spell** cast has no meaning here and stays the no-op FR-28 decision 10 made it.
+     * A **slot cast** spends the chosen slot and nothing else, and the undo puts it back.
      *
-     * `LocalActionBoard` emits no spells, so nothing can reach it — this pins that FR-29 gave the
-     * local path an action model and deliberately not a spell one (18 decision 1's scope).
+     * The write and its inverse in one test on purpose: decision 4 asks for a cast to be *"one
+     * Room write, journalled and **undoable** like `useAction`"*, and asserting only the spend
+     * would leave the half that FR-29's own Use test had to state separately — a journal entry
+     * that claims to be undoable and restores nothing.
      */
     @Test
-    fun `castSpell is still a silent no-op with no action model behind it`() = runTest {
+    fun `a slot cast spends the chosen slot and undo puts it back`() = runTest {
+        seed(
+            rows = listOf(
+                spellRow(level = 3),
+                slotRow("slot-3", level = 3, total = 2, current = 2, sortIndex = 1),
+            ),
+        )
+        val character = open()
+        character.awaitLoaded()
+
+        assertTrue(character.castSpell("spell", "slot-3", ritual = false))
+        character.awaitIdle()
+
+        assertEquals("one slot spent", 1, dao.findRow("slot-3")?.current)
+        assertEquals("the spell row has no charges of its own to spend", 0, dao.findRow("spell")?.current)
+        with(character.writeHistory.value.single()) {
+            assertEquals(TrackerWriteKind.CAST_SPELL, kind)
+            assertEquals("Fireball", targetName)
+            assertTrue("a local cast has no external side effects, so it is undoable", undoable)
+        }
+
+        assertTrue(character.undoLastWrite())
+        assertEquals("the slot is back", 2, dao.findRow("slot-3")?.current)
+    }
+
+    /**
+     * The picker offers the **cheapest legal** slot first, and a cast may take a bigger one — the
+     * upcast this feature is named for.
+     *
+     * Asserted through `spellSlotOptions` as well as through the write, because the two have to
+     * agree about what is offerable: a board that offered a level-1 slot for a level-3 spell would
+     * produce a cast this method then refuses, which is a dialog that fails on Confirm.
+     */
+    @Test
+    fun `a level 3 spell can be upcast from a level 5 slot and never from a level 1 one`() = runTest {
+        seed(
+            rows = listOf(
+                spellRow(level = 3),
+                slotRow("slot-1", level = 1, total = 4, current = 4, sortIndex = 1),
+                slotRow("slot-5", level = 5, total = 1, current = 1, sortIndex = 2),
+            ),
+        )
+        val character = open()
+        character.awaitLoaded()
+
+        assertEquals(
+            "only the level-5 slot is big enough",
+            listOf("slot-5"),
+            spellSlotOptions(character.board.value.slots, spellLevel = 3).map { it.propertyId },
+        )
+
+        assertFalse(
+            "a slot too small is refused before anything is dispatched",
+            character.castSpell("spell", "slot-1", ritual = false),
+        )
+        character.awaitIdle()
+        assertEquals("nothing was spent", 4, dao.findRow("slot-1")?.current)
+        assertTrue(character.writeHistory.value.isEmpty())
+
+        assertTrue(character.castSpell("spell", "slot-5", ritual = false))
+        character.awaitIdle()
+        assertEquals(0, dao.findRow("slot-5")?.current)
+    }
+
+    /**
+     * Decision 4's three refusals, each returning `false` rather than dispatching a silent no-op.
+     *
+     * This is the one method in the class that can answer synchronously, and the KDoc argues why:
+     * the check reads `board`/`actions`, which are already in memory, so it is 17 decision 6's
+     * *"validate ids against the live board before calling"* available for once without a Room
+     * read. Each clause is asserted separately because each is a different way a dialog could have
+     * constructed an impossible cast.
+     */
+    @Test
+    fun `a cast naming a missing, level-less or empty slot is refused`() = runTest {
+        seed(
+            rows = listOf(
+                spellRow(level = 2),
+                slotRow("slot-none", level = null, total = 3, current = 3, sortIndex = 1),
+                slotRow("slot-empty", level = 5, total = 3, current = 0, sortIndex = 2),
+            ),
+        )
+        val character = open()
+        character.awaitLoaded()
+
+        assertFalse("no such row", character.castSpell("spell", "nope", ritual = false))
+        assertFalse("no slot chosen at all", character.castSpell("spell", null, ritual = false))
+        assertFalse(
+            "a slot with no level cannot be matched against the spell's",
+            character.castSpell("spell", "slot-none", ritual = false),
+        )
+        assertFalse("nothing left in it", character.castSpell("spell", "slot-empty", ritual = false))
+        assertFalse("no such spell", character.castSpell("ghost", "slot-empty", ritual = false))
+
+        character.awaitIdle()
+        assertTrue("not one of them reached the journal", character.writeHistory.value.isEmpty())
+        assertEquals(3, dao.findRow("slot-none")?.current)
+    }
+
+    /**
+     * A **cantrip** spends nothing and is still journalled — decision 4's first bullet, both
+     * halves.
+     *
+     * The entry is deliberately **not** undoable: nothing moved, so an UNDO offered for it would
+     * be a button that does nothing. That is the same rule `addItem` follows from the other
+     * direction, and it is the half most likely to be "fixed" into an inverse that restores a
+     * value nobody spent.
+     */
+    @Test
+    fun `a cantrip spends nothing, is journalled, and offers no undo`() = runTest {
+        seed(
+            rows = listOf(
+                spellRow(level = 0, label = "Light"),
+                slotRow("slot-1", level = 1, total = 4, current = 4, sortIndex = 1),
+            ),
+        )
+        val character = open()
+        character.awaitLoaded()
+
+        assertTrue(character.castSpell("spell", "slot-1", ritual = false))
+        character.awaitIdle()
+
+        assertEquals("a cantrip never touches a slot", 4, dao.findRow("slot-1")?.current)
+        with(character.writeHistory.value.single()) {
+            assertEquals(TrackerWriteKind.CAST_SPELL, kind)
+            assertEquals("Light", targetName)
+            assertFalse("nothing moved, so there is nothing to put back", undoable)
+        }
+    }
+
+    /**
+     * A **ritual** cast of a leveled spell spends no slot — decision 4's *"ritual cast … spends
+     * nothing"* — and only when the row actually says it is a ritual.
+     *
+     * The second half is what stops the checkbox becoming a free-cast button: `ritual = true` on a
+     * spell whose own flag is false spends the slot exactly as an ordinary cast does, because the
+     * player asking for a ritual does not make the spell one.
+     */
+    @Test
+    fun `a ritual cast spends no slot, and only on a spell that is one`() = runTest {
+        seed(
+            rows = listOf(
+                spellRow(level = 1, ritual = true),
+                spellRow(id = "plain", level = 1, ritual = false, sortIndex = 1),
+                slotRow("slot-1", level = 1, total = 4, current = 4, sortIndex = 2),
+            ),
+        )
+        val character = open()
+        character.awaitLoaded()
+
+        assertTrue(character.castSpell("spell", "slot-1", ritual = true))
+        character.awaitIdle()
+        assertEquals("a ritual spends nothing", 4, dao.findRow("slot-1")?.current)
+
+        assertTrue(character.castSpell("plain", "slot-1", ritual = true))
+        character.awaitIdle()
+        assertEquals("asking for a ritual does not make a spell one", 3, dao.findRow("slot-1")?.current)
+    }
+
+    /**
+     * A **cantrip with a cost row** deducts the cost, and the UNDO puts it back — M3 [architect
+     * ruling, 2026-09-12].
+     *
+     * The `castSpell` KDoc used to say a cantrip *"spends nothing … No inverse is filed"*, flat,
+     * which the code has never done: decision 2 lets a spell of any level carry `costRowId`, and
+     * `SpellEntry.isUsable` already refuses the Use outright when `CostLine.satisfied` is false.
+     * So the player has been shown a cost and refused the cast without it; taking the cost is the
+     * only behaviour that agrees with the button they pressed. The ruling is that the **code** was
+     * right, and this is the case that stops the KDoc's version being "restored" later.
+     *
+     * The undo half is the other side of the same fact: something moved, so there is something to
+     * put back, and the entry offers UNDO — unlike the free cantrip one test above.
+     */
+    @Test
+    fun `a cantrip with a cost row deducts the cost, undoably`() = runTest {
+        seed(
+            rows = listOf(
+                spellRow(level = 0, label = "Light", costRowId = "ki", costAmount = 2),
+                slotRow("slot-1", level = 1, total = 4, current = 4, sortIndex = 1),
+                rowEntity("ki", total = 5, current = 5, sortIndex = 2),
+            ),
+        )
+        val character = open()
+        character.awaitLoaded()
+
+        assertTrue(character.castSpell("spell", "slot-1", ritual = false))
+        character.awaitIdle()
+
+        assertEquals("a cantrip still takes its cost", 3, dao.findRow("ki")?.current)
+        assertEquals("but never a slot", 4, dao.findRow("slot-1")?.current)
+        assertEquals("and has no charge of its own to take", 0, dao.findRow("spell")?.current)
+        with(character.writeHistory.value.single()) {
+            assertEquals(TrackerWriteKind.CAST_SPELL, kind)
+            assertEquals("Light", targetName)
+            assertTrue("something moved, so there is something to put back", undoable)
+        }
+
+        assertTrue(character.undoLastWrite())
+        assertEquals(5, dao.findRow("ki")?.current)
+        assertEquals("the undo invents no slot charge either", 4, dao.findRow("slot-1")?.current)
+    }
+
+    /**
+     * A **ritual cast with a cost row** does the same: no slot, no charge, the cost — and an UNDO.
+     *
+     * The ritual path reaches the cost through a different branch from the cantrip one
+     * (`ritualCast` rather than `spell.level == 0`), so one case does not cover the other. M3
+     * [architect ruling, 2026-09-12].
+     */
+    @Test
+    fun `a ritual cast with a cost row deducts the cost, undoably`() = runTest {
+        seed(
+            rows = listOf(
+                spellRow(level = 1, ritual = true, costRowId = "ki", costAmount = 2),
+                slotRow("slot-1", level = 1, total = 4, current = 4, sortIndex = 1),
+                rowEntity("ki", total = 5, current = 5, sortIndex = 2),
+            ),
+        )
+        val character = open()
+        character.awaitLoaded()
+
+        assertTrue(character.castSpell("spell", "slot-1", ritual = true))
+        character.awaitIdle()
+
+        assertEquals("the ritual still takes its cost", 3, dao.findRow("ki")?.current)
+        assertEquals("and spends no slot", 4, dao.findRow("slot-1")?.current)
+        assertTrue(character.writeHistory.value.single().undoable)
+
+        assertTrue(character.undoLastWrite())
+        assertEquals(5, dao.findRow("ki")?.current)
+        assertEquals(4, dao.findRow("slot-1")?.current)
+    }
+
+    /**
+     * An **innate** spell (`total > 0`) spends its own use and its cost row, and ignores the
+     * slot — decision 4's second bullet.
+     *
+     * The cost half matters: decision 2 allows `costRowId` on a spell (*"a warlock's invocation
+     * costing a resource row"*), so a cast has to be `useAction`'s transaction with a different
+     * label rather than a narrower write that forgot the cost.
+     */
+    @Test
+    fun `an innate spell spends its own use and its cost row, not a slot`() = runTest {
+        seed(
+            rows = listOf(
+                spellRow(level = 1, uses = 2, costRowId = "ki", costAmount = 2),
+                slotRow("slot-1", level = 1, total = 4, current = 4, sortIndex = 1),
+                rowEntity("ki", total = 5, current = 5, sortIndex = 2),
+            ),
+        )
+        val character = open()
+        character.awaitLoaded()
+
+        assertTrue(character.castSpell("spell", "slot-1", ritual = false))
+        character.awaitIdle()
+
+        assertEquals("its own charge", 1, dao.findRow("spell")?.current)
+        assertEquals("and its cost", 3, dao.findRow("ki")?.current)
+        assertEquals("the slot is untouched", 4, dao.findRow("slot-1")?.current)
+
+        assertTrue(character.undoLastWrite())
+        assertEquals("both halves, one transaction", 2, dao.findRow("spell")?.current)
+        assertEquals(5, dao.findRow("ki")?.current)
+    }
+
+    /** An innate spell with no charges left refuses, silently, at the second gate. */
+    @Test
+    fun `an exhausted innate spell casts nothing`() = runTest {
+        seed(rows = listOf(spellRow(level = 1, uses = 1, usesLeft = 0)))
+        val character = open()
+        character.awaitLoaded()
+
+        // Accepted for dispatch — the gate that can answer synchronously is about the slot, and
+        // an innate spell names none. The charge check is the Room-side gate, so the refusal is a
+        // silent no-op exactly as `useAction`'s is.
+        assertTrue(character.castSpell("spell", null, ritual = false))
+        character.awaitIdle()
+
+        assertEquals(0, dao.findRow("spell")?.current)
+        assertTrue("nothing happened, so nothing is journalled", character.writeHistory.value.isEmpty())
+    }
+
+    /**
+     * A cast that lands **on a row of another character** refuses, exactly as a use does.
+     *
+     * `findRow` is keyed on the row id alone (see the DAO), and a cast writes up to three rows —
+     * which is the most expensive transaction in this class and therefore the one worth stating
+     * the scoping check on explicitly rather than inheriting it from the board.
+     */
+    @Test
+    fun `a cast cannot spend another character's slot`() = runTest {
+        seed(rows = listOf(spellRow(level = 1)))
+        dao.save(
+            LocalCharacterEntity(
+                id = "other",
+                name = "Someone else",
+                level = 1,
+                strength = 10, dexterity = 10, constitution = 10,
+                intelligence = 10, wisdom = 10, charisma = 10,
+                maxHp = 10, currentHp = 10, armorClass = 10,
+                createdAt = 1, updatedAt = 1,
+            ),
+            listOf(
+                LocalTrackerRowEntity(
+                    id = "their-slot",
+                    characterId = "other",
+                    kind = LocalRowKind.SLOT.storedValue,
+                    label = "1st Level",
+                    total = 3,
+                    current = 3,
+                    resetRule = ResetRule.LONG_REST.wireValue,
+                    sortIndex = 0,
+                    spellLevel = 1,
+                ),
+            ),
+        )
+        val character = open()
+        character.awaitLoaded()
+
+        assertFalse(
+            "their slot is not on this character's board, so the first gate refuses it",
+            character.castSpell("spell", "their-slot", ritual = false),
+        )
+        character.awaitIdle()
+        assertEquals(3, dao.findRow("their-slot")?.current)
+    }
+
+    /**
+     * An **attack** row with uses goes through `useAction` unchanged — 20 decision 8's *"with
+     * uses it is FR-29's Use"* — and a **spell** row does not.
+     *
+     * The second half is the gate that matters: a spell's cast spends a slot, and letting
+     * `useAction` decrement its `current` would be a second, slot-less cast path reachable with
+     * nothing but an id.
+     */
+    @Test
+    fun `useAction spends an attack's uses and refuses a spell row outright`() = runTest {
+        seed(
+            rows = listOf(
+                attackRow(uses = 2),
+                spellRow(level = 1, uses = 2, sortIndex = 1),
+            ),
+        )
+        val character = open()
+
+        character.useAction("attack")
+        character.awaitIdle()
+        assertEquals("an attack with uses is an ordinary Use", 1, dao.findRow("attack")?.current)
+
+        character.useAction("spell")
+        character.awaitIdle()
+        assertEquals("a spell is cast, never used", 2, dao.findRow("spell")?.current)
+        assertEquals(1, character.writeHistory.value.size)
+    }
+
+    /**
+     * The Add sheet's write (20 decision 6): one row, at the end of the list, with every field
+     * copied off the spec — and **not** undoable, for `addItem`'s stated reason.
+     */
+    @Test
+    fun `addActionRow appends a spell row carrying every field of the spec`() = runTest {
         seed(rows = listOf(rowEntity("rage", total = 3)))
         val character = open()
 
-        assertTrue(character.castSpell("anything", null, false))
+        character.addActionRow(
+            NewLocalRowSpec.ofSpell(
+                CatalogSpell(
+                    id = "fireball",
+                    name = "Fireball",
+                    level = 3,
+                    school = "Evocation",
+                    castingTime = "1 action",
+                    range = "150 feet",
+                    components = "V, S, M",
+                    duration = "Instantaneous",
+                    concentration = false,
+                    ritual = false,
+                    description = "A bright streak flashes from your pointing finger.",
+                    higherLevels = "The damage increases by 1d6 for each slot level above 3rd.",
+                ),
+            ),
+        )
         character.awaitIdle()
 
+        val row = dao.getRows(characterId).last()
+        assertEquals(LocalRowKind.SPELL.storedValue, row.kind)
+        assertEquals("Fireball", row.label)
+        assertEquals(3, row.spellLevel)
+        assertEquals("1 action", row.castingTime)
+        assertEquals("150 feet", row.range)
+        assertEquals("V, S, M", row.components)
+        assertEquals("Instantaneous", row.duration)
+        assertEquals("The damage increases by 1d6 for each slot level above 3rd.", row.higherLevels)
+        assertEquals("provenance is kept; the row is still self-contained", "fireball", row.catalogId)
+        assertEquals("added at the end of the player's own order", 1, row.sortIndex)
+        assertFalse(
+            "the inverse would be a hard delete through a snackbar — see the KDoc",
+            character.writeHistory.value.single().undoable,
+        )
+    }
+
+    /** An invalid spec writes nothing at all — the same shape `addItem` has. */
+    @Test
+    fun `addActionRow refuses a spell with no level and a row with no label`() = runTest {
+        seed()
+        val character = open()
+
+        character.addActionRow(NewLocalRowSpec(kind = LocalRowKind.SPELL, label = "Nameless level"))
+        character.addActionRow(NewLocalRowSpec(kind = LocalRowKind.ATTACK, label = "   "))
+        character.awaitIdle()
+
+        assertTrue(dao.getRows(characterId).isEmpty())
         assertTrue(character.writeHistory.value.isEmpty())
+    }
+
+    /** A spell row's uses refill on the rest its reset rule names, exactly as an action's do. */
+    @Test
+    fun `a rest refills a spell row's uses`() = runTest {
+        seed(
+            rows = listOf(
+                spellRow(level = 1, uses = 3, usesLeft = 1, reset = ResetRule.LONG_REST),
+                attackRow(uses = 2, usesLeft = 0, reset = ResetRule.SHORT_REST, sortIndex = 1),
+            ),
+        )
+        val character = open()
+
+        character.rest(RestKind.SHORT)
+        character.awaitIdle()
+        assertEquals("short rest leaves the long-rest spell alone", 1, dao.findRow("spell")?.current)
+        assertEquals(2, dao.findRow("attack")?.current)
+
+        character.rest(RestKind.LONG)
+        character.awaitIdle()
+        assertEquals(3, dao.findRow("spell")?.current)
     }
 
     /**

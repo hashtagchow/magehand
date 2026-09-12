@@ -1455,15 +1455,21 @@ class CharacterHomeViewModel @Inject constructor(
          */
         const val LOG_ERROR_NAME = "error"
 
-        /**
-         * Distinct ids, so two refusals in a row produce two snackbars rather than one.
-         *
-         * [A3] Starts at a billion, not 0: `OpenCharacter.kt`'s own `FAILURE_IDS` is a
-         * SEPARATE `AtomicLong(0)` counting real write failures, and [TrackerWriteFailure.id]
-         * is a Compose key two different counters both starting at 0 would happily collide on
-         * — a real failure and a dropped use minted the same frame could compare equal and
-         * fail to animate twice. Disjoint ranges cost nothing and remove the coincidence.
-         */
-        val USE_ERROR_IDS = java.util.concurrent.atomic.AtomicLong(1_000_000_000L)
     }
 }
+
+/**
+ * Distinct ids, so two refusals in a row produce two snackbars rather than one.
+ *
+ * [A3] Starts at a billion, not 0: `OpenCharacter.kt`'s own `FAILURE_IDS` is a SEPARATE
+ * `AtomicLong(0)` counting real write failures, and [TrackerWriteFailure.id] is a Compose key two
+ * different counters both starting at 0 would happily collide on — a real failure and a dropped
+ * use minted the same frame could compare equal and fail to animate twice. Disjoint ranges cost
+ * nothing and remove the coincidence.
+ *
+ * Top-level and `internal` since L1 [review, 2026-09-12], rather than a member of this class's
+ * private companion: `LocalCharacterHomeViewModel` mints the same kind of failure for the same
+ * reason, and giving it a counter of its own would be a *third* `AtomicLong` in the range this
+ * KDoc exists to keep disjoint.
+ */
+internal val USE_ERROR_IDS = java.util.concurrent.atomic.AtomicLong(1_000_000_000L)

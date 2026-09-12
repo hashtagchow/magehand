@@ -161,8 +161,38 @@ android {
         // move.** The contract describes the shapes DiceCloud publishes and which of them the
         // engine acts on; both are exactly what they were. What changed is that the app stopped
         // mis-transcribing one of them.
-        versionCode = 29
-        versionName = "1.16.0"
+        // 28 / 1.15.0 and 29 / 1.16.0 bumped these two lines without adding an entry here;
+        // their reasons live in HANDOVER.md's ship records (FR-44's limited-use abilities on
+        // the tracker, FR-47's weapon mastery on the Actions tab). Recorded rather than
+        // back-filled: a version comment written a week late is a reconstruction, and the ship
+        // records are the primary source.
+        // 30 / 1.17.0 carries FR-49 — a *local* character can hold spells and attacks — with
+        // BUG-23 riding along. A **MINOR**, by the boundary 25 drew and 26 applied: a surface
+        // gains a capability, and this one gains several. The local Actions tab is always
+        // present now and owns an Add; the bundled SRD catalogs behind it (319 spells at 5.1,
+        // 38 weapons at 5.2.1, CC-BY-4.0, attributed in Settings) are a **template, not the
+        // truth** — a pick pre-fills a form whose every field is editable before and after
+        // save; a local SLOT row carries a level, so the server path's own upcast picker
+        // (17 decision 3) offers it unchanged; and `castSpell` is a real, journaled, undoable
+        // Room write where 09 had it as a documented no-op. Room goes **v7 → v8**, additively —
+        // eleven new `local_tracker_rows` columns and a back-fill that reads a slot label's
+        // leading ordinal — with the exported `8.json` and a migration test. That makes the
+        // rollback test the 25 entry introduced sharper here than it has been: the stored kinds
+        // `"spell"` / `"attack"` are values no earlier build has ever seen, and a 1.16.0 cannot
+        // read a spell row at all. Not a MAJOR: no existing row is reshaped, nothing a DiceCloud
+        // character does changes, and the app still **computes nothing** from a spell's
+        // higher-level paragraph — R5 has it shown, never read. The contract is untouched and
+        // `schemaVersion` stays **8**, because WebHand has no local characters and so there is
+        // nothing here to publish; `exportContract` re-runs at the bump with byte-identical
+        // discovery vectors but for the manifest's `sourceCommit`/`generatedOn` stamp.
+        // BUG-23 rides along and does not move the boundary. `LocalCharacterRepository.save`
+        // rebuilt the whole character from the form and named only `currentHp` and `createdAt`
+        // off the existing row, so the four FR-13 coin columns and the two FR-16 death-save
+        // counters took their Room defaults on every edit: a rename emptied a wallet and cleared
+        // the marks, silently. A save that stops destroying data is a correction to what a
+        // screen already did, which is 26's case exactly.
+        versionCode = 30
+        versionName = "1.17.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -82,6 +83,17 @@ import com.hashtagchow.magehand.ui.theme.hyphenated
  *
  * This is a judgment call and it is recorded as one: the design says "collapsible", not
  * "persisted", and nothing in 16 asks for the state to outlive the screen.
+ *
+ * ### FR-49: one more callback, and it is `null` on a DiceCloud character
+ *
+ * docs/design/20-local-spells-and-attacks.md decisions 1 and 6 put an **Add** on this surface for
+ * an on-device character — the top-bar action and the empty state's button being *"one handler"*.
+ * [onAdd] is that handler, and its nullability is the gate rather than a convenience: a DiceCloud
+ * character's spells come from their sheet and this app does not write one, so there is nothing an
+ * Add could do there and the control must not exist. `CharacterHomeScreen` passes nothing;
+ * `LocalCharacterHomeScreen` passes the sheet-opener.
+ *
+ * @param onAdd opens the add sheet, or `null` on a character that cannot have rows added to it.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -89,6 +101,7 @@ fun ActionsScreen(
     state: ActionsUiState,
     onUse: (UseTarget, String?, Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    onAdd: (() -> Unit)? = null,
 ) {
     var collapsedKeys by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -109,7 +122,7 @@ fun ActionsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (shown.isEmpty) {
-            item { EmptyActions() }
+            item { EmptyActions(onAdd = onAdd) }
             return@LazyColumn
         }
 
@@ -286,6 +299,14 @@ private fun ActionEntryRow(entry: ActionEntry, onClick: () -> Unit, modifier: Mo
         }
         uses?.let { SubText(it) }
         DamageLines(entry.damage)
+        // FR-49 (20 decision 8): a LOCAL attack's damage and properties, as text. Below the
+        // rollups rather than merged with them, and never both — `damage` is a server list and
+        // these two are a local row's own strings, so a row has one or the other by construction
+        // (see `ActionEntry.damageText`). Two lines rather than one joined by " · ", because a
+        // property list is already a comma-separated sentence and a third separator inside it
+        // reads as punctuation the SRD did not write.
+        entry.damageText?.let { SubText(it) }
+        entry.properties?.let { SubText(it) }
     }
 }
 
@@ -597,15 +618,27 @@ private fun NoMatches(query: String, modifier: Modifier = Modifier) {
 }
 
 /**
- * The empty state.
+ * The empty state — and, on an on-device character, the one place a brand-new character can get
+ * its first spell (FR-49, 20 decision 1).
  *
- * Reachable in one narrow window only — the surface is discovery-gated, so a character with
- * nothing to act with has no Actions tab at all (decision 1). What remains is the beat between
- * the screen opening and the board arriving, and a live edit that removes the last spell while
- * the tab is open. Both deserve a sentence rather than a blank column.
+ * ### Two states wearing one composable, and the difference is [onAdd]
+ *
+ * On a **DiceCloud** character this is reachable in one narrow window only: the surface is
+ * discovery-gated, so a character with nothing to act with has no Actions tab at all (16 decision
+ * 1). What remains is the beat between the screen opening and the board arriving, and a live edit
+ * that removes the last spell while the tab is open. Both deserve a sentence rather than a blank
+ * column, and a sentence is all they get — there is no Add, because there is nothing an Add could
+ * do to a sheet this app does not write.
+ *
+ * On an **on-device** character it is the ordinary first sight of the tab, because 20 decision 1
+ * retires the gate: every local character has an Actions tab from the moment it is created. So the
+ * copy is different (`actions_empty_local_hint` says what to do rather than reporting on a sheet)
+ * and the button is here. Decision 1 asks for *"a short line plus the **Add** control"*, and
+ * decision 6 for the top-bar action and this button to be **one handler** — which they are,
+ * because both are [onAdd].
  */
 @Composable
-private fun EmptyActions(modifier: Modifier = Modifier) {
+private fun EmptyActions(modifier: Modifier = Modifier, onAdd: (() -> Unit)? = null) {
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -618,11 +651,24 @@ private fun EmptyActions(modifier: Modifier = Modifier) {
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                text = stringResource(R.string.actions_empty_hint),
+                text = stringResource(
+                    if (onAdd == null) R.string.actions_empty_hint else R.string.actions_empty_local_hint,
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag("actions:empty"),
             )
+            onAdd?.let {
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = it,
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("actions:add:empty"),
+                ) {
+                    Text(stringResource(R.string.actions_add))
+                }
+            }
         }
     }
 }
