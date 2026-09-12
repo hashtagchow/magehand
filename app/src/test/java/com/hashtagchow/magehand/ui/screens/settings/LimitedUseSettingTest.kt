@@ -57,6 +57,7 @@ class LimitedUseSettingTest {
             SettingsScreen(
                 onBack = {},
                 onSignedOut = {},
+                appVersion = AppVersion("0.0.0", 0),
                 viewModel = SettingsViewModel(
                     accountRepository = FakeAccounts(),
                     appSettingsStore = settings,

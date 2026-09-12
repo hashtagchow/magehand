@@ -18,6 +18,7 @@ import com.hashtagchow.magehand.ui.screens.dmview.DmCardAvailability
 import com.hashtagchow.magehand.ui.screens.dmview.DmCardUiState
 import com.hashtagchow.magehand.ui.screens.login.CredentialsScreen
 import com.hashtagchow.magehand.ui.screens.login.CredentialsViewModel
+import com.hashtagchow.magehand.ui.screens.settings.AppVersion
 import com.hashtagchow.magehand.ui.screens.settings.SettingsScreen
 import com.hashtagchow.magehand.ui.screens.settings.SettingsViewModel
 import com.hashtagchow.magehand.ui.testing.FakeAccounts
@@ -168,7 +169,19 @@ class ScreensGoldenTest {
         )
 
         compose.captureGolden("SettingsScreen") {
-            SettingsScreen(onBack = {}, onSignedOut = {}, viewModel = viewModel)
+            // The version is stubbed (BUG-24). The About section takes its version line as a
+            // parameter instead of reading `BuildConfig`, so this picture pins that section's
+            // layout and its attribution sentences and *not* the build number. It used to read
+            // `BuildConfig`, which made every `versionCode`/`versionName` bump fail
+            // `verifyRoborazziDebug` — step 3 of the release script — on its own; the 29 → 30 bump
+            // did exactly that and had to be re-recorded mid-release. A bump must not move this
+            // golden, and with a constant here it cannot.
+            SettingsScreen(
+                onBack = {},
+                onSignedOut = {},
+                appVersion = AppVersion("0.0.0", 0),
+                viewModel = viewModel,
+            )
         }
     }
 

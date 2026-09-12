@@ -12,6 +12,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navigation
+import com.hashtagchow.magehand.BuildConfig
 import com.hashtagchow.magehand.ui.screens.characterhome.CharacterCreatorScreen
 import com.hashtagchow.magehand.ui.screens.characterhome.CharacterHomeScreen
 import com.hashtagchow.magehand.ui.screens.characterlist.CharacterListScreen
@@ -19,6 +20,7 @@ import com.hashtagchow.magehand.ui.screens.dmview.DmViewScreen
 import com.hashtagchow.magehand.ui.screens.local.LocalCharacterEditorScreen
 import com.hashtagchow.magehand.ui.screens.local.LocalCharacterHomeScreen
 import com.hashtagchow.magehand.ui.screens.login.CredentialsScreen
+import com.hashtagchow.magehand.ui.screens.settings.AppVersion
 import com.hashtagchow.magehand.ui.screens.settings.SettingsScreen
 
 /**
@@ -192,6 +194,10 @@ fun MageHandNavHost(
             composable<Settings> {
                 SettingsScreen(
                     onBack = { navController.popBackStack() },
+                    // The production source of the About section's version line, and the only
+                    // `BuildConfig` read behind it: the screen takes the value so that the
+                    // Settings golden can pin a constant instead of the build number (BUG-24).
+                    appVersion = AppVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE),
                     onSignedOut = {
                         navController.navigate(LoginGraph) {
                             popUpTo(MainGraph) { inclusive = true }

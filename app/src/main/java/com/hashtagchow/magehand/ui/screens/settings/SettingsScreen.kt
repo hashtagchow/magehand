@@ -41,7 +41,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.hashtagchow.magehand.BuildConfig
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.data.catalog.CatalogProvenance
 import com.hashtagchow.magehand.core.data.settings.UiScale
@@ -73,6 +72,7 @@ internal val SETTINGS_HORIZONTAL_PADDING = 24.dp
 fun SettingsScreen(
     onBack: () -> Unit,
     onSignedOut: () -> Unit,
+    appVersion: AppVersion,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
@@ -234,7 +234,7 @@ fun SettingsScreen(
 
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
 
-            AboutSection()
+            AboutSection(appVersion = appVersion)
         }
     }
 
@@ -524,6 +524,14 @@ internal fun uiScaleValueDescription(scale: UiScale): String =
  * licence URI and the CC-BY-4.0 §3(a)(1) statement that the material was modified. There is no
  * attribution string in `strings.xml` any more; there is nothing left here to restate.
  *
+ * ### The version line is given, not read (BUG-24)
+ *
+ * This section prints `appVersion`, which its caller supplies — production from `BuildConfig` in
+ * `MageHandNavHost`, the golden from a constant. It used to read `BuildConfig.VERSION_NAME` /
+ * `VERSION_CODE` here, and because `ScreensGoldenTest` photographs this section the golden baked
+ * the build number: every `versionCode`/`versionName` bump turned `verifyRoborazziDebug` — step 3
+ * of the release script — red on its own, with nothing broken. See [AppVersion].
+ *
  * ### Two sentences, not one
  *
  * They were one line while this file was writing it, because two credits a reader has to match up
@@ -536,9 +544,11 @@ internal fun uiScaleValueDescription(scale: UiScale): String =
  * It is the one block on this screen with no control in it. Every section above answers *"what do
  * you want the app to do?"*; this answers *"what is this?"*, which is the question a reader asks
  * after the others or not at all.
+ *
+ * @param appVersion the version to print, injected rather than read from `BuildConfig` (BUG-24).
  */
 @Composable
-private fun AboutSection(modifier: Modifier = Modifier) {
+private fun AboutSection(appVersion: AppVersion, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -552,8 +562,8 @@ private fun AboutSection(modifier: Modifier = Modifier) {
         Text(
             text = stringResource(
                 R.string.settings_about_version,
-                BuildConfig.VERSION_NAME,
-                BuildConfig.VERSION_CODE,
+                appVersion.name,
+                appVersion.code,
             ),
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.testTag("settings:about:version"),
