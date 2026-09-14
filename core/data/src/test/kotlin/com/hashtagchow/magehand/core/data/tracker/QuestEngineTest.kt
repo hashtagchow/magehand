@@ -32,7 +32,12 @@ class QuestEngineTest {
 
     /**
      * A note in the shape the probe recorded: a scalar `name`, and `summary`/`description` as
-     * inline-calculation **objects** with the rendered string under `text`.
+     * inline-calculation **objects** carrying both keys.
+     *
+     * The two are written identically here, which is faithful to a note quoting no calculation
+     * and is also why this fixture cannot tell `text` from `value` — see the BUG-25 pin below for
+     * the note that can. (The old wording of this paragraph said the rendered string was under
+     * `text`; the 2026-09-14 probe established that it is under `value`.)
      *
      * The object shape is the trap this fixture exists to carry. MageHand learned it once already
      * — `description` on an action is an object, not a string — and a fixture that used plain
@@ -250,6 +255,32 @@ class QuestEngineTest {
 
         assertEquals("A short line", quest.summary)
         assertEquals("A longer one", quest.description)
+    }
+
+    /**
+     * BUG-25 R4 on the quest reader: `value` is the rendered string, `text` the source.
+     *
+     * A quest note is prose a table wrote, and the probe's finding applies to it exactly as it
+     * does to a spell — `QuestEngine.text` is `ActionEngine.text`'s deliberate duplicate, so the
+     * flip has to be pinned in both places or the copy that is not pinned is the one that drifts
+     * back.
+     */
+    @Test
+    fun `a quest summary and description render the server's value, falling back to the source`() {
+        val quest = QuestEngine.build(
+            sheetOf(
+                """{"_id":"n","type":"note","name":"${prefix}Bounty","tags":["quest"],
+                    "summary":{"text":"Reward: {gold.total} gp","value":"Reward: 50 gp"},
+                    "description":{"text":"Beat a DC {#spellList.dc} check."},"order":1}""",
+            ),
+        ).single()
+
+        assertEquals("Reward: 50 gp", quest.summary)
+        assertEquals(
+            "no `value` — the source shows, honestly, rather than nothing",
+            "Beat a DC {#spellList.dc} check.",
+            quest.description,
+        )
     }
 
     /** A blank field is an absence, not an empty line in the sheet. */

@@ -40,6 +40,7 @@ import com.hashtagchow.magehand.core.model.InventoryMoveTarget
 import com.hashtagchow.magehand.core.model.NewItemSpec
 import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.TrackerKind
+import com.hashtagchow.magehand.core.model.TrackerWriteKind
 import com.hashtagchow.magehand.core.model.WalletRow
 
 /**
@@ -188,6 +189,11 @@ class DefaultOpenCharacterWriteTest {
         deathSave("ds-ok", "deathSaveSuccesses", successes),
         deathSave("ds-no", "deathSaveFails", failures),
     )
+
+    /** An applied buff, in the shape the 2026-09-14 probe recorded (FR-53). */
+    private fun buff(id: String, name: String, order: Int = 1, extra: String = "") =
+        """{"_id":"$id","type":"buff","name":"$name","order":$order,"silent":true,
+            "target":"self","parent":{"id":"c1","collection":"creatures"}$extra}"""
 
     private fun coin(id: String, kind: CoinKind, quantity: Int, order: Int = 1) =
         """{"_id":"$id","type":"item","name":"${kind.itemName}","quantity":$quantity,
@@ -1719,6 +1725,171 @@ class DefaultOpenCharacterWriteTest {
             0,
             (h.caller.calls.single().body["targetIds"] as kotlinx.serialization.json.JsonArray).size,
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // turnOffBuff (FR-53 R4, design 21 decision 4)
+    // -----------------------------------------------------------------------
+
+    /**
+     * The wire call, and the name resolved off the board rather than taken from the caller.
+     *
+     * No name is passed, exactly as in `removeItem sends softRemove…`: the receipt must read
+     * *"Turned off Shield"*, and the only place the app can be sure of that string is the live
+     * board. A caller that passed a stale name would otherwise put it on the history sheet.
+     */
+    @Test
+    fun `turnOffBuff sends softRemove and names the buff from the board`() = runTest {
+        val h = harness(buff("b1", "Shield"))
+
+        h.character.turnOffBuff("b1")
+        advanceUntilIdle()
+
+        val call = h.caller.calls.single()
+        assertEquals("creatureProperties.softRemove", call.method)
+        assertEquals("b1", call.text("_id"))
+        val entry = h.character.writeHistory.value.single()
+        assertEquals("Shield", entry.targetName)
+        assertEquals(TrackerWriteKind.BUFF_OFF, entry.kind)
+        assertTrue("R4: undoable", entry.undoable)
+    }
+
+    /**
+     * R4's inverse: `restore`, and the buff comes back.
+     *
+     * The second op in this app whose undo is a **different method**, and the layer that has to
+     * make it true is this one — `WriteOp.TurnOffBuff` shaping the inverse right proves nothing
+     * about the intent reaching the queue with it attached.
+     */
+    @Test
+    fun `undoing a turn-off restores the same property`() = runTest {
+        val h = harness(buff("b1", "Shield"))
+
+        h.character.turnOffBuff("b1")
+        advanceUntilIdle()
+        assertTrue(h.character.canUndo.value)
+        h.caller.reset()
+
+        assertTrue(h.character.undoLastWrite())
+        advanceUntilIdle()
+
+        val call = h.caller.calls.single()
+        assertEquals("creatureProperties.restore", call.method)
+        assertEquals("b1", call.text("_id"))
+        assertTrue(h.character.writeHistory.value.single().undone)
+    }
+
+    /**
+     * The chip goes **while the call is on the wire** — R4's optimistic half.
+     *
+     * Asserted on the board the app actually renders (`character.board`, the overlay applied to
+     * the engine's output), because that is the only place the prediction exists: the mirror still
+     * carries the buff unflagged at this point, so a reader of the raw sheet sees no change.
+     *
+     * The gate holds the call in flight, which is the window the prediction is *for*. Letting it
+     * resolve without publishing the server's frame — as the two tests above deliberately do —
+     * drops the overlay and the chip comes back, and that is correct: the overlay is derived from
+     * unresolved ops, so a resolved write's prediction expiring before the mirror catches up is
+     * the same mechanism as a rollback (`OptimisticOverlay`'s own KDoc). What makes it invisible
+     * in production is the server's frame arriving inside the same round trip, which
+     * `a soft-removed buff stays off the rebuilt board` pins.
+     */
+    @Test
+    fun `the chip leaves the board while the turn-off is in flight`() = runTest {
+        val h = harness(buff("b1", "Shield"), buff("b2", "Bless", order = 2))
+        assertEquals(listOf("Shield", "Bless"), h.character.board.value.buffs.map { it.name })
+        val onTheWire = CompletableDeferred<Unit>()
+        h.caller.gate = onTheWire
+
+        h.character.turnOffBuff("b1")
+        advanceUntilIdle()
+
+        assertEquals(
+            "only the tapped chip, and only that one",
+            listOf("Bless"),
+            h.character.board.value.buffs.map { it.name },
+        )
+
+        onTheWire.complete(Unit)
+        advanceUntilIdle()
+        h.caller.gate = null
+    }
+
+    /**
+     * A double tap costs **one** call — the difference from `removeItem`, whose own test pins the
+     * opposite as a deliberate hazard.
+     *
+     * Two independent mechanisms produce that here and both are wanted: the optimistic overlay
+     * has already taken the chip off the board when the second tap resolves its id, and
+     * `TurnOffBuff` coalesces on the id for the pair that arrive inside one dispatch. A delete can
+     * afford neither — it comes through a confirm dialog, and a coalesce key would let it merge
+     * with the `restore` behind it — which is why the two ops are not one.
+     */
+    @Test
+    fun `two taps on one chip are one call and one undo entry`() = runTest {
+        val h = harness(buff("b1", "Shield"))
+
+        h.character.turnOffBuff("b1")
+        h.character.turnOffBuff("b1")
+        advanceUntilIdle()
+
+        assertEquals(1, h.callsTo("creatureProperties.softRemove").size)
+        assertEquals(1, h.character.writeHistory.value.size)
+    }
+
+    /** A stale id — the buff ended on another device — is dropped rather than soft-removing it. */
+    @Test
+    fun `turnOffBuff drops an id the board does not carry`() = runTest {
+        val h = harness(buff("b1", "Shield"))
+
+        h.character.turnOffBuff("not-a-buff")
+        advanceUntilIdle()
+
+        assertTrue(h.caller.calls.isEmpty())
+        assertTrue(h.character.writeHistory.value.isEmpty())
+    }
+
+    /**
+     * The intent is **buff-shaped**, not id-shaped: a toggle's id cannot reach `softRemove`
+     * through it.
+     *
+     * The four call sites hand over a bare string, so the board lookup is the only thing standing
+     * between a mis-wired chip and a soft-removed condition toggle.
+     */
+    @Test
+    fun `turnOffBuff refuses a property that is not a buff`() = runTest {
+        val h = harness(
+            """{"_id":"t1","type":"toggle","name":"Bless","enabled":true,"order":1}""",
+        )
+
+        h.character.turnOffBuff("t1")
+        advanceUntilIdle()
+
+        assertTrue(h.caller.calls.isEmpty())
+    }
+
+    /**
+     * The vanish, end to end — `a soft-removed item drops out of the rebuilt board`'s argument on
+     * the buff list.
+     *
+     * The prediction is not what makes the chip stay gone; the discovery filter is. This pins that
+     * the buff is absent from the board rebuilt from the server's own frame, which is what the
+     * player sees a second later and what would still be right if the overlay were deleted.
+     */
+    @Test
+    fun `a soft-removed buff stays off the rebuilt board`() = runTest {
+        val h = harness(buff("b1", "Shield"))
+
+        h.character.turnOffBuff("b1")
+        advanceUntilIdle()
+
+        h.feed.changeProperty(
+            "b1",
+            Json.parseToJsonElement(buff("b1", "Shield", extra = ""","removed":true""")) as JsonObject,
+        )
+        advanceUntilIdle()
+
+        assertTrue(h.character.board.value.buffs.isEmpty())
     }
 
     /** The `TrackedResource` the direct-entry overload is handed, as the UI would build it. */

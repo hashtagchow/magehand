@@ -1089,6 +1089,16 @@ class LocalOpenCharacter(
     override fun toggle(condition: ConditionToggle) = Unit
 
     /**
+     * FR-53 R4: *"no local-character path"*.
+     *
+     * Not "not implemented yet" — there is nothing here to end. A buff is a `creatureProperty` a
+     * spell put on a DiceCloud sheet, and this character's storage has no such row and no spell
+     * that could create one, so `LocalTrackerBoard.buffs` is always empty and no screen ever draws
+     * a chip whose ✕ could call this. [toggle]'s shape and [toggle]'s reason, one type over.
+     */
+    override fun turnOffBuff(propertyId: String, targetName: String) = Unit
+
+    /**
      * 09 decision 7, and it is [RestKind.restores] doing the deciding — the same function the
      * server's own behaviour is described by, so short-resets-short and long-resets-both is
      * written once for both kinds of character.

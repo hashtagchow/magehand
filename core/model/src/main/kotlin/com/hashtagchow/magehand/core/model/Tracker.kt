@@ -334,6 +334,56 @@ data class ConditionToggle(
 }
 
 /**
+ * A `buff` that is **currently running on the character** — Shield on a probed sheet (FR-53 R2,
+ * docs/design/21-applied-buffs.md decision 2).
+ *
+ * ### Applied versus template, and why there is no flag for it
+ *
+ * Every sheet carries a dozen or so `type: "buff"` properties, and most of them are *library
+ * templates* sitting under the action or spell that applies them (a probed sheet: eight;
+ * Sabriel: eighteen). A template carries `deactivatedByAncestor: true` → `inactive: true`. An **applied**
+ * buff is a copy of that template at the creature root with its `effect` children live, identical
+ * in every field except that it carries neither of those. There is no `applied` field and none is
+ * needed: the operator's *"don't show unapplied buffs"* is exactly 03's blanket
+ * `inactive`/`removed` skip, which is why `TrackerEngine.appliedBuffs` adds no second rule — no
+ * ancestor walk, no `target` or `silent` filter. (Shield is `silent: true` and is still on the
+ * character.)
+ *
+ * ### Not a [TrackedResource] and not a [ConditionToggle]
+ *
+ * Decision 2, and both halves are structural rather than tidy-minded. It is not a resource
+ * because it has **no count**: every consumer of a `TrackedResource` is built on "spend this and
+ * it goes down", and there is nothing here to spend — which is also why it is absent from
+ * [TrackerBoard.allCountableRows] and therefore cannot become BUG-20's defect for a fourth time.
+ * It is not a toggle because the **write is different in kind**: a toggle flips with
+ * `creatureProperties.flipToggle`, and a buff ends with `creatureProperties.softRemove`, which is
+ * a removal and inverts into `restore`. A shared type would have put a chip into a list whose
+ * tap handler sends the wrong method.
+ *
+ * ### What is deliberately absent
+ *
+ * **`duration`.** It is a `_calculation` and on the live sheet it is a **parse error**
+ * (`"1 Turn"`), so the only honest thing to print from it is nothing. R2 says it is not read, and
+ * it is not read — not stored here for a future screen either, because a field nobody may display
+ * is a field somebody eventually displays.
+ *
+ * **A sort order.** R2 fixes this type's fields at three. The order is the server's `order` and it
+ * is applied by the engine before the list reaches this class, exactly as it is for every other
+ * board list; carrying it onto the row would be a second copy of an answer already spent.
+ *
+ * @property description the buff's prose, or `null`. Read through BUG-25's corrected reader —
+ *   the wrapper's rendered `value`, never its tokenised `text` — and rendered with markdown
+ *   emphasis stripped at the screen ([withoutMarkdownEmphasis]), never here: the server's own
+ *   characters survive into this object so that what the app *records* stays faithful to what the
+ *   sheet *said*.
+ */
+data class AppliedBuff(
+    val propertyId: String,
+    val name: String,
+    val description: String? = null,
+)
+
+/**
  * How a creature takes one kind of damage differently from everyone else.
  *
  * DiceCloud does not store the words "immune" / "resistant" / "vulnerable" anywhere: it
@@ -579,6 +629,27 @@ data class TrackerBoard(
      */
     val allItems: List<TrackedResource> = emptyList(),
     /**
+     * The buffs currently running on the character, in the sheet's own `order` (FR-53 R1/R2).
+     *
+     * Declared **above [activeToggles]** because that is where the section draws them: a buff is
+     * the first answer to *"what is running on me right now"*, and the toggle chips follow. Unlike
+     * the two lists below it this one is never partitioned — every entry here is applied by
+     * construction, and the *un*applied ones (the templates) are not on this board at all. They do
+     * not go into the inactive drawer either: that drawer exists for toggles a player can switch
+     * **on**, and a template buff is turned on by casting the spell, not from the tracker.
+     *
+     * **Not override-filtered**, for [limitedUses]' reason: the customize sheet builds its
+     * sections from slots, resources, items and toggles, so no control anywhere can pin, hide or
+     * reorder one of these — and running them through the layer would let a stale preference hide
+     * a buff with nothing on screen able to bring it back. The `show_toggles` switch is the
+     * control, and it hides the whole Conditions section.
+     *
+     * Empty on every character who has cast nothing, which is what makes the section *unchanged*
+     * rather than gaining an empty row — and empty for **every local character**, which has no
+     * buffs at all (09).
+     */
+    val buffs: List<AppliedBuff> = emptyList(),
+    /**
      * Every discovered toggle the user has not hidden — *including the off ones*, which
      * the tracker files behind its "N inactive" expander rather than dropping (see
      * [ConditionToggle.shownByDefault]). The name predates that split and is kept because
@@ -637,9 +708,15 @@ data class TrackerBoard(
      * `flipToggle` **refuses** anything that is not a manual toggle — the server's own
      * precondition, `if (!property.enabled && !property.disabled) throw 'Computed toggle'`. So the
      * write is only correct when the source is (1) a discovered toggle, (2) currently on, and
-     * (3) [ConditionToggle.flippable]. A buff-sourced banner therefore resolves to `null`, and
-     * that is the honest answer rather than a missing feature: there is no documented method that
-     * ends a buff, and guessing at one is the class of unverified write this app does not make.
+     * (3) [ConditionToggle.flippable]. A buff-sourced banner therefore resolves to `null` **here**
+     * and is answered by [concentrationBuff] instead.
+     *
+     * That split is FR-53 R6 correcting this KDoc's old second half, which read *"there is no
+     * documented method that ends a buff, and guessing at one is the class of unverified write
+     * this app does not make"*. The first clause is retired and the second is intact: the
+     * 2026-09-14 probe of the server's own client bundle found the method — the sheet's remove
+     * button is the generic `creatureProperties.softRemove {_id}` — so the write is documented
+     * now and nothing about it is a guess.
      *
      * Matched by **name** because that is all the banner carries —
      * `TrackerEngine.concentrationSource` returns the source's `name`, since a buff and a toggle
@@ -655,6 +732,35 @@ data class TrackerBoard(
         get() = concentratingOn?.let { name ->
             activeToggles.firstOrNull { it.name == name && it.enabled && it.flippable }
         }
+
+    /**
+     * The applied buff the banner is about, or `null` — [concentrationToggle]'s other half
+     * (FR-53 R6).
+     *
+     * ### Two properties rather than one "droppable source"
+     *
+     * They resolve the same question and they are deliberately not merged, because the **write
+     * differs**: a toggle is dropped with `flipToggle` and a buff with `softRemove`, which is a
+     * removal with a `restore` inverse and a different receipt. A single `droppableSource` would
+     * have handed both callers a property id and left each of them to re-derive which method it
+     * takes — the drift that ends with a banner whose ✕ sends the wrong call and earns
+     * *"Computed toggle"* from the server.
+     *
+     * ### One clause, not three
+     *
+     * [concentrationToggle] needs "discovered, on, and flippable" because `flipToggle` refuses two
+     * of the three. Nothing here corresponds: [buffs] contains applied buffs only — an inactive
+     * one is not on the board at all — and `softRemove` accepts any property id, so a buff that is
+     * *in this list* is a buff that can be ended. Matching by **name** for
+     * [concentrationToggle]'s reason: `TrackerEngine.concentrationSource` returns the source's
+     * name because a toggle and a buff share nothing else, and an exact match can only ever fail
+     * *closed*.
+     *
+     * A source that is neither a flippable toggle nor a buff still resolves to `null` on both, and
+     * the banner stays informational — which is the case R6 keeps rather than removes.
+     */
+    val concentrationBuff: AppliedBuff?
+        get() = concentratingOn?.let { name -> buffs.firstOrNull { it.name == name } }
 
     /**
      * **Every [TrackedResource] this board carries, in one place** — BUG-20's fix.
@@ -710,14 +816,20 @@ data class TrackerBoard(
      * sat six lines below the one that now sums those lists and listed them again. Two sums of
      * one thing is the shape of the bug, whatever the sum is for.
      *
-     * The three lists that are **not** countable rows are still named, because they are genuinely
-     * different: a character with only condition chips, only defenses or only a rolls dropdown has
-     * a screen worth rendering. `deathSaves`, `concentratingOn` and [armorClass] are deliberately
-     * absent from both the old form and this one — none of them is content a screen exists for,
-     * and AC could not be in the sum anyway (18 decision 22).
+     * The **four** lists that are not countable rows are still named, because they are genuinely
+     * different: a character with only condition chips, only buffs, only defenses or only a rolls
+     * dropdown has a screen worth rendering. `deathSaves`, `concentratingOn` and [armorClass] are
+     * deliberately absent from both the old form and this one — none of them is content a screen
+     * exists for, and AC could not be in the sum anyway (18 decision 22).
+     *
+     * [buffs] joined in FR-53 rather than being left to ride on `activeToggles`: a character
+     * concentrating on one spell and carrying nothing else is a real state (and the whole case
+     * the feature exists for), and this property is what decides whether the DM card says *"Not
+     * available"*. Being absent here would have made that card lie about a character with a live
+     * Shield on them.
      */
     val isEmpty: Boolean
-        get() = allCountableRows.isEmpty() && activeToggles.isEmpty() &&
+        get() = allCountableRows.isEmpty() && buffs.isEmpty() && activeToggles.isEmpty() &&
             defenses.isEmpty() && rolls.isEmpty()
 
     companion object {
@@ -875,6 +987,33 @@ enum class TrackerWriteKind {
      * including having no inverse.
      */
     CAST_SPELL,
+
+    /**
+     * A buff that was running on the character, ended (FR-53 R4, design 21 decision 4).
+     *
+     * ### Its own kind rather than [ITEM_DELETE], which sends the identical method
+     *
+     * Both are `creatureProperties.softRemove` with one id. This enum's job is the **sentence** —
+     * *"Turned off Shield"* against *"Deleted Torch"* — and [CAST_SPELL] is the standing precedent
+     * for splitting on exactly that: *"you use a feature and you cast a spell, and a history sheet
+     * that said 'Used Fireball' would be reporting the event in a vocabulary nobody at the table
+     * uses"*. Nobody at a table deletes a Shield either. The history sheet is read to answer *"what
+     * did I do?"*, and a player who reads *"Deleted Shield"* has a fair question about where their
+     * spell went.
+     *
+     * **Invertible**, and unlike [ITEM_DELETE] on both paths: a local character has no buffs at
+     * all (09), so there is no second implementation to disagree.
+     */
+    BUFF_OFF,
+
+    /**
+     * A turned-off buff put back — [BUFF_OFF]'s inverse half, and the second op in this app whose
+     * inverse is a different server method (`softRemove` undone by `restore`).
+     *
+     * Separate from [ITEM_RESTORE] for [BUFF_OFF]'s reason, one step on: the two undo different
+     * sentences, and one history sheet can carry both.
+     */
+    BUFF_RESTORE,
     ;
 
     /**
@@ -892,6 +1031,8 @@ enum class TrackerWriteKind {
         UNEQUIP -> EQUIP
         ITEM_DELETE -> ITEM_RESTORE
         ITEM_RESTORE -> ITEM_DELETE
+        BUFF_OFF -> BUFF_RESTORE
+        BUFF_RESTORE -> BUFF_OFF
         ITEM_MOVE -> ITEM_MOVE
         TOGGLE -> TOGGLE
         // FR-28: a use has no inverse of any kind — see [USE_ACTION].
@@ -968,6 +1109,21 @@ data class ConcentrationPrompt(
     val sourceName: String,
     val damage: Int,
     val toggleId: String? = null,
+    /**
+     * The source's **buff** id, when it is one (FR-53 R6) — [toggleId]'s other half.
+     *
+     * At most one of the two is ever set: `TrackerBoard.concentrationToggle` and
+     * `TrackerBoard.concentrationBuff` resolve a toggle source and a buff source respectively, and
+     * a source is one or the other. Both `null` is decision 10's **informational** prompt, which
+     * R6 keeps: a computed toggle still has no correct write to offer, and offering one anyway is
+     * the class of guess this app does not make.
+     *
+     * Two fields rather than one id plus a kind, for the reason the board carries two properties:
+     * the *write* differs — `flipToggle` for one and `turnOffBuff` for the other — and a single
+     * id would leave every consumer re-deriving which method it takes, on the one screen where
+     * getting it wrong earns a server refusal on a time-critical prompt.
+     */
+    val buffId: String? = null,
 ) {
     /**
      * 5e's rule: **half the damage taken, minimum 10** — floored, as every division in 5e is.
@@ -979,8 +1135,8 @@ data class ConcentrationPrompt(
      */
     val dc: Int get() = maxOf(MIN_DC, damage / 2)
 
-    /** Whether the prompt can offer decision 10's one action. See [toggleId]. */
-    val canDrop: Boolean get() = toggleId != null
+    /** Whether the prompt can offer decision 10's one action. See [toggleId] and [buffId]. */
+    val canDrop: Boolean get() = toggleId != null || buffId != null
 
     companion object {
         /** 5e's floor. Also the DC for every hit up to 21 points, which is most of them. */

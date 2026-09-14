@@ -126,7 +126,15 @@ fun ActionsScreen(
             return@LazyColumn
         }
 
-        if (shown.spellLists.isNotEmpty()) {
+        // D2. Returns early for the same reason `isEmpty` does, and that early return is also what
+        // keeps a spell list's DC off a screen with nothing under it — see `showsSpellLists`,
+        // which handles the partial case one line down.
+        if (shown.showsNoneAvailable) {
+            item { NoneAvailable() }
+            return@LazyColumn
+        }
+
+        if (shown.showsSpellLists) {
             item { SpellListHeaders(shown.spellLists) }
         }
 
@@ -244,6 +252,8 @@ private fun SpellListHeaders(lists: List<SpellListHeader>, modifier: Modifier = 
 private fun SpellRow(entry: SpellEntry, onClick: () -> Unit, modifier: Modifier = Modifier) {
     RowShell(
         name = entry.name,
+        // FR-55: unreachable from a server sheet — `ActionEngine.listedRow` drops the row before
+        // it becomes a `SpellEntry`. Kept per R2, with the field it reads. See `SpellEntry.inactive`.
         dimmed = entry.inactive,
         testTag = "actions:spell:${entry.propertyId}",
         onClick = onClick,
@@ -254,6 +264,7 @@ private fun SpellRow(entry: SpellEntry, onClick: () -> Unit, modifier: Modifier 
             if (entry.ritual) ActionChip(stringResource(R.string.actions_ritual))
             // Decision 5: from the FIELDS. The two states below can coexist and both show.
             if (entry.showsUnpreparedBadge) ActionChip(stringResource(R.string.actions_unprepared))
+            // FR-55 dead copy, kept per R2 — see the `dimmed` note above.
             if (entry.inactive) ActionChip(stringResource(R.string.actions_inactive))
         }
         // `castingTime · range`, scalars only (decision 4). Absent halves simply do not appear;
@@ -271,7 +282,9 @@ private fun ActionEntryRow(entry: ActionEntry, onClick: () -> Unit, modifier: Mo
     RowShell(
         name = entry.name,
         // Two independent reasons to dim, both stated in words below rather than left as a
-        // colour: "greyed out" alone does not tell a player which of the two to fix.
+        // colour: "greyed out" alone does not tell a player which of the two to fix. Since FR-55
+        // only ONE of them is reachable from a server sheet — `listedRow` drops a switched-off
+        // row — and `inactive` is kept here with the field it reads, per R2.
         dimmed = entry.inactive || entry.insufficientResources,
         testTag = "actions:action:${entry.propertyId}",
         trailing = entry.attackRoll?.let { stringResource(R.string.actions_attack_bonus, it) },
@@ -280,6 +293,7 @@ private fun ActionEntryRow(entry: ActionEntry, onClick: () -> Unit, modifier: Mo
     ) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (entry.insufficientResources) ActionChip(stringResource(R.string.actions_insufficient))
+            // FR-55 dead copy, kept per R2 — see the `dimmed` note above.
             if (entry.inactive) ActionChip(stringResource(R.string.actions_inactive))
             // FR-47 R3: after the state badges, before the uses line. Last of the chips because
             // the two above it are about whether the row can be used *now* and this one is a
@@ -672,3 +686,47 @@ private fun EmptyActions(modifier: Modifier = Modifier, onAdd: (() -> Unit)? = n
         }
     }
 }
+
+/**
+ * D2's third state: the sheet has rows and every one of them is switched off.
+ *
+ * ### Why not `EmptyActions` with different copy
+ *
+ * Because they are different claims. `EmptyActions` says *"this character's sheet has no spells
+ * or actions on it"* — which about a full sheet whose owner has switched everything off is the
+ * app reporting on its own filter and calling it the character. This says what is true: the rows
+ * are there, none of them can be used now, and the fix is in DiceCloud rather than here.
+ *
+ * ### No count, and no way to see them
+ *
+ * FR-55's whole point is that an unavailable row is not listed. A *"3 switched off"* line would
+ * invite a control to reveal them, which is the dimmed list the operator asked to be rid of. The
+ * board carries the count (`ActionBoard.switchedOffRowCount`) because it costs nothing and a
+ * future affordance would need it; the screen deliberately does not print it.
+ *
+ * No Add button either, unlike `EmptyActions`: that button is the local character's, and a local
+ * character cannot reach this state at all (`LocalActionBoard` has no switched-off rows to have).
+ */
+@Composable
+private fun NoneAvailable(modifier: Modifier = Modifier) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text(
+                text = stringResource(R.string.actions_none_available),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.testTag("actions:none-available"),
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = stringResource(R.string.actions_none_available_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+

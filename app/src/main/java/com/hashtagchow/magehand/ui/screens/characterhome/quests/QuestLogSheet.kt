@@ -30,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.QuestEntry
+import com.hashtagchow.magehand.core.model.withoutMarkdownEmphasis
 
 /**
  * FR-32's quest log (docs/design/18-table-pack.md decisions 13–16).
@@ -209,11 +210,14 @@ private fun QuestRow(
             fontWeight = FontWeight.SemiBold,
             color = tint,
         )
-        quest.summary?.let {
+        // BUG-25 R2, extended here by the 1.19.0 review's LOW-1 — see `ItemDetailSheet`'s note.
+        // R1 flipped `QuestEngine.text` to the server's rendered string, and a quest note quoting
+        // a modifier arrives with the library's emphasis on it.
+        quest.summary?.withoutMarkdownEmphasis()?.let {
             Text(text = it, style = MaterialTheme.typography.bodySmall, color = tint)
         }
         if (expanded) {
-            quest.description?.let {
+            quest.description?.withoutMarkdownEmphasis()?.let {
                 Text(
                     text = it,
                     style = MaterialTheme.typography.bodyMedium,

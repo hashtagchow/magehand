@@ -151,8 +151,18 @@ fun DmViewScreen(
                         prompt = prompt,
                         canWrite = card.writeControlsEnabled,
                         subjectName = card.name,
-                        onDrop = { toggleId ->
-                            viewModel.toggleCondition(creatureId, toggleId)
+                        // FR-53 R6, the DM's copy of `CharacterHomeScreen`'s dispatch: a prompt
+                        // carries a toggle id or a buff id, never both, and the two take
+                        // different DDP methods.
+                        onDrop = {
+                            // `if`/`else if`, not `?.let(…) ?: …` — review NIT-1.
+                            val toggleId = prompt.toggleId
+                            val buffId = prompt.buffId
+                            if (toggleId != null) {
+                                viewModel.toggleCondition(creatureId, toggleId)
+                            } else if (buffId != null) {
+                                viewModel.turnOffBuff(creatureId, buffId)
+                            }
                             concentrationPrompt = null
                         },
                         onDismiss = { concentrationPrompt = null },
@@ -184,6 +194,7 @@ fun DmViewScreen(
                         onRestore = viewModel::restore,
                         onChangeHitPoints = viewModel::changeHitPoints,
                         onToggleCondition = viewModel::toggleCondition,
+                        onTurnOffBuff = viewModel::turnOffBuff,
                         modifier = Modifier.weight(1f),
                     )
                     DmFeedPanel(
@@ -219,6 +230,7 @@ internal fun DmCardGrid(
     onRestore: (String, String, Int) -> Unit,
     onChangeHitPoints: (String, Int) -> Unit,
     onToggleCondition: (String, String) -> Unit,
+    onTurnOffBuff: (String, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
@@ -237,6 +249,9 @@ internal fun DmCardGrid(
                     onSpend = { propertyId -> onSpend(card.creatureId, propertyId, 1) },
                     onRestore = { propertyId -> onRestore(card.creatureId, propertyId, 1) },
                     onChangeHitPoints = { delta -> onChangeHitPoints(card.creatureId, delta) },
+                    onTurnOffBuff = { propertyId ->
+                        onTurnOffBuff(card.creatureId, propertyId)
+                    },
                     onToggleCondition = { propertyId ->
                         onToggleCondition(card.creatureId, propertyId)
                     },

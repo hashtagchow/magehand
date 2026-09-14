@@ -16,6 +16,7 @@ import com.hashtagchow.magehand.core.ddp.DdpClientConfig
 import com.hashtagchow.magehand.core.ddp.ExponentialBackoff
 import com.hashtagchow.magehand.core.ddp.MeteorId
 import com.hashtagchow.magehand.core.ddp.ejsonParams
+import com.hashtagchow.magehand.core.model.AppliedBuff
 import com.hashtagchow.magehand.core.model.CatalogCategory
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
@@ -212,7 +213,7 @@ object ContractExport {
      * exported — so `ddp/method-vectors.json` is untouched by this bump, which is itself worth
      * stating: a consumer diffing 8 → 9 needs to know there is no new call to implement.
      */
-    const val SCHEMA_VERSION: Int = 9
+    const val SCHEMA_VERSION: Int = 10
 
     /** Where the export lives, relative to the repository root. */
     const val DIRECTORY: String = "contract-export"
@@ -1139,6 +1140,11 @@ object ContractExport {
         CreatureSheet.fromSnapshotJson(ContractFixtures.limitedUseSheetBody(), ContractFixtures.creatureId)
     }
 
+    /** FR-53's own fixture. See [ContractFixtures.buffSheetBody]. */
+    private val buffSheet: CreatureSheet by lazy {
+        CreatureSheet.fromSnapshotJson(ContractFixtures.buffSheetBody(), ContractFixtures.creatureId)
+    }
+
     // -----------------------------------------------------------------------
     // FR-23 death saves
     // -----------------------------------------------------------------------
@@ -1559,6 +1565,28 @@ object ContractExport {
                     "behind the `softRemove` that caused it.",
             ),
 
+            // --- creatureProperties.softRemove / restore, on a BUFF (FR-53) ------------
+            Vector(
+                name = "softRemove.turnOffBuff",
+                op = WriteOp.turnOffBuff(ContractFixtures.appliedBuffId, targetName = "Shield"),
+                note = "End a buff that is running on the character.",
+                quirk = "The SAME method and the same frame as `softRemove.item` — there is no " +
+                    "buff-specific method on this server, and its own sheet sends this. Keep it " +
+                    "as a separate INTENT anyway: see #softRemove.twoIntentsOneMethod for the " +
+                    "four user-visible things that differ. The server re-computes derived stats " +
+                    "(the probed buff was +5 armour class) and soft-removes the buff's " +
+                    "descendants with it.",
+            ),
+            Vector(
+                name = "restore.turnOffBuff",
+                op = WriteOp.turnOffBuff(ContractFixtures.appliedBuffId, targetName = "Shield").inverse
+                    ?: error("turnOffBuff must invert into restore"),
+                note = "Undo of the above — the buff comes back and the stats recompute again.",
+                quirk = "Second op in this catalogue whose inverse is a DIFFERENT METHOD. Since " +
+                    "rate limiting is keyed per method name, the undo waits in `restore`'s own " +
+                    "lane rather than behind the `softRemove` that caused it.",
+            ),
+
             // --- organize.organizeDoc --------------------------------------------------
             Vector(
                 name = "organizeDoc.moveIntoContainer",
@@ -1962,6 +1990,7 @@ object ContractExport {
         )
 
         put("discovery", discoveryRules())
+        put("text", textRule())
         put("softRemove", softRemoveRule())
         put("equippable", equippableRule())
         put("capacity", capacityRule())
@@ -2317,15 +2346,212 @@ object ContractExport {
                 )
             },
         )
+        put("buffs", buffsRule())
+        put("actions", actionsRule())
         put(
             "concentration",
             "An enabled toggle or buff whose name or tags mention 'concentration' drives the " +
-                "banner; buffs are included because that is how DiceCloud models an ongoing spell.",
+                "banner; buffs are included because that is how DiceCloud models an ongoing " +
+                "spell. **Schema 10:** when the source is a BUFF the banner's dismiss is now a " +
+                "live write — see #softRemove.turnOffBuff. When it is a toggle the write is " +
+                "`flipToggle` and only for a flippable one; a computed toggle leaves the prompt " +
+                "informational, which is still a real and common state.",
         )
         put(
             "remaining",
             "`value` when the server published it, else `total − damage`. Never compute over a " +
                 "value the server already stated.",
+        )
+    }
+
+    /**
+     * `#discovery.buffs` — FR-53 R1/R7, schema 10.
+     *
+     * Stated as **the blanket rule and the three filters that are deliberately absent**, because
+     * the absences are the whole finding. A porting client reading "type == 'buff', not inactive,
+     * not removed" and adding a `parent.collection == 'creatures'` test of its own would pass
+     * every vector here — the probe's applied buffs are all at the root — and would silently lose
+     * a nested one. The vector cannot express an absence; this can.
+     */
+    private fun buffsRule(): JsonObject = buildJsonObject {
+        put("match", "type == 'buff' && !inactive && !removed")
+        put(
+            "appliedVsTemplate",
+            "Every sheet carries a dozen or so `buff` properties and MOST OF THEM ARE NOT ON THE " +
+                "CHARACTER. A library TEMPLATE lives under the action or spell that applies it " +
+                "and carries `deactivatedByAncestor: true`, from which the server derives " +
+                "`inactive: true`. An APPLIED buff is a copy of that template at the creature " +
+                "root with its `effect` children live, identical in every field EXCEPT that it " +
+                "carries neither of those two. There is no `applied` flag and none is needed: " +
+                "the unapplied ones are precisely the inactive ones, so the blanket skip IS the " +
+                "rule. (2026-09-14 probe: eight templates on one sheet, eighteen on another.)",
+        )
+        put(
+            "noExtraFilters",
+            JsonArray(
+                listOf(
+                    "NO ancestor walk. `parent.collection == 'creatures'` is true of every " +
+                        "applied buff observed and is still not the rule — it would drop a live " +
+                        "buff nested one folder deep, and a second rule can only ever disagree " +
+                        "with the first.",
+                    "NO `silent` filter. The probe's headline example is `silent: true` and adds " +
+                        "+5 to its owner's armour class. `silent` governs the party feed, not " +
+                        "whether the buff is running.",
+                    "NO `target` filter. `\"self\"` on the probed example and meaningless for " +
+                        "discovery.",
+                ).map { JsonPrimitive(it) },
+            ),
+        )
+        put(
+            "durationNotRead",
+            "`duration` is a `_calculation` and on the live sheet it is a PARSE ERROR " +
+                "(`\"1 Turn\"`). It is not read, and the model has nowhere to put it. A client " +
+                "that renders a countdown from this field is rendering an error string.",
+        )
+        put(
+            "notARow",
+            "An applied buff is NOT a countable row: no value, no total, no reset, no spend. It " +
+                "is not a toggle either — the write is a removal (#softRemove.turnOffBuff), not " +
+                "a flip, and `flipToggle` refuses a buff outright. `TrackerBoard.buffs` is its " +
+                "own array for that reason and it is absent from the tapped-row lookup.",
+        )
+        put("order", "The server's `order`, then the name. Ordinary board ordering.")
+        put(
+            "description",
+            "Read through the ONE description rule — see #text.description. The rendered " +
+                "`value`, never the tokenised `text`, and the markdown the rendered value still " +
+                "carries is stripped AT THE SCREEN so the model stays faithful to the wire.",
+        )
+        put(
+            "localCharacters",
+            "A client with its own non-DiceCloud characters has no buffs for them: a buff is a " +
+                "`creatureProperty` a spell created. The array is empty, the section is absent, " +
+                "and the turn-off write is unreachable.",
+        )
+    }
+
+    /**
+     * `#discovery.actions` — FR-55, schema 10's other discovery change.
+     *
+     * New in this schema, and the reason it is new is the reason it says what it says: the
+     * Actions surface's discovery has always been two type names and a `removed` filter, which
+     * felt too thin to export. FR-55 adds a clause a consumer can get wrong, so the rule now has
+     * something to state.
+     */
+    private fun actionsRule(): JsonObject = buildJsonObject {
+        put("match", "(type == 'action' || type == 'spell') && !inactive && !removed")
+        put(
+            "inactiveIsNotListed",
+            "**Schema 10 reverses schema 9's rendering.** Earlier schemas listed a switched-off " +
+                "row and expected the client to dim it. The operator's ruling (2026-09-14): a " +
+                "row the sheet has switched off is not AVAILABLE, so it is not listed — the same " +
+                "treatment `removed` already gets, one field over. A section left with no rows " +
+                "is absent, exactly as it is for a character who never had one.",
+        )
+        put(
+            "inactiveIsNotUnprepared",
+            "The other half of the old rule STANDS and is the one that is easy to lose here: the " +
+                "unprepared badge derives from the FIELDS (`!prepared && !alwaysPrepared`), " +
+                "NEVER from `inactive`. `inactive` is also true under a disabled ancestor — a " +
+                "spell the player deliberately prepared can carry it — so a client that folded " +
+                "the two would label that spell unprepared. An unprepared but ACTIVE spell still " +
+                "lists, with its badge.",
+        )
+        put(
+            "scope",
+            "This clause is about these two row types on this surface ONLY. `inactive` means " +
+                "different things to different readers and the reversal reaches none of them: a " +
+                "weapon `feature` goes inactive when the weapon is unequipped and is still read " +
+                "for its mastery word; a `toggle` renders `inactive` AS its state (see " +
+                "#discovery.toggles); the tracker's limited-use rows keep their own skip. A " +
+                "`spellList` is not filtered either — it is not a row a player acts with — but " +
+                "see `spellListHeaders` below for when its header is DRAWN.",
+        )
+        put(
+            "surfaceStillExists",
+            "**The reversal must not remove the surface.** The Actions tab/pane appears when the " +
+                "sheet carries ANY `action`/`spell` row — SWITCHED OFF OR NOT — and never on " +
+                "whether any of them is currently listed. A client that gated the tab on the " +
+                "listed rows would make a character whose every row is switched off read as " +
+                "\"nothing to act with\", which is a worse claim than the dimmed row this " +
+                "reversal removed and one the player has no route to noticing. Keep the two " +
+                "questions apart: availability decides what is LISTED, the sheet's population " +
+                "decides whether the surface EXISTS.",
+        )
+        put(
+            "noneAvailable",
+            "A board with rows the sheet carries and none of them listed is a THIRD state, " +
+                "distinct from \"this sheet names no action or spell\" and from \"no row " +
+                "matches your search\". Draw one line — MageHand's is \"Nothing is available " +
+                "right now\" — and do NOT reuse the empty-sheet copy, which would be a false " +
+                "statement about a full sheet. Do not print the switched-off COUNT either: a " +
+                "\"3 switched off\" line invites a control to reveal them, which is the dimmed " +
+                "list the reversal exists to remove.",
+        )
+        put(
+            "spellListHeaders",
+            "A `spellList`'s DC / ability-modifier header is a stat FOR SPELLS: draw it only " +
+                "while at least one spell section survives discovery. A sheet whose spells are " +
+                "all switched off while its actions remain would otherwise head an empty list " +
+                "with a save DC nothing can be cast at. MageHand applies this ALL-OR-NOTHING " +
+                "across lists rather than per list, and the limit is honest rather than chosen: " +
+                "its engine does not record which `spellList` a spell came from, so a sheet with " +
+                "one live list and one entirely switched-off list still draws both headers. A " +
+                "client that does record the parent may do better.",
+        )
+    }
+
+    /**
+     * `#text.description` — BUG-25, schema 10.
+     *
+     * A **wire-reading** rule rather than a discovery rule, which is why it sits at the root of
+     * `rules.json` beside `#softRemove` rather than under `#discovery`: it is about how to read
+     * two keys of one wrapper, and it applies to every property type that carries one.
+     *
+     * Exported because both clients had it backwards for four releases and neither noticed —
+     * every spell with a save DC printed `{#spellList.dc}` at a player. A rule that two
+     * independent implementations got wrong the same way is exactly what a contract is for.
+     */
+    private fun textRule(): JsonObject = buildJsonObject {
+        put(
+            "shape",
+            "A `description` or `summary` is `{ text, value, inlineCalculations, hash }`.",
+        )
+        put(
+            "rule",
+            "Read `value` FIRST and `text` second — `value` when it is a non-blank string, else " +
+                "`text`. Blank-check each half on its own: a wrapper carrying `\"value\": \"\"` " +
+                "must fall through to `text` rather than read as absent.",
+        )
+        put(
+            "whichKeyIsWhich",
+            "`text` is the AUTHORED SOURCE and carries `{#spellList.dc}` / `{strength.modifier}` " +
+                "tokens verbatim. `value` is the SERVER-RENDERED string with every token " +
+                "substituted (\"…must succeed on a **DC 12** Wisdom saving throw…\"), and " +
+                "`inlineCalculations[i].value` carries each token's answer separately. " +
+                "Established by a 2026-09-14 REST probe of three live sheets: all 447 " +
+                "description/summary wrappers on them carry both keys.",
+        )
+        put(
+            "calculationWrappersUnchanged",
+            "A `_calculation` (`{calculation, value, …}`) is NOT affected: it carries no `text`, " +
+                "and `value` was already its answer. Only the two-key wrappers change.",
+        )
+        put(
+            "computeNothing",
+            "`inlineCalculations` are NOT evaluated by the client. When `value` is absent the " +
+                "source `text` is shown as-is — honest, and unseen on any probed sheet. A client " +
+                "that substitutes tokens itself is a second implementation of the server's " +
+                "formula engine.",
+        )
+        put(
+            "stripAtRender",
+            "The rendered `value` still carries the library's markdown emphasis. Strip `**`/`*` " +
+                "runs that HUG their text at the point of display — the regex is " +
+                "`(?<=\\S)\\*+|\\*+(?=\\S)`, which leaves a spaced \"2 * your level\" alone " +
+                "and leaves list dashes untouched. Strip at RENDER, not in the reader: the model " +
+                "should keep the server's own characters so that what a client records stays " +
+                "faithful to what the sheet said.",
         )
     }
 
@@ -2668,6 +2894,39 @@ object ContractExport {
                 "client's own sum end to end; mixing filtered sums with unfiltered rollups produces " +
                 "a number that is neither, and it is the number a capacity bar gets drawn against.",
         )
+        put(
+            "turnOffBuff",
+            "**Schema 10 (FR-53).** `softRemove` is also how an applied BUFF is ended — the " +
+                "server's own client bundle exposes no buff-specific method, and DiceCloud's " +
+                "sheet sends this exact call from its remove button on one (2026-09-14 probe of " +
+                "the bundle). `buffRemover` properties (\"Dismiss Spell: …\") are the library's " +
+                "way of reaching the same place through `doAction` and are not needed. The " +
+                "inverse is `creatureProperties.restore`, the server re-computes derived stats " +
+                "(armour class, in the probed case) on either call, and descendants go with the " +
+                "parent marked `removedWith`. See the `softRemove.turnOffBuff` / " +
+                "`restore.turnOffBuff` method vectors for the frames.",
+        )
+        put(
+            "twoIntentsOneMethod",
+            "A porting client should keep DELETING AN ITEM and TURNING OFF A BUFF as two " +
+                "intents even though the frame is identical, because three user-visible things " +
+                "differ: the receipt (\"Deleted Torch\" vs \"Turned off Shield\"), whether " +
+                "repeats coalesce (a delete arrives through a destructive confirm one considered " +
+                "tap at a time; a chip\u0027s ✕ is a bare tap and a double-tap must cost one " +
+                "call), and whether the client predicts the row\u0027s disappearance (the " +
+                "confirmed delete has a dialog\u0027s worth of latency cover and does not; the " +
+                "bare tap does).",
+        )
+        put(
+            "sameRateLane",
+            "**Schema 10 correction, made in the same schema.** An earlier draft of the sentence " +
+                "above listed a FOURTH difference, \"the rate lane\", and it was wrong: both " +
+                "intents send the same method and both sit in the ordinary 5-calls-per-5-second " +
+                "class, which the two vectors print as `minSpacingMillis: 1000` / `rateClass: " +
+                "default` two entries apart. Do NOT give the turn-off its own queue lane — a " +
+                "client that did would have implemented a divergence the reference client does " +
+                "not have, on the strength of this file.",
+        )
     }
 
     private fun equippableRule(): JsonObject = buildJsonObject {
@@ -2885,6 +3144,51 @@ object ContractExport {
                         input = ContractFixtures.limitedUseSheetBody(),
                         expected = buildJsonObject {
                             put("trackerBoard", TrackerEngine.build(limitedUseSheet).toJson())
+                        },
+                    ),
+                )
+                add(
+                    discoveryVector(
+                        name = "buff-discovery",
+                        purpose = "FR-53's discovery rule (domain/rules.json#discovery.buffs) on " +
+                            "a sheet where all three populations are present and exactly ONE " +
+                            "survives. Harder than the other discovery vectors for a reason the " +
+                            "input shows: the applied buff and the library template it was copied " +
+                            "from are the SAME DOCUMENT apart from two boolean fields, so a " +
+                            "consumer that skipped the filter would still produce a " +
+                            "plausible-looking board — one carrying every spell the character " +
+                            "could cast rather than the ones running on them.",
+                        exercises = listOf(
+                            "an APPLIED buff at the creature root survives — the only survivor",
+                            "a TEMPLATE under the action that applies it does not: it carries " +
+                                "`deactivatedByAncestor: true` and the `inactive: true` the " +
+                                "server derives from that",
+                            "a REMOVED copy does not, and the document is in the input because " +
+                                "the server still delivers it (#softRemove)",
+                            "`silent: true` is NOT a filter — the survivor carries it, exactly " +
+                                "as the probed live buff does",
+                            "`parent.collection` is NOT read: the rule is the blanket rule and " +
+                                "nothing else (#discovery.buffs.noExtraFilters)",
+                            "`duration` is not read — it is on every input document as the " +
+                                "PARSE ERROR the live sheet carries",
+                            "the description is the server's rendered `value`, not the tokenised " +
+                                "`text` (#text.description), and its markdown is NOT stripped in " +
+                                "the data — that is a rendering rule",
+                            "a buff is not a countable row: `allCountableRows` is empty on this " +
+                                "board and `isEmpty` is still false",
+                        ),
+                        input = ContractFixtures.buffSheetBody(),
+                        expected = buildJsonObject {
+                            put("trackerBoard", TrackerEngine.build(buffSheet).toJson())
+                            put(
+                                "excludedPropertyIds",
+                                JsonArray(
+                                    listOf(ContractFixtures.templateBuffId, ContractFixtures.removedBuffId)
+                                        .map { JsonPrimitive(it) },
+                                ),
+                            )
+                            put("propertiesDelivered", buffSheet.propertyList.size)
+                            put("buffsDiscovered", TrackerEngine.build(buffSheet).buffs.size)
                         },
                     ),
                 )
@@ -3145,6 +3449,9 @@ object ContractExport {
         put("limitedUses", JsonArray(limitedUses.map { it.toJson() }))
         put("allItems", JsonArray(allItems.map { it.toJson() }))
         put("pinnedItems", JsonArray(pinnedItems.map { it.toJson() }))
+        // FR-53 R7: `buffs` on EVERY board, which is what makes an empty array the answer for a
+        // character who has cast nothing rather than a missing key a consumer has to guess about.
+        put("buffs", JsonArray(buffs.map { it.toJson() }))
         put("activeToggles", JsonArray(activeToggles.map { it.toJson() }))
         put("defenses", JsonArray(defenses.map { it.toJson() }))
         put("rolls", JsonArray(rolls.map { it.toJson() }))
@@ -3191,6 +3498,23 @@ object ContractExport {
         put("dieModifier", dieModifier?.let { JsonPrimitive(it) } ?: JsonNull)
         put("sortOrder", sortOrder)
         put("pinned", pinned)
+    }
+
+    /**
+     * An applied buff as discovery returned it — three fields, and the absences are the export.
+     *
+     * No `duration`, no `silent`, no `target`, no `parent`: a consumer reading this array cannot
+     * accidentally build a rule out of a field the reference client does not read. See
+     * `rules.json#discovery.buffs` for why each of those is deliberately not here.
+     *
+     * `description` carries the server's own characters **including its markdown**, because that
+     * is what the wire said; the strip is a rendering rule and is stated as one
+     * (`#text.description.stripAtRender`) rather than baked into the data.
+     */
+    private fun AppliedBuff.toJson(): JsonObject = buildJsonObject {
+        put("propertyId", propertyId)
+        put("name", name)
+        put("description", description?.let { JsonPrimitive(it) } ?: JsonNull)
     }
 
     private fun ConditionToggle.toJson(): JsonObject = buildJsonObject {

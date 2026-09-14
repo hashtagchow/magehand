@@ -15,6 +15,7 @@ import com.hashtagchow.magehand.core.model.DamageRider
 import com.hashtagchow.magehand.core.model.SpellEntry
 import com.hashtagchow.magehand.core.model.SpellListHeader
 import com.hashtagchow.magehand.core.model.WeaponMastery
+import com.hashtagchow.magehand.core.model.withoutMarkdownEmphasis
 
 /**
  * Turns one creature's raw properties into an [ActionBoard] (docs/design/16-actions-and-feed.md,
@@ -151,32 +152,20 @@ object ActionEngine {
     private val ANY_BULLET = Regex("""^(\s*)-(?=\s|\*\*)""")
 
     /**
-     * The `**`/`*` emphasis runs [masteryBulletText] and [masteryFromFeature] strip.
-     *
-     * 16 decision 4: *"plain text (no markdown rendering v1)"*. Stripping is the honest half of
-     * that ruling — leaving the asterisks in would print `**Nick.**` at a player, and rendering
-     * them would be the markdown renderer the decision declines.
-     *
-     * ### Only asterisks that hug their content
-     *
-     * Review LOW-5: a bare `\*+` also ate a literal asterisk in prose, so *"2 \* your level"*
-     * rendered as *"2  your level"* — the app deleting a character the server sent. A markdown
-     * delimiter always touches the text it emphasises on at least one side, and a multiplication
-     * sign is spaced on both, so the two alternatives here ("preceded by non-space" or "followed by
-     * non-space") strip every `**bold**` and `*italic*` run and leave a standalone `*` alone.
-     */
-    private val MARKDOWN_EMPHASIS = Regex("""(?<=\S)\*+|\*+(?=\S)""")
-
-    /**
      * Builds the board.
      *
      * @param sheet the same input [TrackerEngine.build] and [InventoryEngine.build] take, from
      *   either source.
      */
     fun build(sheet: CreatureSheet): ActionBoard {
-        // `livePropertyList`, not `propertyList`: 16 decision 2 filters `removed` and
-        // deliberately does NOT filter `inactive` — see `inactiveIsRendered` below. This is the
+        // `livePropertyList`, not `propertyList`: 16 decision 2's `removed` filter, and the
         // accessor `CreatureSheet` added for exactly this class of new consumer.
+        //
+        // It deliberately does NOT filter `inactive`, and that is still right for the *sheet*:
+        // FR-55 drops switched-off ROWS (see [listedRow]) but the mastery walk below reads an
+        // inactive `feature` on purpose — a two-handed weapon's feature goes inactive the moment
+        // the weapon is unequipped, and the mastery word is still the word. Filtering here would
+        // take that with it.
         val properties = sheet.livePropertyList
         val childrenByParent = properties.groupBy { it.parentId() }
         val resources = ResourceIndex.of(properties)
@@ -187,7 +176,7 @@ object ActionEngine {
         val masteries = masteryIndexOf(properties, childrenByParent)
 
         val spells = properties
-            .filter { it.string("type") == TYPE_SPELL }
+            .filter { it.string("type") == TYPE_SPELL && it.listedRow() }
             .mapNotNull { it.toSpell(childrenByParent, resources) }
             // Decision 3: *"sorted by `order` then STABLE-sorted by `level`"*. Two passes, in
             // that sequence, because that is what "stable" buys: `sortedBy` is stable in Kotlin,
@@ -199,7 +188,7 @@ object ActionEngine {
             .sortedBy { it.level }
 
         val actions = properties
-            .filter { it.string("type") == TYPE_ACTION }
+            .filter { it.string("type") == TYPE_ACTION && it.listedRow() }
             .mapNotNull { it.toAction(childrenByParent, resources, masteries) }
             // Decision 3: group order first (the enum's own declaration order — see
             // `ActionGroup`), then the sheet's `order` inside a group. Name is the final
@@ -212,12 +201,62 @@ object ActionEngine {
             .mapNotNull { it.toSpellList() }
             .sortedWith(compareBy({ it.sortOrder }, { it.name }))
 
-        return ActionBoard(spells = spells, actions = actions, spellLists = spellLists)
+        return ActionBoard(
+            spells = spells,
+            actions = actions,
+            spellLists = spellLists,
+            // D2: counted from the same population the two filters above reject from, so the
+            // number cannot disagree with them. This is what keeps the Actions tab on a sheet
+            // whose every row is switched off — see `ActionBoard.switchedOffRowCount`.
+            switchedOffRowCount = properties.count {
+                (it.string("type") == TYPE_SPELL || it.string("type") == TYPE_ACTION) &&
+                    !it.listedRow()
+            },
+        )
     }
 
     // -----------------------------------------------------------------------
     // Discovery
     // -----------------------------------------------------------------------
+
+    /**
+     * FR-55 R1 — whether this `action`/`spell` property is **available**, and therefore listed.
+     *
+     * Operator, 2026-09-14: *"Anything 'Switched off on the sheet' should not show under Actions —
+     * Actions should only show what's actually available."* That reverses the **rendering** half
+     * of 16 decision 5, which had a switched-off row *"render dimmed with no badge invented"*; the
+     * design file carries the amendment in place.
+     *
+     * ### What is reversed, and what is not
+     *
+     * Only the listing. Decision 5's other half — *the unprepared badge derives from the FIELDS
+     * (`!prepared && !alwaysPrepared`), never from `inactive`* — is untouched and is the reason
+     * this could not simply have been folded into the badge. Probe S3's Animate Dead is the case:
+     * a spell can be unprepared **and** active, and it still lists, with its badge. `inactive` is
+     * also true under a disabled ancestor, so it says *"this is switched off"* and nothing at all
+     * about preparation; the two claims stay separate, one of them now decides membership and the
+     * other still decides the badge.
+     *
+     * ### The same shape as `removed`, one field over
+     *
+     * A soft-removed property is filtered by [CreatureSheet.livePropertyList] and nobody has ever
+     * argued it should be dimmed instead. A row a player switched off is the same statement made
+     * by the sheet's owner rather than by a delete, and the tab exists to answer *"what can I do
+     * on my turn"* — a list that answers it with rows that cannot be used is answering a different
+     * question. A section left with no rows collapses exactly as it does for a character who has
+     * none, so nothing new had to be written for the empty case.
+     *
+     * ### `inactive` elsewhere is untouched
+     *
+     * The word means different things to different readers and FR-55 changes exactly one of them:
+     * FR-47's mastery walk still reads an inactive weapon `feature` (the feature goes inactive
+     * when the weapon is unequipped) and still drops an inactive `trigger`; `TrackerEngine`'s
+     * toggle rule still renders `inactive` as the *state*, because for a toggle "off" is the
+     * information; FR-44's limited-use rows keep their own skip. [ActionEntry.inactive] and
+     * [SpellEntry.inactive] stay on the model, and R2 is explicit that they do — see their KDoc
+     * for why a field that is now always `false` on this surface is kept rather than deleted.
+     */
+    private fun JsonObject.listedRow(): Boolean = !isTrue("inactive")
 
     /**
      * A spell row (16 decisions 3, 4 and 5).
@@ -490,10 +529,14 @@ object ActionEngine {
      *
      * ### Filtering matches the row's own filter, not the tracker's
      *
-     * `removed` only — the same rule [build] applies to the rows themselves, and for the same
-     * reason (decision 2: *"`removed`, but NOT `inactive`"*). A dimmed, switched-off action still
-     * shows what it *would* do; suppressing its damage line would leave a row that is visibly
-     * present and silently incomplete, which is worse than either showing it or hiding the row.
+     * `removed` only, which is [CreatureSheet.livePropertyList]'s filter and nothing more.
+     *
+     * It used to be argued from decision 2's *"`removed`, but NOT `inactive`"*: a dimmed,
+     * switched-off action still showed what it *would* do. FR-55 removed that case — the row
+     * itself is gone now, so there is no incomplete row left to worry about — and the filter is
+     * unchanged anyway, for a smaller reason that survives the reversal: a `damage` child is not a
+     * row a player switches off, so `inactive` on one has never been observed and testing for it
+     * would be a rule with no evidence behind it.
      */
     private fun damageFor(
         ownerId: String,
@@ -852,7 +895,7 @@ object ActionEngine {
      * Review LOW-5. A hand-written summary line `Mastery: **Topple**` used to cost twice over: the
      * badge read *"Mastery: \*\*Topple\*\*"*, and the rules sentence vanished as well, because the
      * bullet's plain `Topple` could never equal the starred word the name check compared it
-     * against. [MARKDOWN_EMPHASIS] runs on the word for the same reason it runs on the body — 16
+     * against. [withoutMarkdownEmphasis] runs on the word for the same reason it runs on the body — 16
      * decision 4's plain text — and the trailing period the regex already trims is trimmed again
      * afterwards, since `**Topple.**` hides its `.` behind the closing asterisks.
      */
@@ -860,7 +903,7 @@ object ActionEngine {
         val summary = text("summary") ?: return null
         val name = summary.lineSequence()
             .firstNotNullOfOrNull { MASTERY_SUMMARY_LINE.find(it)?.groupValues?.get(1) }
-            ?.replace(MARKDOWN_EMPHASIS, "")
+            ?.withoutMarkdownEmphasis()
             ?.trim()
             ?.removeSuffix(".")
             ?.trim()
@@ -940,7 +983,7 @@ object ActionEngine {
         }
 
         return body.joinToString("\n")
-            .replace(MARKDOWN_EMPHASIS, "")
+            .withoutMarkdownEmphasis()
             .trim()
             .takeIf { it.isNotBlank() }
     }
@@ -1032,12 +1075,41 @@ object ActionEngine {
      *
      *  - `"range": "60 ft"` — a plain string.
      *  - `"description": { "text": "…", "value": "…" }` — an inline-calculation wrapper, whose
-     *    rendered form is under `text`.
+     *    rendered form is under **`value`**.
      *  - `"amount": { "calculation": "(floor((level+1)/6)+1)d8", "value": "2d8" }` — a
      *    `_calculation`, whose answer is under `value`.
      *
-     * `text` is preferred over `value` because where both exist (`description`, `summary`) `text`
-     * is the rendered string and `value` is the un-substituted source.
+     * ### `value` first, `text` second — BUG-25, and the KDoc that used to say the opposite
+     *
+     * This paragraph read *"`text` is the rendered string and `value` is the un-substituted
+     * source"* from 1.9.1 until 1.19.0. **That is backwards**, and the reader followed it: every
+     * spell with a save DC printed its token. The 2026-09-14 REST probe of three live sheets
+     * settled it — all 447 `description`/`summary` wrappers on them carry both keys, and
+     *
+     *  - **`text` is the SOURCE**: *"…must succeed a DC `{#spellList.dc}` Intelligence Saving
+     *    Throw…"*, the author's string with its `{…}` tokens intact;
+     *  - **`value` is the SERVER-RENDERED string**: *"…must succeed a **DC 12** Intelligence
+     *    Saving Throw…"*, every token substituted, with `inlineCalculations[i].value` carrying
+     *    each token's answer separately.
+     *
+     * So the order is `value`, then `text`. BUG-25 R1 makes that the one reader rule for every
+     * description/summary wrapper in this app — [QuestEngine] and `InventoryEngine`'s
+     * `descriptionText` carry the same flip and the same citation.
+     *
+     * `riderAmount` had already recorded the true direction for the *other* wrapper shape (*"a
+     * `_calculation`'s `text` is the un-substituted source"*) three releases before anyone
+     * noticed this one said the reverse about the same server.
+     *
+     * **Nothing here computes**: `inlineCalculations` are not evaluated, and a wrapper with no
+     * `value` falls back to the source `text` exactly as it renders today (R3 — honest, and
+     * unseen on any probed sheet). Each half is blank-checked on its own, so a wrapper carrying
+     * `"value": ""` falls through to `text` rather than reading as absent.
+     *
+     * The flip is a **no-op for the four non-description call sites**. `castingTime` and `range`
+     * are plain strings on every capture (the `else` branch), and a `_calculation` (`amount`,
+     * `uses`) carries no `text` key at all — `value` was already the first key it could answer
+     * with. Only `description` and `summary`, the two shapes that carry both, change what they
+     * return, which is precisely the defect's blast radius.
      *
      * ### Numbers are stringified only INSIDE a wrapper — and that is deliberate
      *
@@ -1076,8 +1148,8 @@ object ActionEngine {
      * one repeating a `takeIf`.
      */
     private fun JsonObject.text(key: String): String? = when (val element = this[key]) {
-        is JsonObject -> element.string("text")
-            ?: element.string("value")
+        is JsonObject -> element.string("value")?.takeIf { it.isNotBlank() }
+            ?: element.string("text")?.takeIf { it.isNotBlank() }
             ?: element.numberText("value")
         else -> string(key)
     }?.takeIf { it.isNotBlank() }
@@ -1085,8 +1157,9 @@ object ActionEngine {
     /**
      * A **non-string** numeric primitive, as the characters the server sent (BUG-10).
      *
-     * The last resort of [text]'s wrapper branch, reached only once `text` and a string `value`
-     * are both absent. `toDoubleOrNull()` is the whole type test: it says "this is a number"
+     * The last resort of [text]'s wrapper branch, reached only once a string `value` and a
+     * string `text` are both absent (BUG-25 reordered those two; this one is still last).
+     * `toDoubleOrNull()` is the whole type test: it says "this is a number"
      * without ever producing one, so `2.5` stays `"2.5"` and `60` stays `"60"` — no `Int`
      * truncation, no `Double` re-rendering, no re-formatting of any kind. `true` and `null` fail
      * it and read as absent, which is what they did before the fix.
@@ -1095,9 +1168,9 @@ object ActionEngine {
      * (review NIT-3). `riderAmount` accepts a *string* primitive and trims it, because an effect
      * publishing `{"value": " 3"}` is the server saying three and a rider that chipped over a
      * space would be reporting a formatting artefact as a fact. Neither applies here: a string
-     * `value` never reaches this function — [text]'s own `string("value")` answered one branch
-     * earlier, untrimmed, as it has since 1.9.1 — so this sees non-strings only, and a JSON
-     * number has no padding to trim.
+     * `value` never reaches this function — [text]'s own `string("value")` already answered,
+     * untrimmed, as it has since 1.9.1 — so this sees non-strings only, and a JSON number has no
+     * padding to trim.
      */
     private fun JsonObject.numberText(key: String): String? = (this[key] as? JsonPrimitive)
         ?.takeIf { it !is JsonNull && !it.isString }

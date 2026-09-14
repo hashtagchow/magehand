@@ -550,14 +550,29 @@ object InventoryEngine {
     /**
      * The item's prose, out of DiceCloud's `{text, value, hash, inlineCalculations}` wrapper.
      *
-     * `text` before `value`: on every described item in the capture the two are identical,
-     * and `text` is the authored source while `value` is the post-computation render. A plain
-     * string is also accepted, because nothing guarantees the wrapper on a hand-made item.
+     * **`value` before `text`** (BUG-25 R1). A plain string is also accepted, because nothing
+     * guarantees the wrapper on a hand-made item.
+     *
+     * ### The reader used to prefer `text`, and the reasoning that put it there was the trap
+     *
+     * The old note read *"on every described item in the capture the two are identical, and
+     * `text` is the authored source while `value` is the post-computation render"* — which names
+     * the two keys correctly and then picks the wrong one. Identical-on-the-capture was true and
+     * proved nothing: an item whose description quotes no calculation renders to itself, so the
+     * capture could not distinguish the two orders. The 2026-09-14 REST probe of three live
+     * sheets could: `text` carries `{#spellList.dc}` / `{strength.modifier}` tokens verbatim and
+     * `value` carries the server's substituted string (*"DC 12"*). A magic item quoting the
+     * wearer's modifier is exactly the case the capture happened not to contain.
+     *
+     * Each half is blank-checked on its own, so `"value": ""` falls through to `text` rather than
+     * reading as absent. See `ActionEngine.text` for the full citation and for R3's
+     * no-client-computation rule.
      */
     private fun JsonObject.descriptionText(): String? {
         val raw = this[FIELD_DESCRIPTION]
         val text = when (raw) {
-            is JsonObject -> raw.string("text") ?: raw.string(FIELD_VALUE)
+            is JsonObject -> raw.string(FIELD_VALUE)?.takeIf { it.isNotBlank() }
+                ?: raw.string("text")?.takeIf { it.isNotBlank() }
             else -> string(FIELD_DESCRIPTION)
         }
         return text?.takeIf { it.isNotBlank() }

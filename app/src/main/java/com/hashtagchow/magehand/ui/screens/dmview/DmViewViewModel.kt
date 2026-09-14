@@ -498,6 +498,35 @@ class DmViewViewModel @Inject constructor(
     }
 
     /**
+     * A buff chip's ✕ on a card, or the concentration prompt's Drop when the source is a buff
+     * (FR-53 R5/R6).
+     *
+     * [toggleCondition]'s shape and its M5 lane, one write over: an id the card's board no longer
+     * carries — the spell ended between the frame and the tap, on any of six cards — surfaces
+     * through [refusalError], this screen's honest-error channel, rather than through nothing.
+     * The card is not necessarily the DM's own character, so a silently dropped tap here is a DM
+     * telling a player their Shield is off when it is not.
+     */
+    fun turnOffBuff(creatureId: String, propertyId: String) {
+        val character = writable(creatureId) ?: return
+        val buff = character.board.value.buffs.firstOrNull { it.propertyId == propertyId }
+        if (buff == null) {
+            refusalError.value = TrackerWriteFailure(
+                id = 0L,
+                kind = TrackerWriteKind.BUFF_OFF,
+                propertyId = null,
+                targetName = propertyId,
+                reason = null,
+                refusedOffline = false,
+                rateLimited = false,
+                dropped = true,
+            ).describe()
+            return
+        }
+        character.turnOffBuff(buff.propertyId, buff.name)
+    }
+
+    /**
      * Short or long rest, from a card.
      *
      * Not undoable, so the confirm dialog is the safety mechanism and the screen has already

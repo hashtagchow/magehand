@@ -341,14 +341,27 @@ fun CharacterHomeScreen(
                 // FR-31's prompt, above everything — including the tab row, because it is a
                 // statement about the *character* rather than about whichever surface is on
                 // screen, and because the DM card path (decision 9) puts it in the same place.
-                // Its Drop action is the existing `toggle` intent against the property the prompt
-                // names, which is why this feature added no intent at all.
+                // Its Drop action is an existing intent against the property the prompt names —
+                // `toggle` for a toggle source and, since FR-53 R6, `turnOffBuff` for a buff one.
+                // The prompt itself still adds no intent of its own.
                 concentrationPrompt?.let { prompt ->
                     ConcentrationPromptBanner(
                         prompt = prompt,
                         canWrite = uiState.tracker.canWrite,
-                        onDrop = { toggleId ->
-                            viewModel.toggleCondition(toggleId)
+                        // The banner composes Drop only when the prompt names one of the two, so
+                        // this dispatch cannot reach its `else`; naming both branches is what
+                        // keeps "which write?" a fact about the prompt rather than a re-derivation
+                        // in the composable. See `ConcentrationPrompt.canDrop`.
+                        onDrop = {
+                            // `if`/`else if`, not `?.let(…) ?: …` — review NIT-1; see
+                            // `TrackerScreen`'s banner for the whole note.
+                            val toggleId = prompt.toggleId
+                            val buffId = prompt.buffId
+                            if (toggleId != null) {
+                                viewModel.toggleCondition(toggleId)
+                            } else if (buffId != null) {
+                                viewModel.turnOffBuff(buffId)
+                            }
                             concentrationPrompt = null
                         },
                         onDismiss = { concentrationPrompt = null },
@@ -373,6 +386,9 @@ fun CharacterHomeScreen(
                             onItemSet = viewModel::setItemQuantity,
                             onDeathSaves = viewModel::setDeathSaves,
                             onToggle = viewModel::toggleCondition,
+                            // FR-53 R4. A second intent beside `onToggle` because it is a second
+                            // DDP method — see `TrackerActions.onTurnOffBuff`.
+                            onTurnOffBuff = viewModel::turnOffBuff,
                             onSelectRoll = viewModel::selectRoll,
                             onConnectionDetails = { connectionOpen = true },
                         ),

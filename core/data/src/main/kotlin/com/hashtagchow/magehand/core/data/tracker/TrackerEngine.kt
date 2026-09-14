@@ -1,6 +1,7 @@
 package com.hashtagchow.magehand.core.data.tracker
 
 import kotlinx.serialization.json.JsonObject
+import com.hashtagchow.magehand.core.model.AppliedBuff
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.DamageDefense
 import com.hashtagchow.magehand.core.model.DeathSaves
@@ -207,6 +208,7 @@ object TrackerEngine {
         val hitDice = properties.mapNotNull { hitDice(it, constitutionMod) }
         val items = properties.mapNotNull { item(it) }
         val toggles = properties.mapNotNull { toggle(it) }
+        val buffs = appliedBuffs(properties)
         val defenses = properties.mapNotNull { damageDefense(it) }
         val rolls = properties.mapNotNull { abilityCheck(it) ?: skillRoll(it) }
 
@@ -237,6 +239,10 @@ object TrackerEngine {
             hitDice = hitDice.sortedWith(NATURAL_ORDER),
             allItems = order(items, overrides, NATURAL_ORDER),
             pinnedItems = order(items.filter { it.propertyId in pinnedIds }, overrides, NATURAL_ORDER),
+            // FR-53 R1/R2. Sorted inside [appliedBuffs] and **not** override-filtered, for
+            // `limitedUses`' reason: no customize-sheet control can reach a buff chip, so the
+            // layer could only ever hide one irrecoverably. `show_toggles` hides the section.
+            buffs = buffs,
             activeToggles = orderToggles(toggles, overrides),
             defenses = orderDefenses(defenses, overrides),
             rolls = orderRolls(rolls, overrides),
@@ -700,6 +706,80 @@ object TrackerEngine {
             tags = p.strings("tags"),
             sortOrder = p.number("order") ?: 0,
         )
+    }
+
+    /**
+     * FR-53 R1 — the buffs **currently on the character**, in the sheet's own `order`.
+     *
+     * ### The rule is the blanket rule, and nothing else
+     *
+     * `type == "buff"`, not `removed`, not `inactive`. That is 03's skip applied to a fourth
+     * property type, and the operator's *"don't show unapplied buffs"* turns out to be exactly it:
+     * the 2026-09-14 probe found that an **applied** buff is a copy of a library template at the
+     * creature root carrying neither `inactive` nor `deactivatedByAncestor`, while every template
+     * carries `deactivatedByAncestor: true` → `inactive: true`. So the unapplied ones are
+     * precisely the inactive ones.
+     *
+     * Three filters were considered and each is deliberately **absent**, because a second rule
+     * here could only ever disagree with the first:
+     *
+     *  - **an ancestor walk** (*"keep only `parent.collection == 'creatures'`"*) — true of every
+     *    applied buff on the probe, and one homebrew sheet that nests a live buff one folder deep
+     *    away from silently losing it;
+     *  - **`silent`** — a probed sheet's applied *Shield* is `silent: true` and is unquestionably
+     *    on that character; `silent` is about the party feed, not about whether the buff is
+     *    running;
+     *  - **`target`** — `"self"` on the probe's example and meaningless for discovery.
+     *
+     * Unlike [toggle] this rule **does** skip `inactive`, and the asymmetry is the point: for a
+     * toggle, *off* is the state being rendered and hiding it would make it unreachable; for a
+     * buff, off means *not cast*, and there is nothing a player could do with it from here — a
+     * template is turned on by casting the spell, not by tapping a chip.
+     *
+     * `duration` is not read (R2): it is a `_calculation` and a parse error on the live sheet.
+     *
+     * Sorted here rather than by the override layer's `order` helper because a buff carries no
+     * `TrackerOverride` — see `TrackerBoard.buffs`. Name is the tie-break, as it is everywhere
+     * else on this board.
+     */
+    private fun appliedBuffs(properties: List<JsonObject>): List<AppliedBuff> = properties
+        .asSequence()
+        .filter { it.string("type") == TYPE_BUFF && !it.isSkipped() }
+        .mapNotNull { p ->
+            val id = p.string("_id") ?: return@mapNotNull null
+            (p.number("order") ?: 0) to AppliedBuff(
+                propertyId = id,
+                name = p.string("name").orEmpty(),
+                description = p.descriptionText(),
+            )
+        }
+        .sortedWith(compareBy({ it.first }, { it.second.name }))
+        .map { it.second }
+        .toList()
+
+    /**
+     * A `description` wrapper's prose — **`value` first, `text` second** (BUG-25 R1).
+     *
+     * The fourth copy of that one rule, beside `ActionEngine.text`, `QuestEngine.text` and
+     * `InventoryEngine.descriptionText`. Duplicated on `QuestEngine`'s stated terms — the readers
+     * are private to their engines and a shared version would have to live in [CreatureSheet]'s
+     * companion beside the *type* readers, which this is not — and narrowed to the one key this
+     * engine needs rather than generalised to a `key` parameter, because `description` is the only
+     * wrapper on the tracker's side of the sheet.
+     *
+     * `value` is the server's rendered string with `{#spellList.dc}`-style tokens substituted;
+     * `text` is the author's source. Each half is blank-checked on its own so `"value": ""` falls
+     * through rather than reading as absent, and nothing is computed here (R3). The emphasis the
+     * rendered string still carries is stripped **at the screen**, not here.
+     */
+    private fun JsonObject.descriptionText(): String? {
+        val raw = this["description"]
+        val text = when (raw) {
+            is JsonObject -> raw.string("value")?.takeIf { it.isNotBlank() }
+                ?: raw.string("text")?.takeIf { it.isNotBlank() }
+            else -> string("description")
+        }
+        return text?.takeIf { it.isNotBlank() }
     }
 
     /**

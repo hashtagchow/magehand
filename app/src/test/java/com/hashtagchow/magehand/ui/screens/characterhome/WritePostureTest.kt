@@ -173,6 +173,23 @@ class WritePostureTest {
         "useAction",
         "castSpell",
         "toggle",
+        // FR-53 R4, added deliberately per this list's own rule.
+        //
+        // It could not have been composed from anything above it. `toggle` is the nearest
+        // neighbour and it is the wrong write: `flipToggle` refuses a property that is not a
+        // manual toggle (the server's own `Computed toggle` precondition), so routing a buff
+        // through it would earn a guaranteed error. `removeItem` sends the identical DDP method
+        // and is also wrong, for the reason this list is written in *intents*: it names deleting
+        // an item, it assumes the destructive confirm dialog `OpenCharacter.removeItem` documents,
+        // and it files "Deleted Shield" on the history sheet. Two different player actions that
+        // happen to share a method are two intents.
+        //
+        // It is still an intent, not a method: `:app` says "turn this buff off" and says nothing
+        // about `creatureProperties.softRemove`, its `_id` parameter, or that the inverse is a
+        // different method in a different rate lane. The first two assertions above prove that and
+        // are unchanged — `softRemove` and `restore` have been in `mutationMethods` since FR-9, so
+        // the bytecode scan was already watching for exactly this string.
+        "turnOffBuff",
         "rest",
         "undoLastWrite",
         // Local Room rows, not the server — kept in the list so the assertion can be
@@ -220,6 +237,13 @@ class WritePostureTest {
         "useAction(String)",
         "castSpell(String,String,boolean)",
         "toggle(ConditionToggle)",
+        // FR-53. Two `String`s — the property id and the name for the receipt — and deliberately
+        // NOT an `AppliedBuff`, unlike `toggle`'s `ConditionToggle` one line up. The id is
+        // re-resolved against the live board inside `:core:data` (which is what makes a stale id
+        // fail closed), so handing the whole row over would let a caller pass a name the board
+        // disagrees with and would carry a model object into four call sites that each have only
+        // a chip id to hand. `removeItem(String,String)` is the same shape for the same reason.
+        "turnOffBuff(String,String)",
         "rest(RestKind)",
         "undoLastWrite(Continuation)",
         "setOverride(TrackerOverride,Continuation)",

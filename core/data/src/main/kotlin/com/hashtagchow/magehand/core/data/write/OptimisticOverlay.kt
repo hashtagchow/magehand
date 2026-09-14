@@ -18,6 +18,17 @@ sealed interface OptimisticChange {
     /** Show a toggle as [enabled] until the server confirms. */
     data class ToggleTo(override val propertyId: String, val enabled: Boolean) : OptimisticChange
 
+    /**
+     * The property is **gone** until the server says otherwise (FR-53 R4).
+     *
+     * The overlay's fourth vocabulary word, and the first that removes a row rather than changing
+     * a field on one. It is emitted by `WriteOp.TurnOffBuff` and by nothing else — `RemoveProperty`
+     * (the inventory delete) deliberately predicts nothing, because it arrives through a
+     * destructive confirm dialog that already covers the round trip, while a chip's ✕ is a bare
+     * tap and a chip that sits there afterwards reads as a dead control.
+     */
+    data class Removed(override val propertyId: String) : OptimisticChange
+
     /** The op touches this property but we cannot predict the result — show nothing. */
     data class None(override val propertyId: String) : OptimisticChange
 }
@@ -38,9 +49,15 @@ data class OptimisticOverlay(
     val valueDeltas: Map<String, Int> = emptyMap(),
     val valueAbsolutes: Map<String, Int> = emptyMap(),
     val toggles: Map<String, Boolean> = emptyMap(),
+    /**
+     * Property ids an unresolved op has taken off the board (FR-53 R4). A set rather than a map:
+     * "gone" has no degree, and two ops naming one id predict the same thing.
+     */
+    val removed: Set<String> = emptySet(),
 ) {
     val isEmpty: Boolean
-        get() = valueDeltas.isEmpty() && valueAbsolutes.isEmpty() && toggles.isEmpty()
+        get() = valueDeltas.isEmpty() && valueAbsolutes.isEmpty() && toggles.isEmpty() &&
+            removed.isEmpty()
 
     /** The value this overlay predicts for [propertyId], given the server's [serverValue]. */
     fun valueFor(propertyId: String, serverValue: Int): Int =
@@ -74,6 +91,18 @@ data class OptimisticOverlay(
             hitDice = board.hitDice.map(::apply),
             pinnedItems = board.pinnedItems.map(::apply),
             allItems = board.allItems.map(::apply),
+            // FR-53 R4. Named here for `limitedUses`' reason one field up — this function's KDoc
+            // records that a `copy` carries new fields through *unchanged*, which is right until a
+            // field is one the overlay is meant to change. `buffs` is one: without this line the
+            // chip stays on screen for the whole round trip after its ✕ is tapped.
+            //
+            // Only `buffs`, deliberately. `removed` is emitted by `WriteOp.TurnOffBuff` alone, so
+            // filtering the other lists would be dead code today — and, worse, would quietly
+            // reverse `RemoveProperty`'s stated decision (12 decision 7) that an item delete
+            // predicts nothing, the moment anyone gave that op an optimistic layer. A future op
+            // that removes some other kind of row extends this deliberately, with a test, which is
+            // BUG-20's stamp applied to the second of the two hand-maintained sums.
+            buffs = board.buffs.filterNot { it.propertyId in removed },
             activeToggles = board.activeToggles.map(::apply),
         )
     }
@@ -111,6 +140,7 @@ data class OptimisticOverlay(
             val deltas = LinkedHashMap<String, Int>()
             val absolutes = LinkedHashMap<String, Int>()
             val toggles = LinkedHashMap<String, Boolean>()
+            val removed = LinkedHashSet<String>()
             for (change in changes) {
                 when (change) {
                     is OptimisticChange.ValueDelta ->
@@ -121,10 +151,11 @@ data class OptimisticOverlay(
                         deltas.remove(change.propertyId)
                     }
                     is OptimisticChange.ToggleTo -> toggles[change.propertyId] = change.enabled
+                    is OptimisticChange.Removed -> removed += change.propertyId
                     is OptimisticChange.None -> Unit
                 }
             }
-            return OptimisticOverlay(deltas.filterValues { it != 0 }, absolutes, toggles)
+            return OptimisticOverlay(deltas.filterValues { it != 0 }, absolutes, toggles, removed)
         }
     }
 }

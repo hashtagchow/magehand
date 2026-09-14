@@ -261,6 +261,42 @@ class TrackerWriteStateTest {
         assertTrue(described.none { it.isBlank() })
     }
 
+    /**
+     * FR-53 R4's receipt, **verbatim**, and its undo twin.
+     *
+     * ### Why an exact-string pin, when the suite already has a uniqueness test
+     *
+     * The 1.19.0 review (MEDIUM-3) and the prerelease sweep (mutation (e)) independently changed
+     * `BUFF_OFF`'s branch to `"Removed $targetName"` and watched the **whole `:app` suite pass**.
+     * `every write kind has its own sentence` only asserts the sentences are pairwise distinct and
+     * non-blank, and *"Removed Rage"* is distinct from every other kind's — so it absorbed the
+     * mutation silently. The undo twin went red under the same test only by accident, colliding
+     * with `ITEM_RESTORE`'s *"Restored …"*.
+     *
+     * R4 quotes *"Turned off Shield"* in the ledger, the operator reads it on the history sheet
+     * and in the snackbar, and the live check photographed it. A string with that much standing
+     * behind it should not be free to drift, and `hp writes read as damage and healing` two lines
+     * down is the standing precedent for pinning one exactly.
+     *
+     * ### The name is "Shield" and not the file's usual "1st Level"
+     *
+     * So the assertion reads as the sentence the ledger quotes, character for character, rather
+     * than as a template a reader has to substitute into.
+     */
+    @Test
+    fun `a turned-off buff reads exactly as the ruling quotes it`() {
+        assertEquals(
+            "Turned off Shield",
+            write(1, kind = TrackerWriteKind.BUFF_OFF, name = "Shield").describe(),
+        )
+        assertEquals(
+            "the undo's own sentence — deliberately NOT ITEM_RESTORE's \"Restored Shield\", " +
+                "since one history list can carry both",
+            "Turned Shield back on",
+            write(2, kind = TrackerWriteKind.BUFF_RESTORE, name = "Shield").describe(),
+        )
+    }
+
     @Test
     fun `hp writes read as damage and healing, not as spending`() {
         assertEquals("Took 5 damage", write(1, kind = TrackerWriteKind.TAKE_DAMAGE, amount = 5).describe())

@@ -161,9 +161,10 @@ interface OpenCharacter {
      * reused deliberately and for the identical measured reason: N observers of one sheet each
      * seeing the same transition would each act on it, and the DM dashboard watches six.
      *
-     * A read `val` again, so `WritePostureTest`'s catalog is untouched — this feature adds **zero**
-     * new intents. Its one action, "Drop concentration", is the existing [toggle] intent against
-     * the property the prompt names ([ConcentrationPrompt.toggleId]).
+     * A read `val` again. Its one action, "Drop concentration", is an existing intent against the
+     * property the prompt names: [toggle] for a [ConcentrationPrompt.toggleId] and, since FR-53
+     * R6, [turnOffBuff] for a [ConcentrationPrompt.buffId]. FR-31 added **zero** intents and FR-53
+     * added one, for its own chips — this flow still adds none.
      */
     val concentrationPrompts: Flow<ConcentrationPrompt>
 
@@ -592,6 +593,45 @@ interface OpenCharacter {
 
     /** Flip a condition toggle (a chip tapped). */
     fun toggle(condition: ConditionToggle)
+
+    /**
+     * End a buff that is running on the character — the tracker chip's ✕, the detail sheet's
+     * *Turn off*, the DM card's ✕ and the concentration banner's ✕ (FR-53 R4/R5/R6, design 21
+     * decision 4).
+     *
+     * ### An intent, not a method, and the distinction is doing work here
+     *
+     * On the wire this is `creatureProperties.softRemove` — the same call [removeItem] makes, and
+     * the one DiceCloud's own sheet makes for its remove button on an applied buff (2026-09-14
+     * probe of the server's client bundle; there is no buff-specific method). This interface names
+     * what the *player* did, and *"I turned Shield off"* and *"I deleted my Torch"* are different
+     * events with different receipts, different undo sentences and different coalescing. See
+     * `WriteOp.TurnOffBuff` for the four ways the two ops diverge below this line.
+     *
+     * **Undoable**, and completely: the server clears `removed` on `restore` and recomputes the
+     * character's AC on either call, so an undo genuinely puts the spell effect back. That is
+     * [removeItem]'s server half without its local-character asymmetry, because there is no local
+     * half at all.
+     *
+     * ### No confirm dialog, and that is why the write is optimistic
+     *
+     * Unlike [removeItem] this call does **not** assume a dialog has run. Ending a buff is not
+     * destructive — the effect is reversible by one UNDO and by casting the spell again — and a
+     * confirm in front of a chip's ✕ would put a modal between a player and a one-second gesture
+     * in combat. The trade is paid for on the other side: the op predicts the chip's disappearance
+     * so the tap has visible latency cover, which a confirmed delete does not need.
+     *
+     * ### Server only
+     *
+     * A local character has no buffs (09) — nothing on the form can create one — so
+     * `LocalOpenCharacter` implements this as a no-op and no local screen can reach it:
+     * `LocalTrackerBoard.buffs` is empty, so there is never a chip to tap.
+     *
+     * @param targetName the buff's name at tap time, for the history entry and the snackbar —
+     *   [removeItem]'s convention exactly. The implementation re-reads it from the board and this
+     *   is only a fallback for a caller that has one already.
+     */
+    fun turnOffBuff(propertyId: String, targetName: String = "")
 
     /**
      * Short or long rest. **Not undoable** — the server applies every reset and every
@@ -1517,6 +1557,10 @@ internal class DefaultOpenCharacter(
                 // Drop and the tracker banner's ✕ can never disagree — see
                 // `TrackerBoard.concentrationToggle`. `null` leaves the prompt informational.
                 toggleId = board.concentrationToggle?.propertyId,
+                // FR-53 R6: a buff-sourced prompt now carries a Drop, because `softRemove` is a
+                // write this app can make correctly. `ConcentrationPromptTest`'s "no drop" case
+                // is corrected to match.
+                buffId = board.concentrationBuff?.propertyId,
             ),
         )
     }
@@ -2095,6 +2139,35 @@ internal class DefaultOpenCharacter(
 
     override fun toggle(condition: ConditionToggle) {
         session.writeQueue.submit(WriteOp.flip(condition))
+    }
+
+    /**
+     * `creatureProperties.softRemove` on an applied buff (FR-53 R4).
+     *
+     * ### The board lookup is the gate, exactly as it is for [removeItem]
+     *
+     * Resolving the id against the live board rather than trusting the caller does the same two
+     * jobs it does there. It supplies the buff's **real name** for the receipt, so *"Turned off
+     * Shield"* cannot end up quoting a Meteor id — and it **fails closed on a stale id**: a buff
+     * that ended on another device, or this very call arriving twice, resolves to nothing and the
+     * tap is dropped rather than soft-removing whatever property now holds that id.
+     *
+     * It is also a type gate. `TrackerBoard.buffs` contains applied buffs and nothing else, so an
+     * id naming a toggle, an item or a spell slot cannot reach `softRemove` through this intent —
+     * which matters more here than for a delete, because the four call sites (chip, sheet, DM
+     * card, banner) all hand over a bare string.
+     *
+     * `session.board` is the **overlay-applied** board, which makes the lookup do one more job for
+     * free: a second ✕ tap while the first call is still in flight finds no chip and is dropped
+     * here, before the queue sees it. `TurnOffBuff`'s coalesce key is the belt to that braces —
+     * it catches the pair that arrive inside one dispatch — and a rollback puts the chip back, at
+     * which point tapping again is a new gesture and is meant to send.
+     */
+    override fun turnOffBuff(propertyId: String, targetName: String) {
+        val buff = session.board.value.buffs.firstOrNull { it.propertyId == propertyId } ?: return
+        session.writeQueue.submit(
+            WriteOp.turnOffBuff(propertyId, buff.name.ifBlank { targetName }),
+        )
     }
 
     override fun rest(kind: RestKind) {

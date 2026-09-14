@@ -327,6 +327,10 @@ fun ItemDetailSheet(
                 }
             }
 
+            // BUG-25 R2 reaches this description too (review LOW-1). The strip is on
+            // `InventoryRowState.description`, one layer up, for `ActionDetailState.body`'s
+            // reason: it is a rule, and a rule belongs where `InventoryUiStateTest` can assert it
+            // without a Compose runtime.
             row.description?.let { description ->
                 Spacer8()
                 HorizontalDivider()

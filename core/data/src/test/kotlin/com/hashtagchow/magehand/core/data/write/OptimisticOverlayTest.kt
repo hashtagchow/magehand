@@ -1,5 +1,6 @@
 package com.hashtagchow.magehand.core.data.write
 
+import com.hashtagchow.magehand.core.model.AppliedBuff
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.DamageDefense
 import com.hashtagchow.magehand.core.model.DefenseKind
@@ -30,6 +31,10 @@ class OptimisticOverlayTest {
     private val slot = TrackedResource("s1", TrackerKind.SPELL_SLOT, "1st Level", 3, 4)
     private val potion = TrackedResource("i1", TrackerKind.ITEM, "Potion of Healing", 2, 2)
     private val bless = ConditionToggle("t1", "Bless", enabled = false, flippable = true)
+    // FR-53's row. Two of them, because the interesting failure is a filter that takes the wrong
+    // chip — or all of them — rather than one that takes none.
+    private val shieldBuff = AppliedBuff("b1", "Shield", "**+5** to AC")
+    private val blessBuff = AppliedBuff("b2", "Bless", null)
     // H1: FR-30's row, 3 of 4 d8s remaining — the fixture the review's three pins share below.
     private val hitDie = TrackedResource("hd1", TrackerKind.HIT_DICE, "Hit Dice", 3, 4, dieSize = "d8")
     // FR-44's row, 2 of 2 uses left. The same class of field as `hitDice` above and the same trap.
@@ -42,6 +47,7 @@ class OptimisticOverlayTest {
         limitedUses = listOf(ability),
         pinnedItems = listOf(potion),
         allItems = listOf(potion),
+        buffs = listOf(shieldBuff, blessBuff),
         activeToggles = listOf(bless),
         defenses = listOf(
             DamageDefense("d1", DefenseKind.RESISTANT, listOf("radiant", "necrotic"), "A Feature", 180),
@@ -175,5 +181,76 @@ class OptimisticOverlayTest {
         )
         val applied = spendThenSet.applyTo(board)
         assertEquals(4, applied.hitDice.single().value)
+    }
+
+    // --- FR-53 R4: the chip leaves the row immediately -----------------------
+
+    /**
+     * The whole of what a turn-off predicts: **that chip**, gone, and nothing else about the
+     * board touched.
+     *
+     * This is the class KDoc's warning arriving on a new list. `buffs` is the field FR-53 adds,
+     * and `copy`'s pass-through — which is what makes every other new field safe — is exactly
+     * wrong for this one: left to it, the chip would sit on screen for the whole round trip after
+     * its ✕ was tapped, which reads as a dead control and earns a second tap.
+     */
+    @Test
+    fun `turning a buff off removes its chip and leaves the rest of the board alone`() {
+        val applied = OptimisticOverlay.of(listOf(OptimisticChange.Removed("b1"))).applyTo(board)
+
+        assertEquals(listOf(blessBuff), applied.buffs)
+        assertEquals("the other lists are untouched", board.activeToggles, applied.activeToggles)
+        assertEquals(board.slots, applied.slots)
+        assertEquals(board.hp, applied.hp)
+    }
+
+    /**
+     * A `Removed` naming nothing on the board changes nothing — the stale-id case, from the
+     * overlay's side.
+     *
+     * `:core:data`'s intent already drops a tap whose id the board does not carry, so this is the
+     * second gate rather than the only one; it matters because the overlay is applied to *every*
+     * board this session produces, including ones rebuilt after a sync that ended the buff by
+     * another route.
+     */
+    @Test
+    fun `a removal for an unknown id changes nothing`() {
+        val applied = OptimisticOverlay.of(listOf(OptimisticChange.Removed("nope"))).applyTo(board)
+        assertEquals(board.buffs, applied.buffs)
+    }
+
+    /** Two removals fold into one set entry, and an empty one is still an empty overlay. */
+    @Test
+    fun `removals fold and an overlay of none is empty`() {
+        val folded = OptimisticOverlay.of(
+            listOf(OptimisticChange.Removed("b1"), OptimisticChange.Removed("b1")),
+        )
+        assertEquals(setOf("b1"), folded.removed)
+        assertFalse("a pending removal is not an empty overlay", folded.isEmpty)
+        assertTrue(OptimisticOverlay.of(emptyList()).isEmpty)
+    }
+
+    /**
+     * A removal rides alongside the other three kinds without disturbing them, and an
+     * `OptimisticChange.None` for the same property does not resurrect the chip.
+     *
+     * `None` means *"this op touches the property and we cannot predict the result"*, which is a
+     * different statement from "nothing happened to it" — folding it as an erasure would have made
+     * any op that declined to predict undo a sibling op that did.
+     */
+    @Test
+    fun `a removal coexists with value and toggle predictions`() {
+        val applied = OptimisticOverlay.of(
+            listOf(
+                OptimisticChange.ValueDelta("s1", -1),
+                OptimisticChange.Removed("b2"),
+                OptimisticChange.ToggleTo("t1", true),
+                OptimisticChange.None("b2"),
+            ),
+        ).applyTo(board)
+
+        assertEquals(2, applied.slots.single().value)
+        assertEquals(listOf(shieldBuff), applied.buffs)
+        assertTrue(applied.activeToggles.single().enabled)
     }
 }

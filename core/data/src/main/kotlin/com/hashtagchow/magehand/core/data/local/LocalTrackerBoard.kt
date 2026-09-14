@@ -29,6 +29,11 @@ import com.hashtagchow.magehand.core.model.toTrackedResource
  *   form has no field for one, so there is nothing to render and nothing to flip. FR-6 makes
  *   the section hidden by default anyway, which is what makes this consistent rather than a
  *   special case.
+ * - **Applied buffs** ([TrackerBoard.buffs]). FR-53 R4: *"no local-character path"*. A buff is a
+ *   `creatureProperty` a spell put on a sheet, and the form has no spell that could put one there
+ *   — so the list is empty for the same reason `activeToggles` is, and the Conditions section is
+ *   absent rather than showing an empty chip row. `LocalOpenCharacter.turnOffBuff` is a no-op for
+ *   the matching reason: there is never an id here for it to be called with.
  * - **Defenses**. Read off `damageMultiplier` properties on a DiceCloud sheet; 09's
  *   explicit out-of-scope list keeps them out of 1.1's form.
  * - **Temp HP**. Discovered on a sheet, not offered by the form.

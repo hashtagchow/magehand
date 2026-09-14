@@ -236,6 +236,22 @@
     <string name="tracker_conditions_inactive">%1$d inactive</string>
     <string name="tracker_conditions_show_inactive">Show %1$d inactive conditions</string>
     <string name="tracker_conditions_hide_inactive">Hide inactive conditions</string>
+    <!-- FR-53 (docs/design/21-applied-buffs.md). The buff chips lead the Conditions section, so
+         the spoken form has to say which KIND of chip this is: a screen-reader user hears one
+         flat list where a sighted one sees two shapes, and "Shield" alone would leave them
+         unable to tell a spell running on them from a condition they can flip. The word is a
+         suffix rather than a prefix so the NAME is what arrives first, which is what a player
+         scanning by ear is listening for. R3 fixes both sentences. -->
+    <string name="tracker_buff_spoken">%1$s, buff</string>
+    <string name="tracker_buff_turn_off">Turn off %1$s</string>
+    <!-- The detail sheet's button. Unparameterised, unlike the chip's ✕ above: the sheet has
+         already said which buff this is, in its own title, and repeating the name on the button
+         under it would be the same statement twice on one screen. -->
+    <string name="tracker_buff_turn_off_short">Turn off</string>
+    <!-- Drawn when the buff carries no description. NOT a claim about the buff — a sheet is
+         free to describe nothing — so it says what the app knows rather than what the spell
+         does. -->
+    <string name="tracker_buff_no_description">No description on the sheet.</string>
     <string name="tracker_hit_points">Hit points</string>
     <string name="tracker_temp_hp">+%1$d temp HP</string>
     <!-- FR-50 (docs/design/18-table-pack.md decisions 21-23). Information on the HP block, not
@@ -637,9 +653,13 @@
          instead, because "Level 0" is not what any player or any rulebook calls a cantrip.
 
          `actions_unprepared` is a badge derived from the `prepared`/`alwaysPrepared` FIELDS, never
-         from `inactive` — decision 5, and the Animate Dead case behind it. `actions_inactive` is
-         the separate, coexisting state: it says the sheet has switched the row off, and it
-         deliberately does not say why, because the wire does not.
+         from `inactive` — decision 5, and the Animate Dead case behind it. That half stands.
+
+         `actions_inactive` is DEAD COPY as of FR-55 (2026-09-14) and is kept deliberately per its
+         R2: `ActionEngine.listedRow` drops a switched-off row, so no server sheet can produce a
+         row that draws this badge. It stays because the field it renders stays — `isUsable` is
+         gated on `inactive`, and a row arriving by some non-engine route would still need a word
+         rather than a silent grey. Do not reword it to describe something a player can see.
 
          `actions_no_damage_hint` is NOT used for a row that simply deals no damage — most do not.
          See ActionsScreen.
@@ -685,6 +705,13 @@
          rules all live there. This resource stays so the label still passes through the
          localisable string table like every other user-visible string on the surface. -->
     <string name="actions_damage_rider">%1$s</string>
+    <!-- D2 (1.19.0 WebHand review, both clients). The third empty state, and it is NOT
+         `actions_empty`: that one says the sheet names no spell and no action, which would be a
+         lie about a character whose rows are all switched off. One line, present tense, about
+         availability rather than about the sheet — and no count, because "3 switched off" invites
+         a control to see them and FR-55's whole point is that they are not listed. -->
+    <string name="actions_none_available">Nothing is available right now</string>
+    <string name="actions_none_available_hint">Every spell and action on this sheet is switched off.</string>
     <string name="actions_empty">Nothing to act with</string>
     <string name="actions_empty_hint">This character\'s sheet has no spells or actions on it.</string>
     <!-- FR-49 decision 1: the local empty state is the ordinary first sight of this tab, not a

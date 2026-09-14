@@ -13,6 +13,7 @@ import com.hashtagchow.magehand.core.model.TrackedResource
 import com.hashtagchow.magehand.core.model.UseTarget
 import com.hashtagchow.magehand.core.model.WeaponMastery
 import com.hashtagchow.magehand.core.model.spellSlotOptions
+import com.hashtagchow.magehand.core.model.withoutMarkdownEmphasis
 
 /**
  * The Actions surface's rendered state (docs/design/16-actions-and-feed.md decisions 3–6, FR-26).
@@ -95,6 +96,23 @@ data class ActionsUiState(
      * omitting it from one that could not.
      */
     val usesAreUndoable: Boolean = false,
+    /**
+     * `ActionBoard.switchedOffRowCount`, carried through — D2.
+     *
+     * Board-derived, so it survives [withView]'s `copy` and is the **same** number whether or not
+     * a search is running: a query narrows what is *listed*, and how many rows the sheet has
+     * switched off is not something a query changes.
+     */
+    val switchedOffRowCount: Int = 0,
+    /**
+     * Whether the **board** carries any spell row, before any search narrows the sections
+     * (NEW-5, ruled to match WebHand).
+     *
+     * Board-derived for [switchedOffRowCount]'s reason and read by [showsSpellLists]: a query
+     * changes which rows are *listed*, and whether this character casts is not something a query
+     * changes.
+     */
+    val hasSpellRows: Boolean = false,
 ) {
     /** How many rows match right now — the live region reads this (decision 6 / FR-24). */
     val matchCount: Int get() = sections.sumOf { it.rows.size }
@@ -102,8 +120,71 @@ data class ActionsUiState(
     /** True while the player has typed something. */
     val filterActive: Boolean get() = query.isNotBlank()
 
-    /** Decision 9's honest empty state: the character genuinely has nothing to act with. */
-    val isEmpty: Boolean get() = sections.isEmpty() && !filterActive
+    /**
+     * Decision 9's honest empty state: the character genuinely has nothing to act with.
+     *
+     * **And nothing switched off either** (D2). A sheet whose every row is unavailable is not a
+     * sheet with nothing on it, and telling the player it is would be the app reporting on its own
+     * filter rather than on their character — see [showsNoneAvailable], which takes that case.
+     */
+    val isEmpty: Boolean get() = sections.isEmpty() && !filterActive && switchedOffRowCount == 0
+
+    /**
+     * D2's third state: the sheet **has** rows and none of them is available right now.
+     *
+     * Distinct from [isEmpty] above and from [showsNoMatches] below, and all three have to be
+     * distinct because they answer different questions. *"This character has nothing to act
+     * with"* is about the sheet; *"no rows match 'fireb'"* is about the query; this one is about
+     * the rows' state, and it is the only one of the three the player can fix by turning something
+     * back on in DiceCloud.
+     *
+     * Not shown while filtering: a query with no matches is [showsNoMatches]' sentence, which
+     * prints the query back, and two empty-state lines at once would be the screen arguing with
+     * itself.
+     */
+    val showsNoneAvailable: Boolean
+        get() = sections.isEmpty() && !filterActive && switchedOffRowCount > 0
+
+    /**
+     * Whether the Actions surface **exists** for this character — `ActionBoard.hasAnyRows` at the
+     * UI layer (D2).
+     *
+     * Read by `CharacterHomeUiState.hasActions`, which is what `serverHomeTabs` and
+     * `serverPaneSurfaces` key on. Deliberately **not** `sections.isNotEmpty()`, which is what it
+     * used to be: FR-55 empties `sections` for a character whose every row is switched off, and
+     * that must cost them the rows, not the tab.
+     */
+    val hasRows: Boolean get() = sections.isNotEmpty() || switchedOffRowCount > 0
+
+    /**
+     * Whether the spell-list DC/modifier block draws (D2).
+     *
+     * A spell list is a header for spells; with no spell section under it, the header is a stat
+     * floating over nothing. That is the shape FR-55 makes reachable — every spell on a sheet
+     * switched off while its actions stay — and the operator's *"only show what is actually
+     * available"* covers a DC nothing can be cast at.
+     *
+     * **All-or-nothing across lists, not per list**, and that is a real limit rather than a
+     * simplification: `ActionEngine` does not record which `spellList` a `SpellEntry` came from
+     * (nothing has needed it), so a sheet with two lists — one live, one entirely switched off —
+     * still draws both headers. Recorded here rather than papered over; per-list attribution is a
+     * discovery change and a new model field, which D2 does not ask for.
+     *
+     * ### A SEARCH does not take the block away (NEW-5, ruled to match WebHand)
+     *
+     * Read off [hasSpellRows], which is board-derived, and deliberately **not** off [sections],
+     * which `withView` replaces with the query-filtered set before the screen reads this. The
+     * first cut read `sections` and so dropped the DC block the moment a player typed *"dagger"*
+     * on a caster — a search-behaviour change D2 never asked for, since the old gate was
+     * `spellLists.isNotEmpty()` and a query never touched it.
+     *
+     * The distinction the two readings blur: this block is a **stat about the character**, like
+     * the tracker's AC badge, not a header over the rows below it. FR-55 may take it away, because
+     * FR-55 changes what the character *has available*; a search may not, because a search changes
+     * only what is on screen this second — and a caster who filters to their dagger has not
+     * stopped having a spell save DC.
+     */
+    val showsSpellLists: Boolean get() = spellLists.isNotEmpty() && hasSpellRows
 
     /** FR-24 decision 16's "No … match" line, which prints the query back. */
     val showsNoMatches: Boolean get() = filterActive && matchCount == 0
@@ -225,12 +306,30 @@ data class ActionDetailState(
      *
      * `description` first because it is the rules text and `summary` is DiceCloud's own one-line
      * gloss of it — a reader who opened the detail sheet asked for the long answer.
+     *
+     * ### Emphasis is stripped HERE, at render (BUG-25 R2)
+     *
+     * The string arriving from the engine is now the server's **rendered** description (R1: the
+     * wrapper's `value`, not its `text`), and the library writes that with markdown emphasis in
+     * it: *"must succeed a \*\*DC 12\*\* Intelligence Saving Throw"*. Decision 4 declines a
+     * markdown renderer, so the honest remainder is to take the asterisks off —
+     * [withoutMarkdownEmphasis], the same regex `ActionEngine` has run on the mastery block since
+     * FR-47, now shared from `:core:model`.
+     *
+     * **At render and not in the engine**, which is R2's own wording and is the load-bearing half.
+     * The engine's job is to say what the sheet says; a `**` that never reached a model object
+     * would make the contract export publish a string DiceCloud did not send, and would make
+     * "did the server bold this?" unanswerable from anything this app records. Stripping in the
+     * one place the characters become pixels keeps the model faithful and the screen readable.
+     *
+     * A spaced *"2 \* your level"* survives untouched — see the regex's own KDoc for why that
+     * case is the reason it is not a bare `\*+`.
      */
     val body: String?
         get() = when (val entry = row) {
             is ActionRow.Spell -> entry.entry.description ?: entry.entry.summary
             is ActionRow.Action -> entry.entry.description ?: entry.entry.summary
-        }?.takeIf { it.isNotBlank() }
+        }?.withoutMarkdownEmphasis()?.takeIf { it.isNotBlank() }
 
     /**
      * FR-49 decision 5's upcast paragraph, or `null` — the catalog's own text, verbatim.
@@ -274,12 +373,16 @@ data class ActionDetailState(
             return when (val entry = row) {
                 is ActionRow.Spell -> when {
                     entry.entry.showsUnpreparedBadge -> UnusableReason.UNPREPARED
+                    // FR-55: no server sheet produces this branch any more. Kept per R2 —
+                    // see `UnusableReason.INACTIVE`.
                     entry.entry.inactive -> UnusableReason.INACTIVE
                     !entry.entry.cost.satisfied -> UnusableReason.NO_RESOURCES
                     else -> UnusableReason.NO_USES
                 }
 
                 is ActionRow.Action -> when {
+                    // FR-55: no server sheet produces this branch any more. Kept per R2 —
+                    // see `UnusableReason.INACTIVE`.
                     entry.entry.inactive -> UnusableReason.INACTIVE
                     !entry.entry.cost.satisfied -> UnusableReason.NO_RESOURCES
                     else -> UnusableReason.NO_USES
@@ -293,7 +396,14 @@ enum class UnusableReason {
     /** `!prepared && !alwaysPrepared` — 17 decision 2, and probe U2's burnt slot. */
     UNPREPARED,
 
-    /** `inactive: true` — the sheet has switched this off, or an ancestor is disabled. */
+    /**
+     * `inactive: true` — the sheet has switched this off, or an ancestor is disabled.
+     *
+     * **Unreachable from a DiceCloud sheet since FR-55**: `ActionEngine.listedRow` drops the row,
+     * so no server-built entry carries it. Kept with the field it reads (R2) — `isUsable` is
+     * gated on `inactive`, and that gate is what makes the engine's filter safe to rely on rather
+     * than the only thing standing in the way.
+     */
     INACTIVE,
 
     /** A consumed attribute or item the sheet does not hold enough of — client-derived. */
@@ -549,6 +659,8 @@ fun toActionsUiState(
         usesInFlight = usesInFlight,
         canWrite = canWrite,
         usesAreUndoable = usesAreUndoable,
+        switchedOffRowCount = board.switchedOffRowCount,
+        hasSpellRows = board.spells.isNotEmpty(),
     ).withView(query = query, collapsedKeys = collapsedKeys)
 }
 

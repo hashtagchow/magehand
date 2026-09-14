@@ -155,13 +155,23 @@ object QuestEngine {
      * than shared: it is nine lines, both copies are private to their engine, and the shared
      * version would have to live in `CreatureSheet`'s companion beside the primitive readers —
      * which are about *types* (`string`, `number`, `decimal`), while this is about two particular
-     * DiceCloud wrapper shapes. `text` before `value` because where both exist `text` is the
-     * rendered string and `value` is the un-substituted source. Blank normalises to `null` so
-     * "absent reads as absent" holds without every caller repeating a `takeIf`.
+     * DiceCloud wrapper shapes. Blank normalises to `null` so "absent reads as absent" holds
+     * without every caller repeating a `takeIf`.
+     *
+     * ### `value` before `text` — BUG-25 R1
+     *
+     * This KDoc used to say the reverse (*"`text` is the rendered string and `value` is the
+     * un-substituted source"*), copied from [ActionEngine]'s, and so did the code. The
+     * 2026-09-14 REST probe of three live sheets settled the direction the other way: `text` is
+     * the **source**, carrying `{#spellList.dc}`-style tokens verbatim, and `value` is the
+     * **server-rendered** string with every token substituted. A quest note quoting a modifier
+     * printed the token. Duplicated readers means the flip is applied in each copy; that is the
+     * cost this KDoc's first paragraph accepted, paid once. See `ActionEngine.text` for the
+     * probe's own words and for why the change is inert on `_calculation` wrappers.
      */
     private fun JsonObject.text(key: String): String? = when (val element = this[key]) {
-        is JsonObject -> element.string("text")
-            ?: element.string("value")
+        is JsonObject -> element.string("value")?.takeIf { it.isNotBlank() }
+            ?: element.string("text")?.takeIf { it.isNotBlank() }
             ?: element.number("value")?.toString()
         else -> string(key)
     }?.takeIf { it.isNotBlank() }

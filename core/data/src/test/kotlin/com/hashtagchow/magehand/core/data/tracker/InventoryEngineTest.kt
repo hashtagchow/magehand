@@ -435,6 +435,46 @@ class InventoryEngineTest {
         assertEquals("A leather tome.", board.carried.single().description)
     }
 
+    /**
+     * BUG-25 R4 on the inventory reader.
+     *
+     * The test above cannot see the bug and never could: its two keys are **identical**, which is
+     * the shape the 2026-08 capture had and the shape the old KDoc reasoned from (*"on every
+     * described item in the capture the two are identical"*). An item whose description quotes a
+     * calculation is the case that tells the orders apart, and the 2026-09-14 probe found it —
+     * `text` is the source with `{…}` tokens, `value` is the server's rendered string.
+     */
+    @Test
+    fun `an item description renders the server's value and never the source token`() {
+        val board = InventoryEngine.build(
+            sheet(
+                """{"_id":"a","type":"item","name":"Belt of Giant Strength","quantity":1,
+                    "description":{"text":"Your Strength becomes {strength.modifier}.",
+                    "value":"Your Strength becomes **+5**.","hash":1}}""",
+            ),
+        )
+        assertEquals("Your Strength becomes **+5**.", board.carried.single().description)
+    }
+
+    /** R3: no `value`, or a blank one, falls back to the source `text` rather than to nothing. */
+    @Test
+    fun `an item description with no usable value falls back to the source text`() {
+        assertEquals(
+            "the source, unsubstituted",
+            InventoryEngine.build(
+                sheet("""{"_id":"a","type":"item","name":"X","quantity":1,
+                    "description":{"text":"the source, unsubstituted"}}"""),
+            ).carried.single().description,
+        )
+        assertEquals(
+            "still the source",
+            InventoryEngine.build(
+                sheet("""{"_id":"a","type":"item","name":"X","quantity":1,
+                    "description":{"text":"still the source","value":"  "}}"""),
+            ).carried.single().description,
+        )
+    }
+
     @Test
     fun `a plain string description and a blank one both read correctly`() {
         assertEquals(

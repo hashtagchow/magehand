@@ -864,6 +864,34 @@ class InventoryUiStateTest {
         assertNull(state.sections.single { it.kind == InventorySectionKind.GEAR }.rows.single().description)
     }
 
+    /**
+     * BUG-25 R2 on this surface (1.19.0 review LOW-1).
+     *
+     * R1 flipped `InventoryEngine.descriptionText` to the server's **rendered** string, which is
+     * exactly the string that still carries the library's `**`. The contract exports
+     * `#text.stripAtRender` as a rule about every description a client displays, and this sheet
+     * displays one — before this fix two of the app's four display sites did not follow the rule
+     * it exports.
+     *
+     * The spaced `*` case is here for the reason it is everywhere else: it is a multiplication
+     * sign in prose, and eating it would be the app deleting a character the server sent.
+     */
+    @Test
+    fun `an item description is stripped of markdown emphasis at the state layer`() {
+        val state = map(
+            board.copy(
+                carried = listOf(
+                    item("c1", "Belt", description = "Your Strength becomes **+5**."),
+                    item("c2", "Rod", description = "Heals 2 * your level."),
+                ),
+            ),
+        )
+        val rows = state.sections.single { it.kind == InventorySectionKind.GEAR }.rows
+
+        assertEquals("Your Strength becomes +5.", rows.single { it.propertyId == "c1" }.description)
+        assertEquals("Heals 2 * your level.", rows.single { it.propertyId == "c2" }.description)
+    }
+
     @Test
     fun `a row is findable by id from anywhere on the board, and unknown ids are null`() {
         val state = map()

@@ -11,6 +11,7 @@ import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.core.model.InventoryContainer
 import com.hashtagchow.magehand.core.model.InventoryItem
 import com.hashtagchow.magehand.core.model.Wallet
+import com.hashtagchow.magehand.core.model.withoutMarkdownEmphasis
 import com.hashtagchow.magehand.ui.components.DirectEntryKeys
 import com.hashtagchow.magehand.ui.components.DirectEntryKind
 import com.hashtagchow.magehand.ui.components.DirectEntryTarget
@@ -1332,7 +1333,14 @@ private fun InventoryItem.toRow(
         equipped = equipped,
         weightLb = weightLb,
         valueGp = valueGp,
-        description = description?.takeIf { it.isNotBlank() },
+        // BUG-25 R2, extended to this surface by the 1.19.0 review's LOW-1. R1 flipped
+        // `InventoryEngine.descriptionText` to the server's RENDERED string, which is precisely
+        // the string that still carries the library's `**` — and the contract exports
+        // `#text.stripAtRender` as a rule about every description a client displays, not only the
+        // Actions tab's. Stripped here rather than in the engine, and here rather than in
+        // `ItemDetailSheet`, for `ActionDetailState.body`'s two reasons: the model keeps the
+        // server's own characters, and a rule belongs where a JVM test can reach it.
+        description = description?.withoutMarkdownEmphasis()?.takeIf { it.isNotBlank() },
         requiresAttunement = requiresAttunement,
         attuned = attuned,
         isEquippable = isEquippable,

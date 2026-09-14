@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -40,10 +41,15 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.InputChip
+import androidx.compose.material3.InputChipDefaults
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -148,6 +154,23 @@ data class TrackerActions(
 
     /** A condition chip, or the concentration banner's ✕ (the same `flipToggle` write). */
     val onToggle: (propertyId: String) -> Unit = {},
+
+    /**
+     * FR-53 R4: a buff chip's ✕, the detail sheet's *Turn off*, or the concentration banner's ✕
+     * when its source is a buff.
+     *
+     * A **second** callback beside [onToggle] rather than a widened one, because the two send
+     * different DDP methods and the server refuses the wrong one — `flipToggle` throws
+     * `Computed toggle` on anything that is not a manual toggle. One lambda taking a property id
+     * would have made "which write is this?" a question the view model had to re-answer by
+     * looking the id up in two lists, which is the derivation this parameter object exists to
+     * avoid doing twice.
+     *
+     * Carries the id alone, like every other callback here: the name for the receipt is resolved
+     * against the live board in `:core:data`, so a tap that raced a sync writes nothing rather
+     * than filing a stale name.
+     */
+    val onTurnOffBuff: (propertyId: String) -> Unit = {},
 
     /**
      * FR-7: an entry was picked in the Rolls dropdown.
@@ -315,6 +338,36 @@ fun TrackerTab(
         )
     }
 
+    // FR-53 R3's detail sheet, hoisted for [entryKey]'s reasons and keyed the same way: only one
+    // can be open, an open sheet stays live against a sync, and a buff that ends underneath it —
+    // because somebody else dropped the spell, or because this tap's own optimistic layer removed
+    // the chip — closes the sheet rather than leaving a *Turn off* button pointed at nothing.
+    var openBuffId by rememberSaveable { mutableStateOf<String?>(null) }
+    // The sheet's visibility is derived from the LOOKUP, never from the id: a buff that ends
+    // underneath an open sheet resolves to `null` and the sheet closes on the next frame, with
+    // its exit animation, and the stale id sits harmlessly in the saver until the next open
+    // overwrites it.
+    //
+    // This used to be `if (openBuffId != null && openBuff == null) openBuffId = null` — a state
+    // read and written in the same composition, which Compose documents as "do not do this"
+    // (1.19.0 review LOW-3). It converged, and it dismissed the `ModalBottomSheet` without its
+    // animation and would trip recomposition-count tooling. `ActionsScreen`'s `openRowId` has
+    // always taken this shape; the tracker's `entryKey` above still takes the other one, and is
+    // left alone because changing a dialog's dismissal path is not this fix pass's business.
+    val openBuff = openBuffId?.let { id -> state.buffs.firstOrNull { it.propertyId == id } }
+
+    openBuff?.let { buff ->
+        BuffDetailSheet(
+            buff = buff,
+            canWrite = state.canWrite,
+            onTurnOff = {
+                actions.onTurnOffBuff(buff.propertyId)
+                openBuffId = null
+            },
+            onDismiss = { openBuffId = null },
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -325,6 +378,7 @@ fun TrackerTab(
             actions = actions,
             shake = shake,
             onDirectEntry = { key -> entryKey = key },
+            onOpenBuff = { id -> openBuffId = id },
         )
 
         // Quiet when healthy, and quiet over the spinner while a redial is in flight —
@@ -351,13 +405,32 @@ private fun TrackerContent(
     actions: TrackerActions,
     shake: ShakeSignal?,
     onDirectEntry: (String) -> Unit,
+    onOpenBuff: (String) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
         state.concentratingOn?.let { name ->
             ConcentrationBanner(
                 name = name,
-                canDrop = state.canWrite && state.concentrationToggleId != null,
-                onDrop = { state.concentrationToggleId?.let(actions.onToggle) },
+                // FR-53 R6: a buff source arms the ✕ too, through the other write.
+                canDrop = state.canWrite &&
+                    (state.concentrationToggleId != null || state.concentrationBuffId != null),
+                onDrop = {
+                    // The state carries at most one of the two, so this is a dispatch and not a
+                    // precedence: `TrackerBoard`'s two derived properties resolve a toggle source
+                    // and a buff source respectively, and a source is one or the other.
+                    //
+                    // Spelled as `if`/`else if` rather than `?.let(…) ?: ?.let(…)` (review NIT-1):
+                    // the elvis form is correct — `let` returns the lambda's `Unit`, which is
+                    // non-null — but it reads as if the RESULT of `onToggle` were being tested,
+                    // and the whole expression's type is `Unit?`.
+                    val toggleId = state.concentrationToggleId
+                    val buffId = state.concentrationBuffId
+                    if (toggleId != null) {
+                        actions.onToggle(toggleId)
+                    } else if (buffId != null) {
+                        actions.onTurnOffBuff(buffId)
+                    }
+                },
             )
         }
 
@@ -538,9 +611,28 @@ private fun TrackerContent(
                 }
             }
 
-            if (state.conditions.isNotEmpty() || state.inactiveConditions.isNotEmpty()) {
+            if (state.buffs.isNotEmpty() ||
+                state.conditions.isNotEmpty() ||
+                state.inactiveConditions.isNotEmpty()
+            ) {
                 item(key = "conditions-header") {
                     SectionHeader(stringResource(R.string.tracker_section_conditions))
+                }
+                // FR-53 R3: **before** the toggle chips. A buff is the first answer to "what is
+                // running on me right now", and the section's own header is the question. Its own
+                // `item` rather than a row folded into `ConditionChips`, so a character with buffs
+                // and no toggles draws one group rather than an empty second one — and so the two
+                // chip shapes keep their own keys in the `LazyColumn`.
+                if (state.buffs.isNotEmpty()) {
+                    item(key = "conditions-buffs") {
+                        BuffChips(
+                            chips = state.buffs,
+                            canWrite = state.canWrite,
+                            onTurnOff = actions.onTurnOffBuff,
+                            onOpen = onOpenBuff,
+                            shake = shake,
+                        )
+                    }
                 }
                 if (state.conditions.isNotEmpty()) {
                     item(key = "conditions") {
@@ -658,11 +750,20 @@ private fun ConnectionDot(
 /**
  * 04 §3: `Concentrating: Bless ✕`.
  *
- * The ✕ is live only when the banner's source is one of the discovered flippable toggles —
- * dropping concentration then *is* `flipToggle`, which is a write we can make correctly.
- * 03 §5 also lets the banner come from a `buff`, and 02 says `flipToggle` rejects anything
- * that is not a `toggle`; wiring the ✕ for that case would mean guessing at a method the
- * design does not specify, so it stays disabled instead. See [toTrackerUiState].
+ * The ✕ is live when the banner's source is something this app can correctly end: a discovered
+ * **flippable toggle** (`flipToggle`) or an **applied buff** (`turnOffBuff` → `softRemove`).
+ *
+ * ### The buff case was disabled until FR-53, and the reason it was is instructive
+ *
+ * This KDoc used to end *"wiring the ✕ for that case would mean guessing at a method the design
+ * does not specify, so it stays disabled instead"*. The refusal was right and the premise expired:
+ * the 2026-09-14 probe read DiceCloud's own client bundle and found the call its sheet makes on an
+ * applied buff. Nothing was guessed then and nothing is guessed now — what changed is that the
+ * method is documented. R6.
+ *
+ * A source that is **neither** — a computed toggle, most often — still gets a disabled ✕ and an
+ * informational banner, which R6 keeps rather than removes: there is still no correct write, and
+ * BUG-3's raised disabled tint is what makes that legible. See [toTrackerUiState].
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -693,9 +794,10 @@ private fun ConcentrationBanner(
             IconButton(
                 onClick = onDrop,
                 enabled = canDrop,
-                // BUG-3: this ✕ is disabled whenever the banner's source is not a flippable
-                // toggle, which is the common case — the same raised disabled tint the
-                // customize sheet's chevrons now use.
+                // BUG-3: this ✕ is disabled whenever the banner's source is neither a flippable
+                // toggle nor an applied buff (FR-53 R6) — still the common case, since most
+                // concentration sources on a real sheet are computed toggles. The same raised
+                // disabled tint the customize sheet's chevrons now use.
                 colors = mageHandIconButtonColors(),
                 modifier = Modifier
                     .size(48.dp)
@@ -1522,6 +1624,232 @@ private fun RollPicker(
 }
 
 /**
+ * FR-53 R3's buff chips — the spells currently running on the character.
+ *
+ * ### An [InputChip], where the toggles beside it are `FilterChip`s
+ *
+ * The shape is the ruling's, and the ruling is right for a reason worth writing down: a
+ * `FilterChip` carries a *selected* state into the accessibility tree, which is exactly what a
+ * toggle is and exactly what a buff is not. Every chip here is on — an applied buff that is off is
+ * not applied and is not on the board at all — so a selected/unselected control would be a
+ * two-state affordance with one reachable state. `InputChip` is Material's shape for "a thing that
+ * is present and can be dismissed", which is the sentence.
+ *
+ * ### Two targets on one chip, and why the ✕ is not the only one
+ *
+ * The trailing ✕ **is** the turn-off; the chip body opens the detail sheet. R3 asks for both
+ * because a row of chips is a place a mis-tap is cheap and a mis-tap here ends a spell — so the
+ * destructive half is the *deliberate* target and the larger one is read-only. It also puts the
+ * buff's own text one tap away, which is the only place this app shows it.
+ *
+ * "Deliberate" and not "small": the review (MEDIUM-5) caught this paragraph claiming a 48 dp row
+ * while the ✕ was a 24 dp hit rect inside a 32 dp chip — the opposite of what the code did. The ✕
+ * is now built as an **explicit 48 dp target holding a 24 dp glyph** — see the comment at the
+ * trailing slot for why not `minimumInteractiveComponentSize()`, which this repo's test
+ * vocabulary cannot measure — and the chip's row is 48 dp because of it. A miss still lands on the
+ * chip body, which is read-only, so the failure mode remains "opened the sheet" rather than
+ * "ended a spell".
+ *
+ * ### The live target is a 48 dp DISC, not a 48 dp square
+ *
+ * The Sonnet re-check measured it on-device: the box's *bounds* report 48 × 48 dp and a tap 9.5 dp
+ * off-centre in a cardinal direction fires, but the **corners** of that rectangle are dead —
+ * `CircleShape` gates the touch region as well as the ink, so what a finger actually gets is a
+ * 48 dp-diameter circle inscribed in the reported square. A corner tap falls through to the chip
+ * body and opens the detail sheet.
+ *
+ * Recorded rather than changed. A round 48 dp target is Material's own shape for a circular
+ * control and is compliant practice; the bounds assertion in `TrackerTabRenderTest` measures the
+ * rectangle because that is what the semantics tree exposes, and the ~21 % of it that is corner is
+ * the part no thumb aims at. Dropping the clip to square the target would trade a standard
+ * affordance for four dead-corner pixels and a ✕ that no longer reads as a button.
+ *
+ * The ✕ is inert when the app cannot write, like every other control on this screen (04's rule:
+ * connection state is visible, never a surprise error dialog). The **body is not**: reading what
+ * *Bless* does is not a write, and a player looking at an offline sheet has more reason to want
+ * the text, not less.
+ *
+ * ### The shake
+ *
+ * A rolled-back turn-off shakes the chip, exactly as a failed toggle flip does — which is only
+ * possible because the chip comes *back* on the rollback (the overlay's prediction expiring), so
+ * there is something composed to animate.
+ */
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun BuffChips(
+    chips: List<BuffChipState>,
+    canWrite: Boolean,
+    onTurnOff: (String) -> Unit,
+    onOpen: (String) -> Unit,
+    shake: ShakeSignal?,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        chips.chunked(CHIPS_PER_ROW).forEach { rowChips ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                rowChips.forEach { chip ->
+                    val spoken = stringResource(R.string.tracker_buff_spoken, chip.name)
+                    val turnOff = stringResource(R.string.tracker_buff_turn_off, chip.name)
+                    InputChip(
+                        selected = false,
+                        onClick = { onOpen(chip.propertyId) },
+                        label = {
+                            // NEW-1 (1.19.0 closing pass). Material3 lays a chip's label slot out
+                            // with `paddingFromBaseline`, sized for the 32 dp container — so
+                            // growing the chip from the TRAILING slot moved the container's centre
+                            // and left the label pinned to its baseline offset from the top, 9 dp
+                            // high at 100 % and 13 dp at 150 %, while the star and the ✕ (plain
+                            // icons, centred) sat correctly under it. Both goldens photographed it.
+                            //
+                            // A full-height centred box is the smallest fix that survives the
+                            // slot's own layout: the box takes the container's height, so the
+                            // label centres against the height the ✕ actually forced rather than
+                            // against the one the chip was designed for.
+                            Box(
+                                modifier = Modifier.height(TOUCH_TARGET_DP.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = chip.name,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        },
+                        leadingIcon = {
+                            // R3's "leading icon". `Star` out of the CORE icon set, not
+                            // `AutoAwesome` out of the extended one: this app does not depend on
+                            // `material-icons-extended` and adding a ~4 MB artifact for one glyph
+                            // would be a poor trade. Deliberately not `ic_shield` either — that
+                            // drawable is temp HP's on the HP block ten rows up, and one glyph
+                            // meaning two things on one screen is worse than a generic one.
+                            Icon(
+                                imageVector = Icons.Filled.Star,
+                                contentDescription = null,
+                                modifier = Modifier.size(InputChipDefaults.AvatarSize),
+                            )
+                        },
+                        trailingIcon = {
+                            // Its own semantics node inside the chip, so TalkBack reaches "Turn
+                            // off Shield" as a separate action rather than folding it into the
+                            // chip's own label — the mistake BUG-6 caught on the action rows.
+                            //
+                            // **A 24 dp glyph in a 48 dp target** (1.19.0 review MEDIUM-5,
+                            // architect ruling). `Modifier.clickable` applies no minimum
+                            // interactive size, so this hit rect used to be exactly the icon —
+                            // 24 × 24 dp — on the only control on the tab that ends a spell,
+                            // against 04 §3's "min 48 dp" that the banner's ✕, the pips and the
+                            // steppers all honour. `minimumInteractiveComponentSize()` is
+                            // Material's own answer and is what `IconButton` uses: the drawn
+                            // glyph stays 24 dp (R3's chip shape is unchanged in ink) and the
+                            // *touch* target grows to 48, so the chip's row grows with it.
+                            //
+                            // An explicit [TOUCH_TARGET_DP] **box** rather than
+                            // `Modifier.minimumInteractiveComponentSize()` on the icon, which is
+                            // the ruling's "or equivalent" and is what this codebase can prove.
+                            // The Material modifier was tried first and measured 24 dp on the
+                            // tagged node under this Compose version — so the assertion that is
+                            // supposed to guard the target would have passed while a finger still
+                            // missed, which is worse than not having it. A box whose size is
+                            // stated is a box a bounds assertion can hold to.
+                            //
+                            // The clickable and the tag are on the **box**, not on the glyph, for
+                            // that reason. Hit-testing inside the box goes to the ✕ rather than to
+                            // the chip body because the box is a descendant of the chip's own
+                            // clickable and Compose gives descendants precedence — which is the
+                            // half that makes the enlarged target do something rather than merely
+                            // measure larger, and it is pinned as its own case.
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(TOUCH_TARGET_DP.dp)
+                                    .clip(CircleShape)
+                                    .clickable(enabled = canWrite, role = Role.Button) {
+                                        onTurnOff(chip.propertyId)
+                                    }
+                                    .testTag("tracker:buff:${chip.propertyId}:off"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Close,
+                                    contentDescription = turnOff,
+                                    modifier = Modifier.size(InputChipDefaults.AvatarSize),
+                                )
+                            }
+                        },
+                        modifier = Modifier
+                            .shakeOn(shake, chip.propertyId)
+                            .semantics { contentDescription = spoken }
+                            .testTag("tracker:buff:${chip.propertyId}"),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * FR-53 R3's detail sheet: the buff's name, its description **verbatim**, and the same *Turn off*.
+ *
+ * ### Verbatim, with one thing taken away
+ *
+ * The text is the server's rendered description (BUG-25 R1) with markdown emphasis stripped
+ * (BUG-25 R2) — the strip happens in `TrackerUiState`, not here, so it is unit-testable without a
+ * Compose runtime. Nothing else is done to it: not re-flowed, not truncated, not re-punctuated.
+ * A buff the sheet describes nowhere gets a line saying **the sheet** says nothing, which is a
+ * fact about the data rather than a claim about the spell.
+ *
+ * ### The button repeats the ✕, deliberately
+ *
+ * R3 asks for both, and the reason is the chip's: the ✕ is a small target on a crowded row, and a
+ * player who opened the sheet to check what Shield does is often the same player about to end it.
+ * It is disabled rather than absent while writes are refused, which is 04's rule for a control
+ * that will work again in a moment — as opposed to the *capability* rule one layer up, where "you
+ * may not edit this character" is absence.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalComposeUiApi::class)
+@Composable
+private fun BuffDetailSheet(
+    buff: BuffChipState,
+    canWrite: Boolean,
+    onTurnOff: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = modifier.semantics { testTagsAsResourceId = true },
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+                .testTag("tracker:buff:${buff.propertyId}:detail"),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(text = buff.name, style = MaterialTheme.typography.titleLarge)
+            Text(
+                text = buff.description ?: stringResource(R.string.tracker_buff_no_description),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (buff.description == null) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+            )
+            TextButton(
+                onClick = onTurnOff,
+                enabled = canWrite,
+                modifier = Modifier.testTag("tracker:buff:${buff.propertyId}:detail:off"),
+            ) {
+                Text(stringResource(R.string.tracker_buff_turn_off_short))
+            }
+        }
+    }
+}
+
+/**
  * 04 §3's condition chips — `tap = flipToggle`.
  *
  * `FilterChip` rather than `AssistChip` now that they are live: a filter chip has a
@@ -1872,6 +2200,16 @@ internal const val PLUS = "+"
 
 private const val PIP_TARGET_DP = 48
 private const val PIP_DOT_DP = 28
+/**
+ * 04 §3's *"Large touch targets (min 48 dp)"*, as the number the buff chip's ✕ is built to
+ * (1.19.0 review MEDIUM-5).
+ *
+ * Material's own minimum and the same 48 the concentration banner's ✕ already uses. Named rather
+ * than written inline because `TrackerTabRenderTest` asserts against the same rule, and a literal
+ * on each side is two chances to change one of them.
+ */
+private const val TOUCH_TARGET_DP = 48
+
 private const val CHIPS_PER_ROW = 2
 
 /** The connection dot: a 10 dp mark on a 24 dp disc, inset from the screen corner. */

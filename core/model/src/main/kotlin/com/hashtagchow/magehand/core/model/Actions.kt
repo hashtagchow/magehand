@@ -632,8 +632,25 @@ data class SpellEntry(
     /** The `alwaysPrepared` FIELD — a domain/always-prepared spell needs no preparation. */
     val alwaysPrepared: Boolean = false,
     /**
-     * `inactive: true`. Renders the row dimmed and is **not** a preparedness signal —
-     * see [showsUnpreparedBadge].
+     * `inactive: true` — and, since FR-55, **always `false` on any row the Actions surface
+     * shows**.
+     *
+     * The operator reversed 16 decision 5's rendering half on 2026-09-14: *"Anything 'Switched
+     * off on the sheet' should not show under Actions"*. `ActionEngine.listedRow` therefore drops
+     * a switched-off spell before it ever becomes a `SpellEntry`, the way a soft-removed one is
+     * already dropped, so the dimmed row this field used to describe no longer exists.
+     *
+     * ### Kept on the model rather than deleted (R2)
+     *
+     * Three reasons, and the third is the one that decides it. It is the wire's own field and this
+     * class is what a reader consults to learn what a DiceCloud spell carries; it is what
+     * [isUsable] and `useTarget` are gated on, and a gate that reads a field the engine guarantees
+     * is a gate that stays correct if the engine's guarantee ever changes; and a **local** spell
+     * or a future consumer building a `SpellEntry` by another route is not filtered by
+     * `ActionEngine` at all, so the invariant belongs to that engine and not to this type.
+     *
+     * It is still **not** a preparedness signal — see [showsUnpreparedBadge], which is decision
+     * 5's other half and is untouched.
      */
     val inactive: Boolean = false,
     val castingTime: String? = null,
@@ -714,8 +731,11 @@ data class SpellEntry(
      * state would tell the player the spell is off without telling them which of the two things
      * they would have to change to fix it.
      *
-     * No badge is invented for [inactive] on its own (decision 5): a dimmed row with no badge is
-     * the honest rendering of "the sheet has switched this off for a reason it did not name".
+     * No badge is invented for [inactive] on its own (decision 5). That used to describe a dimmed
+     * row; since FR-55 there is no such row on the surface at all, because a switched-off spell is
+     * not listed. The paragraph above still holds where it matters most: an unprepared spell that
+     * is **active** lists exactly as before, badge and all, and that is R3 — the reversal must not
+     * be allowed to swallow the case decision 5 was written for.
      */
     val showsUnpreparedBadge: Boolean get() = !prepared && !alwaysPrepared
 
@@ -845,7 +865,11 @@ data class ActionEntry(
      * *correct* rendering during that window, not a bug to reconcile.
      */
     val insufficientResources: Boolean = false,
-    /** `inactive: true` — dimmed, no badge invented. Same rule as [SpellEntry.inactive]. */
+    /**
+     * `inactive: true`. Same rule as [SpellEntry.inactive], including FR-55's: an action the sheet
+     * has switched off is **not listed** by `ActionEngine`, so this is always `false` on a row the
+     * Actions surface draws. Kept on the model for that field's three stated reasons.
+     */
     val inactive: Boolean = false,
     val description: String? = null,
     val summary: String? = null,
@@ -967,9 +991,49 @@ data class ActionBoard(
     val actions: List<ActionEntry> = emptyList(),
     /** One per live `spellList` property, in the sheet's own order. */
     val spellLists: List<SpellListHeader> = emptyList(),
+    /**
+     * How many `action`/`spell` rows the sheet carries that FR-55 declined to list — switched off,
+     * and therefore not in [spells] or [actions] (D2, from the 1.19.0 WebHand review).
+     *
+     * ### The tab's existence must not depend on availability
+     *
+     * FR-55 answers *"what can I do on my turn"* by dropping unavailable rows. Left alone, that
+     * also answered a question nobody asked it: [isEmpty] is the one-tab-drop gate, so a character
+     * whose every action is switched off would have **lost the Actions tab entirely** — the app
+     * saying "this character has nothing to act with" about a character with a full sheet. That is
+     * a worse lie than the dimmed row FR-55 removed.
+     *
+     * So the gate splits in two. [hasAnyRows] decides whether the surface *exists*; [isEmpty]
+     * keeps its original meaning (nothing to draw) and drives the empty state. A board where this
+     * is non-zero and both lists are empty is the third case, and it gets its own line on screen
+     * rather than either of the other two.
+     *
+     * A **count** rather than a boolean because it costs nothing and a count is what a future
+     * *"3 switched off"* affordance would need; nothing reads the magnitude today.
+     *
+     * `0` for a local character by construction — `LocalActionBoard`'s own KDoc: *"a local row is
+     * either there or deleted; there is no ancestor to be switched off"*.
+     */
+    val switchedOffRowCount: Int = 0,
 ) {
-    /** See the class KDoc — this is the one-tab-drop gate. */
+    /**
+     * Whether this character has anything to draw **right now**.
+     *
+     * No longer the tab gate — see [hasAnyRows] and [switchedOffRowCount]. It is the *empty state*
+     * gate, and it keeps the meaning it always had: a sheet that names no action and no spell.
+     */
     val isEmpty: Boolean get() = spells.isEmpty() && actions.isEmpty()
+
+    /**
+     * The one-tab-drop gate since D2: does the sheet carry any `action`/`spell` row **at all**,
+     * switched off or not?
+     *
+     * 16 decision 1's *"≥1 action row exists"*, read as the sheet's population rather than as the
+     * listed one. FR-55 changes what is *listed* and must never change whether the surface is
+     * there — a tab that vanishes when the last row is switched off would take the player's route
+     * to noticing that with it.
+     */
+    val hasAnyRows: Boolean get() = !isEmpty || switchedOffRowCount > 0
 
     /**
      * How many rows the combined list holds — decision 6's search threshold reads this.

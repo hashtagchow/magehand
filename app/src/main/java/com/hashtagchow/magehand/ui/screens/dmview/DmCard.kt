@@ -7,11 +7,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.InputChip
+import androidx.compose.material3.InputChipDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -64,6 +69,7 @@ internal fun DmCard(
     onRestore: (String) -> Unit,
     onChangeHitPoints: (Int) -> Unit,
     onToggleCondition: (String) -> Unit,
+    onTurnOffBuff: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Card(
@@ -158,6 +164,7 @@ internal fun DmCard(
                     onRestore = onRestore,
                     onChangeHitPoints = onChangeHitPoints,
                     onToggleCondition = onToggleCondition,
+                    onTurnOffBuff = onTurnOffBuff,
                 )
             }
         }
@@ -242,8 +249,20 @@ private fun CardBody(card: DmCardUiState) {
 
     card.resources.forEach { row -> ResourceLine(row) }
 
-    if (card.conditions.isNotEmpty()) {
+    // FR-53 R5: the buffs lead the chip row, as they do on the tracker. One `FlowRow` for both
+    // kinds rather than two stacked rows, because a card is 160 dp of vertical budget shared by
+    // six characters and the two are one answer to one question — "what is on this character".
+    if (card.buffs.isNotEmpty() || card.conditions.isNotEmpty()) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            card.buffs.forEach { buff ->
+                AssistChip(
+                    onClick = {},
+                    enabled = false,
+                    label = { Text(buff.name, style = MaterialTheme.typography.labelSmall) },
+                    colors = AssistChipDefaults.assistChipColors(),
+                    modifier = Modifier.testTag("dm:buff:${card.creatureId}:${buff.propertyId}"),
+                )
+            }
             card.conditions.forEach { condition ->
                 AssistChip(
                     onClick = {},
@@ -328,6 +347,7 @@ private fun CardWriteControls(
     onRestore: (String) -> Unit,
     onChangeHitPoints: (Int) -> Unit,
     onToggleCondition: (String) -> Unit,
+    onTurnOffBuff: (String) -> Unit,
 ) {
     val enabled = card.writeControlsEnabled
 
@@ -383,6 +403,59 @@ private fun CardWriteControls(
         }
     }
 
+    // FR-53 R5: the same ✕ the tracker's chip has, behind the same gate every control in this
+    // function is behind. A buff needs no `canFlip`-style filter — the server accepts `softRemove`
+    // on any property, and a buff that is on this board is one that is running — so every buff
+    // chip here is live, unlike the condition chips below which are filtered to the flippable
+    // ones.
+    //
+    // ### The WHOLE chip is the turn-off here, and only the ✕ is on the tracker
+    //
+    // Deliberate, and the review (LOW-4) was right to ask for the sentence. R5's own wording is
+    // that a DM "can end a spell effect from the table view exactly as they flip a condition", and
+    // a condition `FilterChip` on this card is whole-chip — so matching the neighbour is matching
+    // the ruling. The tracker's split (body reads, ✕ writes) exists because the body has somewhere
+    // to go: a detail sheet with the buff's own text. This card has no detail sheet — decision 12
+    // is "cards summarize only" — so a read-only chip body would be a target that does nothing,
+    // which is the dead control the tracker's own ✕ note argues against.
+    //
+    // The cost is real and is accepted rather than hidden: this is somebody else's character and
+    // the card carries no UNDO of its own. What backs it is that the write IS undoable — the
+    // owner's own history sheet offers it — and that the read-only copy of every buff is already
+    // in the card body above, so a DM who only wants to LOOK never comes here.
+    if (card.buffs.isNotEmpty()) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            card.buffs.forEach { buff ->
+                val turnOff = stringResource(R.string.tracker_buff_turn_off, buff.name)
+                InputChip(
+                    selected = false,
+                    // The card's chip is the ✕ and nothing else: there is no detail sheet on a
+                    // dashboard, and R5 asks for the control rather than for the text. A DM who
+                    // wants to read what the buff does opens the character.
+                    onClick = { onTurnOffBuff(buff.propertyId) },
+                    enabled = enabled,
+                    label = { Text(buff.name, style = MaterialTheme.typography.labelSmall) },
+                    trailingIcon = {
+                        // `null`, not "Turn off Shield". The chip is one merging clickable, so a
+                        // description here would be read as a SECOND name on the same node and
+                        // TalkBack would announce "Shield, Turn off Shield" — one control, two
+                        // names (review LOW-4's secondary). The whole chip is the turn-off on this
+                        // surface, so the sentence belongs on the chip, once. The glyph is
+                        // decoration.
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = null,
+                            modifier = Modifier.size(InputChipDefaults.AvatarSize),
+                        )
+                    },
+                    modifier = Modifier
+                        .semantics { contentDescription = turnOff }
+                        .testTag("dm:buff:${card.creatureId}:${buff.propertyId}:off"),
+                )
+            }
+        }
+    }
+
     if (card.conditions.any { it.canFlip }) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             // Only the flippable ones get a control. A computed toggle is worth *reading* (it is
@@ -419,9 +492,13 @@ private fun DmCardUiState.spoken(): String = spokenLabel(
     slotsLabel = spentSlots
         .takeIf { it > 0 }
         ?.let { pluralStringResource(R.plurals.dm_view_card_slots_spent, it, it) },
-    conditionsLabel = conditions
+    // FR-53 R5. The buffs join the conditions clause rather than getting one of their own: the
+    // card's read half is `clearAndSetSemantics`, so this sentence is ALL a screen-reader user
+    // gets, and a chip row that draws two shapes and speaks one of them is BUG-6's defect. Buffs
+    // lead, in the order they are drawn.
+    conditionsLabel = (buffs.map { it.name } + conditions.map { it.name })
         .takeIf { it.isNotEmpty() }
-        ?.joinToString(", ") { it.name }
+        ?.joinToString(", ")
         ?.let { stringResource(R.string.dm_view_card_conditions, it) },
     concentrationLabel = concentratingOn?.let {
         stringResource(R.string.dm_view_card_concentrating, it)

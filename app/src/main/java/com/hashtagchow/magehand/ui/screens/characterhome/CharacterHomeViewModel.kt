@@ -131,8 +131,13 @@ data class CharacterHomeUiState(
      *
      * **False while loading**, which is the honest default — see `serverPaneSurfaces`' KDoc, and
      * `resolveTab` for what keeps that from bouncing a restored Actions selection.
+     *
+     * **Reads `hasRows`, not `sections.isNotEmpty()`** (D2). FR-55 empties `sections` for a
+     * character whose every row is switched off, and left alone that would have cost them the
+     * whole tab — the app saying "nothing to act with" about a full sheet. Availability decides
+     * what is *listed*; the sheet's population decides whether the surface *exists*.
      */
-    val hasActions: Boolean get() = actions.sections.isNotEmpty()
+    val hasActions: Boolean get() = actions.hasRows
 
     /**
      * FR-32 decision 14's gate: *"present only when ≥1 quest note exists"*.
@@ -1095,6 +1100,42 @@ class CharacterHomeViewModel @Inject constructor(
             return
         }
         character.toggle(toggle)
+    }
+
+    /**
+     * A buff chip's ✕, the detail sheet's *Turn off*, or either concentration banner's ✕ when the
+     * source is a buff (FR-53 R4/R6).
+     *
+     * [toggleCondition]'s shape, and the same M5 lane for the same reason: a `propertyId` the
+     * board no longer carries — the buff ended on another device, or between the frame that drew
+     * the chip and the tap — surfaces through [TrackerWriteFailure.dropped] rather than returning
+     * silently. No row shakes ([TrackerWriteFailure.propertyId] is `null`) because nothing
+     * optimistic was applied for a lookup miss, so there is nothing to roll back.
+     *
+     * `:core:data` performs the identical lookup and would drop the write anyway; this one exists
+     * so the *user* is told. Two gates, one of which can speak.
+     */
+    fun turnOffBuff(propertyId: String) {
+        val character = open.value ?: return
+        val buff = character.board.value.buffs.firstOrNull { it.propertyId == propertyId }
+        if (buff == null) {
+            _failureEvents.tryEmit(
+                TrackerEvent.Failed(
+                    TrackerWriteFailure(
+                        id = USE_ERROR_IDS.incrementAndGet(),
+                        kind = TrackerWriteKind.BUFF_OFF,
+                        propertyId = null,
+                        targetName = propertyId,
+                        reason = null,
+                        refusedOffline = false,
+                        rateLimited = false,
+                        dropped = true,
+                    ),
+                ),
+            )
+            return
+        }
+        character.turnOffBuff(buff.propertyId, buff.name)
     }
 
     /**

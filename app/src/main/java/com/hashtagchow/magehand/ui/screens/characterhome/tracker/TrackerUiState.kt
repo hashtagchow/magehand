@@ -6,6 +6,7 @@ import com.hashtagchow.magehand.ui.components.DirectEntryKeys
 import com.hashtagchow.magehand.ui.components.DirectEntryKind
 import com.hashtagchow.magehand.ui.components.DirectEntryTarget
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
+import com.hashtagchow.magehand.core.model.AppliedBuff
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DamageDefense
@@ -20,6 +21,7 @@ import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.core.model.TrackerWrite
 import com.hashtagchow.magehand.core.model.TrackerWriteFailure
 import com.hashtagchow.magehand.core.model.TrackerWriteKind
+import com.hashtagchow.magehand.core.model.withoutMarkdownEmphasis
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -322,6 +324,32 @@ data class ConditionChipState(
 )
 
 /**
+ * A buff currently running on the character, as one chip (FR-53 R3).
+ *
+ * ### Not a [ConditionChipState] with a flag on it
+ *
+ * The two are drawn side by side in one section and are still separate types, because every
+ * field that would have been shared is one they disagree about. A toggle chip has `enabled` (a
+ * buff on the board is on, by construction — an off one is not applied and is not here) and
+ * `canFlip` (a buff has no flip; the server refuses `flipToggle` on one). A buff chip has a
+ * `description` and a trailing ✕, neither of which a toggle has. A merged type would have been
+ * four nullable fields and a discriminator, and every consumer would have had to branch on the
+ * discriminator anyway — which is the branch the type system is doing here instead.
+ *
+ * @param description the buff's prose as the **server rendered it**, emphasis already stripped
+ *   (BUG-25 R2). Stripped here rather than in the composable so that `TrackerUiStateTest` can
+ *   assert it without a Compose runtime — the same split every `spokenLabel` on this screen
+ *   makes between a rule (testable, in the state) and a word (`strings.xml`, in the composable).
+ *   `null` when the sheet describes the buff nowhere, which is a real and common shape; the sheet
+ *   says so in its own copy rather than drawing an empty paragraph.
+ */
+data class BuffChipState(
+    val propertyId: String,
+    val name: String,
+    val description: String? = null,
+)
+
+/**
  * One line of the read-only Defenses section — *"Resistant · Fire, Poison"*.
  *
  * One row per [DefenseKind], **not** one per discovered property: a character with three
@@ -474,6 +502,24 @@ data class TrackerUiState(
      */
     val hitDice: List<PipRowState> = emptyList(),
     val consumables: List<ConsumableState> = emptyList(),
+    /**
+     * The buffs running on the character, drawn **before** [conditions] in the same section
+     * (FR-53 R3).
+     *
+     * First because a buff is the first answer to *"what is running on me right now"* — the
+     * question the section exists for — and because a buff is something a player did on purpose
+     * this combat, while a condition chip is often a permanent feature of the sheet.
+     *
+     * Empty for a character who has cast nothing, and empty for **every** local character (09).
+     * That is what makes R3's *"nothing to show → the section is unchanged"* free: the screen
+     * already draws the group only when it has something in it.
+     *
+     * Gated by the same `show_toggles` switch as [conditions] — see [toTrackerUiState]. Templates
+     * (unapplied buffs) are absent from the board entirely, so they cannot appear here, and they
+     * are deliberately **not** in [inactiveConditions] either: that drawer is for toggles a player
+     * can switch *on*, and a template buff is turned on by casting the spell.
+     */
+    val buffs: List<BuffChipState> = emptyList(),
     val conditions: List<ConditionChipState> = emptyList(),
     /**
      * The switched-off toggles the conditions section files behind its "N inactive"
@@ -513,6 +559,20 @@ data class TrackerUiState(
      */
     val concentrationToggleId: String? = null,
     /**
+     * The concentration source's **buff** id, when the banner's source is one (FR-53 R6).
+     *
+     * [concentrationToggleId]'s other half, and separate for the reason `TrackerBoard`'s two
+     * derived properties are separate: the ✕ sends `flipToggle` for one and `turnOffBuff` for the
+     * other, and one id with no type would leave the composable re-deriving which. At most one of
+     * the two is non-null on any board — a source is a toggle or a buff, never both — and both
+     * `null` is the informational banner R6 keeps: a source that is neither a flippable toggle nor
+     * a buff still has a disabled ✕, because there is still no correct write to offer.
+     *
+     * Resolved from the **board**, exactly like its sibling, so 09 decision 9 holds: FR-6's switch
+     * empties the chip lists and leaves the banner alone.
+     */
+    val concentrationBuffId: String? = null,
+    /**
      * Whether this character *has* a connection worth reporting at all
      * (docs/design/09-local-characters.md decision 8: "no connection dot for local
      * characters" — "connection status is meaningless locally and must not render").
@@ -536,7 +596,7 @@ data class TrackerUiState(
     /** Nothing discovered yet — a cold open with no snapshot and no live sub. */
     val isEmpty: Boolean
         get() = hp == null && slots.isEmpty() && resources.isEmpty() && limitedUses.isEmpty() &&
-            hitDice.isEmpty() && consumables.isEmpty() && conditions.isEmpty() &&
+            hitDice.isEmpty() && consumables.isEmpty() && buffs.isEmpty() && conditions.isEmpty() &&
             inactiveConditions.isEmpty() && defenses.isEmpty() && !rolls.isPresent
 
     /**
@@ -764,6 +824,10 @@ fun toTrackerUiState(
         limitedUses = if (showLimitedUses) board.limitedUses.map { it.toPipRow() } else emptyList(),
         hitDice = board.hitDice.map { it.toPipRow() },
         consumables = board.pinnedItems.map { it.toConsumable() },
+        // FR-53 R3, behind FR-6's switch with the toggle chips: the buffs sit in the Conditions
+        // section, so hiding that section hides them too. Gated here rather than in the composable
+        // for the reason one line down — `TrackerUiStateTest` pins both values without a device.
+        buffs = if (showToggles) board.buffs.map { it.toChip() } else emptyList(),
         conditions = conditions,
         inactiveConditions = inactive.map { it.toChip() },
         accentColor = accentColor,
@@ -779,6 +843,10 @@ fun toTrackerUiState(
         // from `:core:data`, which cannot see this module. One rule, two readers; that type's
         // KDoc carries the whole argument, including WP7's narrowing about buff-sourced banners.
         concentrationToggleId = board.concentrationToggle?.propertyId,
+        // FR-53 R6. Read from the board for the identical reason, and read even when
+        // `showToggles` is false: the banner is property-driven (09 decision 9), so a player who
+        // hid the Conditions section must still be able to drop concentration.
+        concentrationBuffId = board.concentrationBuff?.propertyId,
         hasConnection = hasConnection,
     )
 }
@@ -932,6 +1000,19 @@ private fun TrackedResource.toConsumable() = ConsumableState(
     quantity = value,
 )
 
+/**
+ * FR-53 R3 + BUG-25 R2: the chip's own state, with the description's markdown emphasis taken off.
+ *
+ * The strip is here and not in the engine because `AppliedBuff.description` is the server's own
+ * characters and has to stay that way — see that property's KDoc and `ActionDetailState.body`,
+ * which makes the identical split for the identical reason on the other surface.
+ */
+private fun AppliedBuff.toChip() = BuffChipState(
+    propertyId = propertyId,
+    name = name,
+    description = description?.withoutMarkdownEmphasis()?.takeIf { it.isNotBlank() },
+)
+
 private fun ConditionToggle.toChip() = ConditionChipState(
     propertyId = propertyId,
     name = name,
@@ -1015,6 +1096,15 @@ fun TrackerWrite.describe(): String = when (kind) {
     // fact a player is scanning the history for anyway. The undo puts it back regardless.
     TrackerWriteKind.ITEM_MOVE -> "Moved $targetName"
     TrackerWriteKind.TOGGLE -> "Toggled $targetName"
+    // FR-53 R4, verbatim: "Turned off Shield". Not "Removed" and not "Deleted" — the sheet's own
+    // word for a soft-removed property is `removed`, and `ITEM_DELETE` above already explains why
+    // this app does not reuse it at a player. Nothing was deleted here: a spell effect ended, and
+    // the UNDO on this entry starts it again. `amount` is 1 and says nothing: you turn the buff
+    // off, not some of it.
+    TrackerWriteKind.BUFF_OFF -> "Turned off $targetName"
+    // The undo's sentence, and deliberately not "Restored" — that is `ITEM_RESTORE`'s word for an
+    // item put back on the sheet, and one history list can carry both.
+    TrackerWriteKind.BUFF_RESTORE -> "Turned $targetName back on"
     TrackerWriteKind.SHORT_REST -> "Short rest"
     TrackerWriteKind.LONG_REST -> "Long rest"
     // FR-28 decision 8, verbatim: "our journal entry for a Use is NON-undoable ('Used Rage — see

@@ -15,6 +15,7 @@ import com.hashtagchow.magehand.core.model.Wallet
 import com.hashtagchow.magehand.core.model.WalletRow
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.InventoryUiState
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.toInventoryUiState
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.BuffChipState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConditionChipState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConnectionStatus
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConnectionTone
@@ -171,6 +172,14 @@ object Sabriel {
          * corpus shows the badge; every other consumer of this fixture keeps the block it had.
          */
         armorClass: Int? = null,
+        /**
+         * FR-53. **Empty by default**, for [armorClass]'s reason exactly: the six committed
+         * `TrackerScreen_*.png` goldens photograph a board with no buffs, and R3 promises that
+         * board is pixel-identical to a build that had never heard of the feature. The two new
+         * `TrackerScreen_buff_*` goldens supply one, at the one place whose job is to show what
+         * the section looks like when it has one.
+         */
+        buffs: List<BuffChipState> = emptyList(),
     ) = TrackerUiState(
         creatureId = CREATURE_ID,
         status = status,
@@ -196,6 +205,7 @@ object Sabriel {
         consumables = listOf(
             ConsumableState(propertyId = "item-potion", name = "Potion of Healing", quantity = 2),
         ),
+        buffs = buffs,
         conditions = listOf(
             ConditionChipState(propertyId = "toggle-darkvision", name = "Darkvision Switch", enabled = true, canFlip = true),
         ),

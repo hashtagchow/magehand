@@ -10,6 +10,7 @@ import com.hashtagchow.magehand.core.data.db.LocalTrackerRowEntity
 import com.hashtagchow.magehand.core.data.db.toDomain
 import com.hashtagchow.magehand.ui.components.DirectEntryKeys
 import com.hashtagchow.magehand.ui.components.DirectEntryKind
+import com.hashtagchow.magehand.core.model.AppliedBuff
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.DeathSaves
 import com.hashtagchow.magehand.core.model.ConnectionState
@@ -451,6 +452,94 @@ class TrackerUiStateTest {
 
         assertFalse(map(board = board, showToggles = true).isEmpty)
         assertTrue(map(board = board, showToggles = false).isEmpty)
+    }
+
+    // --- FR-53: the buff chips ----------------------------------------------
+
+    /**
+     * The chip's state, including BUG-25 R2's strip.
+     *
+     * The strip is asserted **here** rather than on the screen because it is a rule, and this
+     * file is where rules live — the same split every `spokenLabel` on this surface makes. The
+     * third case is the one the lookaround regex exists for: a spaced `*` is a multiplication
+     * sign in prose and must survive.
+     */
+    @Test
+    fun `a buff becomes a chip with its emphasis stripped`() {
+        val board = sabriel.copy(
+            buffs = listOf(
+                AppliedBuff("b1", "Shield", "**+5** to AC until your next turn."),
+                AppliedBuff("b2", "Bless", null),
+                AppliedBuff("b3", "Guidance", "Adds 2 * your proficiency."),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                BuffChipState("b1", "Shield", "+5 to AC until your next turn."),
+                BuffChipState("b2", "Bless", null),
+                BuffChipState("b3", "Guidance", "Adds 2 * your proficiency."),
+            ),
+            map(board = board).buffs,
+        )
+    }
+
+    /** R3: nothing to show → the section is unchanged, which is this list being empty. */
+    @Test
+    fun `a character with no buffs has an empty buff list`() {
+        assertTrue(map().buffs.isEmpty())
+    }
+
+    /** R3: the same `show_toggles` gate as the section the chips sit in. */
+    @Test
+    fun `the buff chips are hidden with the rest of the conditions section`() {
+        val board = sabriel.copy(buffs = listOf(AppliedBuff("b1", "Shield", null)))
+
+        assertEquals(listOf("Shield"), map(board = board, showToggles = true).buffs.map { it.name })
+        assertTrue(map(board = board, showToggles = false).buffs.isEmpty())
+    }
+
+    /** A character carrying only a buff still has a tracker worth drawing. */
+    @Test
+    fun `a board of nothing but a buff is not empty, and is empty once hidden`() {
+        val board = TrackerBoard(buffs = listOf(AppliedBuff("b1", "Shield", null)))
+
+        assertFalse(map(board = board, showToggles = true).isEmpty)
+        assertTrue(map(board = board, showToggles = false).isEmpty)
+    }
+
+    /**
+     * R6: a buff-sourced banner arms its ✕ through the *other* id, and survives the switch for
+     * `the concentration cross survives the toggles switch`'s reason — 09 decision 9, unchanged.
+     */
+    @Test
+    fun `a buff-sourced concentration arms the banner through the buff id`() {
+        val board = sabriel.copy(
+            buffs = listOf(AppliedBuff("b1", "Web", null)),
+            activeToggles = emptyList(),
+            concentratingOn = "Web",
+        )
+
+        assertEquals("b1", map(board = board).concentrationBuffId)
+        assertNull("flipToggle refuses a buff", map(board = board).concentrationToggleId)
+        assertEquals(
+            "property-driven, so hiding the section must not disarm it",
+            "b1",
+            map(board = board, showToggles = false).concentrationBuffId,
+        )
+        assertTrue(map(board = board, showToggles = false).buffs.isEmpty())
+    }
+
+    /** Neither a flippable toggle nor a buff: the banner stays informational (R6 keeps this). */
+    @Test
+    fun `a computed concentration source arms neither half of the banner`() {
+        val board = sabriel.copy(
+            activeToggles = listOf(ConditionToggle("tog3", "Web", enabled = true, flippable = false)),
+            concentratingOn = "Web",
+        )
+
+        assertNull(map(board = board).concentrationToggleId)
+        assertNull(map(board = board).concentrationBuffId)
     }
 
     @Test

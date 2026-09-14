@@ -12,6 +12,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -21,6 +22,7 @@ import com.hashtagchow.magehand.core.model.ActionType
 import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.DamageRider
 import com.hashtagchow.magehand.core.model.SpellEntry
+import com.hashtagchow.magehand.core.model.SpellListHeader
 import com.hashtagchow.magehand.core.model.WeaponMastery
 import com.hashtagchow.magehand.ui.testing.Sabriel
 import com.hashtagchow.magehand.ui.testing.setMageHandContent
@@ -257,6 +259,15 @@ class ActionsScreenRenderTest {
      * per-composable — one badge fixed and three left behind would pass any single-label check.
      * Asserted as the whole merged text rather than by substring, so the **order** the row speaks
      * them in is pinned as well: this is one sentence, and a sentence has a word order.
+     *
+     * ### FR-55: this fixture is no longer reachable from a DiceCloud sheet
+     *
+     * The row is built here **by hand** and handed straight to `toActionsUiState`, so it still
+     * renders exactly as asserted — but `ActionEngine` stopped listing switched-off rows on
+     * 2026-09-14, so no server sheet can produce one. R2 keeps the badge, the `actions_inactive`
+     * string and the dimming as documented dead copy, and this case is that documentation:
+     * corrected in place rather than deleted, so the copy has a test that says what it draws if
+     * anything ever hands the surface such a row again.
      */
     @Test
     fun `every spell badge lands on the row's merged node, in the order the row draws them`() {
@@ -308,6 +319,15 @@ class ActionsScreenRenderTest {
      * they are words rather than a colour: *"'greyed out' alone does not tell a player which of
      * the two to fix"*. Outside the merged node they were not words either, to the one user who
      * cannot see the grey — so the row said nothing at all about why it could not be used.
+     *
+     * ### FR-55: this fixture is no longer reachable from a DiceCloud sheet
+     *
+     * The row is built here **by hand** and handed straight to `toActionsUiState`, so it still
+     * renders exactly as asserted — but `ActionEngine` stopped listing switched-off rows on
+     * 2026-09-14, so no server sheet can produce one. R2 keeps the badge, the `actions_inactive`
+     * string and the dimming as documented dead copy, and this case is that documentation:
+     * corrected in place rather than deleted, so the copy has a test that says what it draws if
+     * anything ever hands the surface such a row again.
      */
     @Test
     fun `both action badges land on the row's merged node, in the order the row draws them`() {
@@ -353,6 +373,15 @@ class ActionsScreenRenderTest {
      *
      * The rules text is deliberately **not** on the row. R7 puts it behind the row tap; a paragraph
      * on a list row would be read out in full on every scroll stop.
+     *
+     * ### FR-55: this fixture is no longer reachable from a DiceCloud sheet
+     *
+     * The row is built here **by hand** and handed straight to `toActionsUiState`, so it still
+     * renders exactly as asserted — but `ActionEngine` stopped listing switched-off rows on
+     * 2026-09-14, so no server sheet can produce one. R2 keeps the badge, the `actions_inactive`
+     * string and the dimming as documented dead copy, and this case is that documentation:
+     * corrected in place rather than deleted, so the copy has a test that says what it draws if
+     * anything ever hands the surface such a row again.
      */
     @Test
     fun `the mastery badge lands on the row's merged node, after the state badges`() {
@@ -457,5 +486,117 @@ class ActionsScreenRenderTest {
         compose.onNodeWithTag("actions:action:a-mastery").performClick()
 
         compose.onAllNodesWithTag("actions:detail:mastery").assertCountEquals(0)
+    }
+
+    // ---- D2: the surface survives FR-55, and says why it is bare -----------------
+
+    /**
+     * D2 on the screen: one line, its own tag, and **no** spell-list DC above it.
+     *
+     * The `actions:empty` assertion is the load-bearing one. That tag belongs to the state that
+     * says *"this character's sheet has no spells or actions on it"*, and drawing it here would be
+     * the app reporting on its own filter and calling it the character.
+     */
+    @Test
+    fun `a board of nothing but switched-off rows draws one line and no DC header`() {
+        compose.setMageHandContent {
+            ActionsScreen(
+                state = toActionsUiState(
+                    creatureId = Sabriel.CREATURE_ID,
+                    board = ActionBoard(
+                        spellLists = listOf(
+                            SpellListHeader(propertyId = "l1", name = "Wizard", dc = 15, abilityMod = 4),
+                        ),
+                        switchedOffRowCount = 2,
+                    ),
+                ),
+                onUse = { _, _, _ -> },
+            )
+        }
+
+        compose.onNodeWithTag("actions:none-available").assertIsDisplayed()
+        compose.onNodeWithText("Nothing is available right now").assertIsDisplayed()
+        compose.onAllNodesWithTag("actions:empty").assertCountEquals(0)
+        compose.onAllNodesWithTag("actions:spelllist:l1").assertCountEquals(0)
+    }
+
+    /**
+     * …and the DC header stays away when the *spells* are all switched off but the actions are
+     * not — the partial case, which the early return above does not cover.
+     */
+    @Test
+    fun `a listed action does not bring back the DC header for switched-off spells`() {
+        compose.setMageHandContent {
+            ActionsScreen(
+                state = toActionsUiState(
+                    creatureId = Sabriel.CREATURE_ID,
+                    board = ActionBoard(
+                        actions = listOf(
+                            ActionEntry(propertyId = "a-dash", name = "Dash", type = ActionType.ACTION),
+                        ),
+                        spellLists = listOf(
+                            SpellListHeader(propertyId = "l1", name = "Wizard", dc = 15, abilityMod = 4),
+                        ),
+                        switchedOffRowCount = 4,
+                    ),
+                ),
+                onUse = { _, _, _ -> },
+            )
+        }
+
+        compose.onNodeWithTag("actions:action:a-dash").assertIsDisplayed()
+        compose.onAllNodesWithTag("actions:none-available").assertCountEquals(0)
+        compose.onAllNodesWithTag("actions:spelllist:l1").assertCountEquals(0)
+    }
+
+    /** One live spell is enough to head: the gate is about spell sections, not about the board. */
+    @Test
+    fun `a live spell keeps its list's DC header`() {
+        compose.setMageHandContent {
+            ActionsScreen(
+                state = toActionsUiState(
+                    creatureId = Sabriel.CREATURE_ID,
+                    board = ActionBoard(
+                        spells = listOf(SpellEntry(propertyId = "s-bless", name = "Bless", level = 1)),
+                        spellLists = listOf(
+                            SpellListHeader(propertyId = "l1", name = "Wizard", dc = 15, abilityMod = 4),
+                        ),
+                        switchedOffRowCount = 3,
+                    ),
+                ),
+                onUse = { _, _, _ -> },
+            )
+        }
+
+        compose.onNodeWithTag("actions:spelllist:l1").assertIsDisplayed()
+    }
+
+    // ---- BUG-25: what the detail sheet actually PRINTS ---------------------------
+
+    /**
+     * BUG-25 as the operator reported it, on the surface it was reported on: *"tapping Mind Sliver
+     * reads 'The target must succeed a DC {#spellList.dc}\*\* Intelligence Saving Throw…'"*.
+     *
+     * The row here carries what `ActionEngine` now produces — the server's **rendered** string,
+     * still bold — and the assertion is on the characters a player sees. R1 (read `value`) is
+     * pinned in `ActionEngineTest`; this is R2, and the two together are the whole bug: the token
+     * is gone because of the reader, and the asterisks are gone because of the strip.
+     */
+    @Test
+    fun `the detail sheet prints the rendered description with no token and no asterisks`() {
+        val mindSliver = ActionEntry(
+            propertyId = "a-mind-sliver",
+            name = "Mind Sliver",
+            type = ActionType.ACTION,
+            description = "The target must succeed a **DC 12** Intelligence Saving Throw.",
+        )
+        compose.setMageHandContent { ActionsScreen(state = stateOf(mindSliver), onUse = { _, _, _ -> }) }
+
+        compose.onNodeWithTag("actions:action:a-mind-sliver").performClick()
+
+        compose.onNode(
+            hasAnyAncestor(hasTestTag("actions:detail:a-mind-sliver")) and
+                hasText("The target must succeed a DC 12 Intelligence Saving Throw."),
+        ).assertIsDisplayed()
     }
 }

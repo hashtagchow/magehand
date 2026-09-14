@@ -863,11 +863,18 @@ class ActionEngineTest {
     // -----------------------------------------------------------------------
 
     /**
-     * The badge comes from the **fields**, and `inactive` is a separate, coexisting state.
+     * The badge comes from the **fields**, and never from `inactive`.
      *
-     * The third case is the probe's Animate Dead shape: a spell that IS prepared but sits under a
-     * disabled ancestor, so `inactive` is true. Badging off `inactive` would label the one spell
-     * the player deliberately prepared as unprepared.
+     * **Corrected for FR-55, not deleted.** The rule this test guards — decision 5's badge half —
+     * is untouched by that FR; what changed is that its two `inactive` fixtures (*"Disabled
+     * Ancestor"*, prepared-and-inactive; *"Both"*, unprepared-and-inactive) are no longer on the
+     * board to badge, because a switched-off spell is not listed. Their assertions move to
+     * `a switched-off action or spell is not listed at all` below, which asserts their **absence**
+     * — the stronger claim, and the one the operator asked for.
+     *
+     * What stays here is R3, and it is the half that matters most: an unprepared spell that is
+     * **active** still lists, and it still badges. The reversal must not swallow the case decision
+     * 5 was written for.
      */
     @Test
     fun `the unprepared badge reads the fields and never inactive`() {
@@ -880,43 +887,39 @@ class ActionEngineTest {
                 prop("s3", "spell") {
                     put("name", "Always"); put("level", 1); put("alwaysPrepared", true)
                 },
-                prop("s4", "spell") {
-                    // Prepared AND inactive — the Animate Dead case.
-                    put("name", "Disabled Ancestor"); put("level", 1)
-                    put("prepared", true); put("inactive", true)
-                },
-                prop("s5", "spell") {
-                    // Both states at once. Decision 5: they coexist and both show.
-                    put("name", "Both"); put("level", 1); put("inactive", true)
-                },
             ),
         )
         val byName = board.spells.associateBy { it.name }
 
-        assertTrue(byName.getValue("Unprepared").showsUnpreparedBadge)
+        assertTrue("R3: an ACTIVE unprepared spell lists, with its badge", byName.getValue("Unprepared").showsUnpreparedBadge)
         assertFalse(byName.getValue("Prepared").showsUnpreparedBadge)
         assertFalse("alwaysPrepared needs no preparation", byName.getValue("Always").showsUnpreparedBadge)
-        assertFalse(
-            "THE CASE: inactive must not be read as unprepared",
-            byName.getValue("Disabled Ancestor").showsUnpreparedBadge,
+        assertTrue(
+            "nothing that survives the FR-55 filter can be inactive",
+            board.spells.none { it.inactive },
         )
-        assertTrue(byName.getValue("Disabled Ancestor").inactive)
-
-        val both = byName.getValue("Both")
-        assertTrue("the two states coexist", both.showsUnpreparedBadge && both.inactive)
     }
 
     // -----------------------------------------------------------------------
     // DECISION 2 — discovery filtering
     // -----------------------------------------------------------------------
 
-    /** `removed` is filtered; `inactive` is **not** — it is a state the row renders. */
+    /**
+     * `removed` is filtered, and since FR-55 so is `inactive` — the same rule, one field over.
+     *
+     * **Corrected, not deleted.** This test used to be called *"removed is dropped and inactive is
+     * kept"* and asserted `listOf("Off") == board.actions.map { it.name }`. The operator reversed
+     * that on 2026-09-14: *"Anything 'Switched off on the sheet' should not show under Actions"*.
+     * Both documents are still in the input, because a test carrying only the survivors would
+     * prove nothing about either filter.
+     */
     @Test
-    fun `removed is dropped and inactive is kept`() {
+    fun `removed and inactive are both dropped`() {
         val board = ActionEngine.build(
             sheetOf(
                 prop("live", "spell") { put("name", "Live"); put("level", 0) },
                 prop("gone", "spell") { put("name", "Gone"); put("level", 0); put("removed", true) },
+                prop("on", "action") { put("name", "On"); put("actionType", "action") },
                 prop("off", "action") {
                     put("name", "Off"); put("actionType", "action"); put("inactive", true)
                 },
@@ -924,8 +927,124 @@ class ActionEngineTest {
         )
 
         assertEquals(listOf("Live"), board.spells.map { it.name })
-        assertEquals(listOf("Off"), board.actions.map { it.name })
-        assertTrue(board.actions.single().inactive)
+        assertEquals(listOf("On"), board.actions.map { it.name })
+    }
+
+    /**
+     * FR-55 R1, stated on its own and from both row types.
+     *
+     * The two `inactive` fixtures are the ones the badge test above gave up: prepared-and-inactive
+     * (probe S3's Animate Dead) and unprepared-and-inactive. Neither is listed now, whatever its
+     * `prepared` field says — which is the whole reversal, and is why the badge rule and the
+     * listing rule had to be tested apart.
+     */
+    @Test
+    fun `a switched-off action or spell is not listed at all`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("s-prepared-off", "spell") {
+                    put("name", "Disabled Ancestor"); put("level", 1)
+                    put("prepared", true); put("inactive", true)
+                },
+                prop("s-unprepared-off", "spell") {
+                    put("name", "Both"); put("level", 1); put("inactive", true)
+                },
+                prop("a-off", "action") {
+                    put("name", "Switched Off"); put("actionType", "attack"); put("inactive", true)
+                },
+                prop("a-on", "action") { put("name", "Available"); put("actionType", "action") },
+            ),
+        )
+
+        assertEquals(emptyList<String>(), board.spells.map { it.name })
+        assertEquals(listOf("Available"), board.actions.map { it.name })
+    }
+
+    /**
+     * **D2**: FR-55 must never remove the Actions tab.
+     *
+     * The one-tab-drop gate reads `hasAnyRows`, which counts the sheet's population rather than
+     * the listed one, so a character whose every row is switched off keeps the surface and loses
+     * only the rows. Without this the reversal would have made the app say *"this character has
+     * nothing to act with"* about a full sheet — a worse lie than the dimmed row it removed, and
+     * one the player has no route to noticing.
+     *
+     * `isEmpty` is deliberately still `true` here: it kept its original meaning (nothing to draw)
+     * and now drives the empty state rather than the tab.
+     */
+    @Test
+    fun `a sheet whose every row is switched off keeps its Actions surface`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("s", "spell") { put("name", "Bless"); put("level", 1); put("inactive", true) },
+                prop("a", "action") {
+                    put("name", "Rage"); put("actionType", "bonus"); put("inactive", true)
+                },
+            ),
+        )
+
+        assertTrue("nothing to draw", board.isEmpty)
+        assertTrue("but the surface exists", board.hasAnyRows)
+        assertEquals(2, board.switchedOffRowCount)
+    }
+
+    /** A sheet that truly names no row has neither. */
+    @Test
+    fun `a sheet with no action or spell rows has no Actions surface`() {
+        val board = ActionEngine.build(sheetOf(prop("i", "item") { put("name", "Torch") }))
+
+        assertTrue(board.isEmpty)
+        assertFalse(board.hasAnyRows)
+        assertEquals(0, board.switchedOffRowCount)
+    }
+
+    /**
+     * The count is of the **rejected** rows and only those — `removed` ones are not "switched
+     * off", they are gone, and counting them would put the tab back for a character whose sheet
+     * has been emptied.
+     */
+    @Test
+    fun `the switched-off count excludes removed rows and listed ones`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("live", "action") { put("name", "Dash"); put("actionType", "action") },
+                prop("off", "action") {
+                    put("name", "Rage"); put("actionType", "bonus"); put("inactive", true)
+                },
+                prop("gone", "spell") {
+                    put("name", "Deleted"); put("level", 1); put("removed", true)
+                },
+            ),
+        )
+
+        assertEquals(1, board.switchedOffRowCount)
+        assertEquals(listOf("Dash"), board.actions.map { it.name })
+    }
+
+    /**
+     * A section whose only row was switched off is **absent**, not empty.
+     *
+     * Nothing new was written for this: an empty group is already the shape a character who has no
+     * attacks produces, so the reversal reuses the collapse rule the surface has always had. The
+     * grouping itself lives in `toActionsUiState`, which sections from `ActionEntry.group` — so
+     * the group being unrepresented here is exactly the section being absent there.
+     */
+    @Test
+    fun `a section whose only row was switched off is absent`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("atk", "action") {
+                    put("name", "Old Sword"); put("actionType", "attack"); put("inactive", true)
+                },
+                prop("act", "action") { put("name", "Dash"); put("actionType", "action") },
+            ),
+        )
+
+        assertEquals(
+            "the Attacks group has nothing left to draw",
+            listOf(ActionGroup.ACTIONS),
+            board.actions.map { it.group }.distinct(),
+        )
     }
 
     /** There is no `type: 'attack'`; an attack is `actionType` on an action **or a spell**. */
@@ -1287,7 +1406,16 @@ class ActionEngineTest {
         assertTrue("neither row offers a use", board.spells.all { it.useTarget == null })
     }
 
-    /** Scalars and wrapper objects both read; a blank field is absent, not an empty string. */
+    /**
+     * Scalars and wrapper objects both read; a blank field is absent, not an empty string.
+     *
+     * **Corrected for BUG-25 R1, not deleted.** Until 1.19.0 the last assertion here read
+     * *"`text` wins over `value`: it is the rendered form"* and pinned the defect: this test
+     * passed for four releases while every spell with a save DC printed its token at a player.
+     * The 2026-09-14 probe of three live sheets settled the direction — `text` is the source and
+     * `value` is the server's rendered string — so the two names in the fixture below are swapped
+     * to say what the wire says, and the assertion now pins `value`.
+     */
     @Test
     fun `plain strings and text wrappers both resolve and blank reads as absent`() {
         val board = ActionEngine.build(
@@ -1296,14 +1424,96 @@ class ActionEngineTest {
                     put("name", "Mixed"); put("level", 2)
                     put("castingTime", "action")
                     put("range", "")
-                    put("description", buildJsonObject { put("text", "rendered"); put("value", "raw") })
+                    put("description", buildJsonObject { put("text", "source"); put("value", "rendered") })
                 },
             ),
         )
         val spell = board.spells.single()
         assertEquals("action", spell.castingTime)
         assertNull("a blank field is absent rather than an empty line on screen", spell.range)
-        assertEquals("`text` wins over `value`: it is the rendered form", "rendered", spell.description)
+        assertEquals("`value` wins over `text`: it is the rendered form", "rendered", spell.description)
+    }
+
+    /**
+     * **BUG-25 R4's pin**, in the shape the bug was reported in: tapping *Mind Sliver* read
+     * *"…a DC `{#spellList.dc}`\*\* Intelligence Saving Throw…"* — the token verbatim.
+     *
+     * The fixture is the live wrapper: `text` carries the author's source with its `{…}` token,
+     * `value` carries the server's substitution. A reader that prefers `text` fails this; one
+     * that tries to *evaluate* the token (R3 forbids it) cannot pass it either, because nothing
+     * in the input says what `#spellList.dc` is worth — the answer exists only in `value`.
+     */
+    @Test
+    fun `an inline calculation renders the server's substituted value and never the token`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("s", "spell") {
+                    put("name", "Mind Sliver"); put("level", 0)
+                    put(
+                        "description",
+                        buildJsonObject {
+                            put("text", "The target must succeed a DC {#spellList.dc} Intelligence Saving Throw.")
+                            put("value", "The target must succeed a **DC 12** Intelligence Saving Throw.")
+                            put(
+                                "inlineCalculations",
+                                buildJsonArray {
+                                    add(buildJsonObject { put("calculation", "#spellList.dc"); put("value", 12) })
+                                },
+                            )
+                        },
+                    )
+                    put(
+                        "summary",
+                        buildJsonObject {
+                            put("text", "{strength.modifier} to hit")
+                            put("value", "+3 to hit")
+                        },
+                    )
+                },
+            ),
+        )
+        val spell = board.spells.single()
+        assertEquals(
+            "the rendered value, with the token substituted by the SERVER",
+            "The target must succeed a **DC 12** Intelligence Saving Throw.",
+            spell.description,
+        )
+        assertEquals("`summary` reads by the same rule as `description`", "+3 to hit", spell.summary)
+    }
+
+    /**
+     * R3: *"Nothing is computed by the client. … when `value` is absent the source `text` shows
+     * as today (honest, and unseen on any probed sheet)."*
+     *
+     * Both flavours of absent are here, because they fail differently: a missing key, and a
+     * present-but-blank one. The second is why each half is blank-checked on its own rather than
+     * only at the end — a wrapper carrying `"value": ""` must fall through to `text`, not read as
+     * a description the row does not have.
+     */
+    @Test
+    fun `a wrapper with no usable value falls back to the source text`() {
+        val board = ActionEngine.build(
+            sheetOf(
+                prop("s1", "spell") {
+                    put("name", "No Value"); put("level", 1)
+                    put("description", buildJsonObject { put("text", "the source, unsubstituted") })
+                },
+                prop("s2", "spell") {
+                    put("name", "Blank Value"); put("level", 1)
+                    put("description", buildJsonObject { put("text", "still the source"); put("value", "") })
+                },
+            ),
+        )
+        assertEquals(
+            "no `value` key at all — the source is the honest remainder",
+            "the source, unsubstituted",
+            board.spells.first { it.name == "No Value" }.description,
+        )
+        assertEquals(
+            "a blank `value` is not an answer either",
+            "still the source",
+            board.spells.first { it.name == "Blank Value" }.description,
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -2060,9 +2270,52 @@ class ActionEngineTest {
     // Against the live capture
     // -----------------------------------------------------------------------
 
+    /** How far [ownerIsListed] will walk before giving up — `ActionEngine.MAX_DAMAGE_DEPTH`'s guard. */
+    private val MAX_CAPTURE_WALK = 8
+
+    /**
+     * Whether this `damage` property still hangs off a **listed** row (FR-55).
+     *
+     * The four capture tests below all derive their expectation from the raw documents, and the
+     * population they have to derive it from moved when FR-55 stopped listing switched-off rows:
+     * a `damage` child of a spell the sheet has switched off is no longer rendered anywhere,
+     * because its owner is not on the board. Walking up to the owning `action`/`spell` is the
+     * cheapest honest way to say that from the raw side — the alternative, re-deriving the
+     * engine's own walk, is what those tests exist not to do.
+     *
+     * `null` when the chain reaches no action or spell at all, which the callers read as "not
+     * rendered": a damage property parented under nothing this surface draws is not this
+     * surface's business.
+     */
+    private fun Map<String, JsonObject>.ownerIsListed(property: JsonObject): Boolean {
+        var current = this[(property["parent"] as? JsonObject)?.string("id")]
+        var depth = 0
+        while (current != null && depth < MAX_CAPTURE_WALK) {
+            val type = current.string("type")
+            if (type == "action" || type == "spell") return !current.isTrue("inactive")
+            current = this[(current["parent"] as? JsonObject)?.string("id")]
+            depth++
+        }
+        return false
+    }
+
+    /** The capture's `damage` properties whose owning row survives discovery. */
+    private fun listedDamageProperties(): List<JsonObject> {
+        val properties = Fixtures.sabrielSheet().livePropertyList
+        val byId = properties.mapNotNull { p -> p.string("_id")?.let { it to p } }.toMap()
+        return properties.filter { it.string("type") == "damage" && byId.ownerIsListed(it) }
+    }
+
     /**
      * The capture's real counts, derived. This is the test that would catch the engine silently
      * finding nothing — the class of failure a suite of synthetic cases cannot see.
+     *
+     * **Corrected for FR-55, not deleted.** The derivation was `livePropertyList` — `removed`
+     * filtered and nothing else — which is what the engine used to list. It now lists the
+     * available rows, so the expectation adds the same `inactive` clause. The `assertTrue`s are
+     * the reversal's own guard: the capture must actually *carry* switched-off rows of both
+     * types, or this test would be asserting the new filter against a sheet that cannot exercise
+     * it, and would go on passing if the filter were deleted.
      */
     @Test
     fun `the live capture yields the spells actions and lists it contains`() {
@@ -2070,9 +2323,16 @@ class ActionEngineTest {
         val board = ActionEngine.build(Fixtures.sabrielSheet())
 
         fun liveCount(type: String) = properties.count { it.string("type") == type }
+        fun listedCount(type: String) =
+            properties.count { it.string("type") == type && !it.isTrue("inactive") }
 
-        assertEquals("every live spell becomes a row", liveCount("spell"), board.spells.size)
-        assertEquals("every live action becomes a row", liveCount("action"), board.actions.size)
+        assertTrue(
+            "the capture must carry switched-off spells for FR-55's filter to mean anything here",
+            listedCount("spell") < liveCount("spell"),
+        )
+        assertEquals("every AVAILABLE spell becomes a row", listedCount("spell"), board.spells.size)
+        assertEquals("every AVAILABLE action becomes a row", listedCount("action"), board.actions.size)
+        // Spell lists are not rows a player acts with and FR-55 does not touch them.
         assertEquals(liveCount("spellList"), board.spellLists.size)
         assertFalse(board.isEmpty)
     }
@@ -2090,7 +2350,9 @@ class ActionEngineTest {
         val byId = properties.associateBy { it.string("_id") }
         fun parentOf(p: JsonObject) = byId[(p["parent"] as? JsonObject)?.string("id")]
 
-        val damages = properties.filter { it.string("type") == "damage" }
+        // FR-55: the damage of a switched-off row is not rendered, because the row is not on the
+        // board — see [listedDamageProperties].
+        val damages = listedDamageProperties()
         val direct = damages.count { parentOf(it)?.string("type") != "branch" }
         val viaHit = damages.count {
             val parent = parentOf(it)
@@ -2131,8 +2393,6 @@ class ActionEngineTest {
      */
     @Test
     fun `every numeric damage amount in the capture reaches the row as its own characters`() {
-        val properties = Fixtures.sabrielSheet().livePropertyList
-
         /** `amount.value` when it is a non-string primitive — the shape BUG-10 truncated. */
         fun numericValueOf(property: JsonObject): String? =
             ((property["amount"] as? JsonObject)?.get("value") as? JsonPrimitive)
@@ -2140,21 +2400,40 @@ class ActionEngineTest {
                 ?.content
                 ?.takeIf { it.toDoubleOrNull() != null }
 
-        val expected = properties
-            .filter { it.string("type") == "damage" }
-            .mapNotNull { numericValueOf(it) }
-
         // The COUNT, not merely "at least one" (review L1). Two is what the 2026-08-17 capture
         // holds and what BUG-10's ledger cell claims, and the number is the claim: a re-capture
         // that grows a third numeric row — a fractional one, say — is exactly the event this
         // pin exists for, and "isNotEmpty" would have absorbed it silently. A red here is a
         // signal to look at the new row and then update this number, not a failure to paper
-        // over.
+        // over. Read off the whole live sheet, because it is a fact about the CAPTURE and
+        // FR-55 changed nothing about what the capture contains.
         assertEquals(
             "the capture must carry exactly the two damage rows whose amount.value is a JSON " +
                 "number that BUG-10's ledger cell counts — none means this test proves nothing, " +
                 "and more means the capture changed and wants reading",
             2,
+            Fixtures.sabrielSheet().livePropertyList
+                .filter { it.string("type") == "damage" }
+                .mapNotNull { numericValueOf(it) }
+                .size,
+        )
+
+        // FR-55, and it is a **recorded loss of live coverage rather than a tidy-up**: both of
+        // those two rows hang off switched-off owners, so neither reaches the surface any more
+        // and the loop below now iterates nothing. BUG-10's guarantee is carried by the synthetic
+        // pins (`a wrapped number reaches the row as its own characters`, `rider amounts are read
+        // from the value primitive alone`); what is gone is the *live* half of its proof.
+        //
+        // The assertion is kept as a two-way tripwire rather than deleted. If a re-capture, or a
+        // change to the FR-55 filter, ever puts one of these rows back on the board, this line
+        // goes red and points at the paragraph explaining why that is good news — and the loop
+        // below is already written to check it.
+        val expected = listedDamageProperties().mapNotNull { numericValueOf(it) }
+        assertEquals(
+            "since FR-55 the capture's two numeric damage rows both sit under switched-off " +
+                "owners and are not rendered; a non-zero count here means the live half of " +
+                "BUG-10's proof is back, and the loop below is what checks it",
+            0,
             expected.size,
         )
 
@@ -2191,7 +2470,8 @@ class ActionEngineTest {
      */
     @Test
     fun `every effect-bearing damage row in the capture folds the server's own signed values`() {
-        val properties = Fixtures.sabrielSheet().livePropertyList
+        // FR-55: the listed rows' damage only — see [listedDamageProperties].
+        val properties = listedDamageProperties()
 
         fun effectsOf(property: JsonObject): List<JsonObject> =
             ((property["amount"] as? JsonObject)?.get("effects") as? kotlinx.serialization.json.JsonArray)
@@ -2202,9 +2482,7 @@ class ActionEngineTest {
         fun amountTextOf(effect: JsonObject): String? =
             ((effect["amount"] as? JsonObject)?.get("value") as? JsonPrimitive)?.content
 
-        val effectBearing = properties.filter {
-            it.string("type") == "damage" && effectsOf(it).isNotEmpty()
-        }
+        val effectBearing = properties.filter { effectsOf(it).isNotEmpty() }
         assertTrue(
             "the capture must carry damage rows with effects or this test proves nothing — " +
                 "a re-capture without them is a signal, not a pass",

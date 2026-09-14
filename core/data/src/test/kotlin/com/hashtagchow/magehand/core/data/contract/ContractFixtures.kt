@@ -86,6 +86,14 @@ object ContractFixtures {
     val limitedUseRemovedId: String = fakeId("limited-use-removed")
     val limitedUseUnlimitedId: String = fakeId("limited-use-unlimited")
     val limitedUseZeroId: String = fakeId("limited-use-zero")
+    // FR-53 R1: the buff population, exercised as its own vector for `hitDiceSheetBody`'s reason
+    // and one stronger — the three documents differ from each other by two boolean fields, so a
+    // consumer that skipped the filter would still produce a plausible-looking board.
+    val appliedBuffId: String = fakeId("buff-applied")
+    val templateBuffId: String = fakeId("buff-template")
+    val removedBuffId: String = fakeId("buff-removed")
+    val buffOwnerActionId: String = fakeId("buff-owner-action")
+
     val downedHitPointsId: String = fakeId("death-save-hit-points")
     val rageToggleId: String = fakeId("toggle-rage")
     val concentrationToggleId: String = fakeId("toggle-concentration")
@@ -862,6 +870,128 @@ object ContractFixtures {
     }
 
     /** The `GET /api/creature/:id` envelope — the shape `CreatureSheet.fromSnapshotJson` parses. */
+    /**
+     * FR-53 R1's three populations, on one sheet, of which **one** survives discovery.
+     *
+     * The bar `rolls-discovery` set — *"every wrong implementation produces a different answer"* —
+     * is harder to clear here than anywhere else, because the applied buff and its template are
+     * the **same document** apart from two boolean fields. So all three are present and the
+     * excluded two are in the input on purpose:
+     *
+     *  - the **applied** copy at the creature root, `silent: true` and `target: "self"` exactly as
+     *    the probed one is, with a description carrying an inline calculation (so the vector
+     *    exercises `#text.description` at the same time);
+     *  - the **template** under the action that applies it, carrying `deactivatedByAncestor` and
+     *    the `inactive` the server derives from it — a consumer matching `type == 'buff'` alone
+     *    puts a spell the character has not cast onto their tracker;
+     *  - a **removed** copy, which the server still delivers.
+     *
+     * The `silent` flag is on the survivor deliberately: a consumer that read it as "hidden" would
+     * produce an empty array here and would look correct on a sheet that had none.
+     */
+    fun buffSheetBody(): JsonObject = snapshotBody(
+        creature = creature(),
+        properties = listOf(
+            buildJsonObject {
+                put("_id", buffOwnerActionId)
+                put("type", "action")
+                put("name", "Shield")
+                put("actionType", "action")
+                put("order", 5)
+            },
+            buff(
+                id = appliedBuffId,
+                name = "Shield",
+                order = 10,
+                parentId = creatureId,
+                parentCollection = "creatures",
+                silent = true,
+                descriptionSource = "+{5} bonus to AC until the start of your next turn.",
+                descriptionRendered = "**+5** bonus to AC until the start of your next turn.",
+            ),
+            buff(
+                id = templateBuffId,
+                name = "Shield",
+                order = 11,
+                parentId = buffOwnerActionId,
+                parentCollection = "creatureProperties",
+                inactive = true,
+                silent = true,
+                descriptionSource = "+{5} bonus to AC until the start of your next turn.",
+                descriptionRendered = "**+5** bonus to AC until the start of your next turn.",
+            ),
+            buff(
+                id = removedBuffId,
+                name = "Bless",
+                order = 12,
+                parentId = creatureId,
+                parentCollection = "creatures",
+                removed = true,
+            ),
+        ),
+    )
+
+    /**
+     * One `buff` property in the shape the 2026-09-14 probe recorded.
+     *
+     * `duration` is written on every one of them **as the parse error the live sheet carries**,
+     * which is the point: the reference client does not read the field, and a consumer that does
+     * finds an error object rather than a countdown.
+     */
+    @Suppress("LongParameterList")
+    fun buff(
+        id: String,
+        name: String,
+        order: Int,
+        parentId: String,
+        parentCollection: String,
+        inactive: Boolean = false,
+        removed: Boolean = false,
+        silent: Boolean = false,
+        descriptionSource: String? = null,
+        descriptionRendered: String? = null,
+    ): JsonObject = buildJsonObject {
+        put("_id", id)
+        put("type", "buff")
+        put("name", name)
+        put("order", order)
+        put("target", "self")
+        put("parent", buildJsonObject { put("id", parentId); put("collection", parentCollection) })
+        if (silent) put("silent", true)
+        if (inactive) {
+            put("deactivatedByAncestor", true)
+            put("inactive", true)
+        }
+        if (removed) put("removed", true)
+        if (descriptionSource != null || descriptionRendered != null) {
+            put(
+                "description",
+                buildJsonObject {
+                    if (descriptionSource != null) put("text", descriptionSource)
+                    if (descriptionRendered != null) put("value", descriptionRendered)
+                },
+            )
+        }
+        put(
+            "duration",
+            buildJsonObject {
+                put("type", "_calculation")
+                put("calculation", "1 Turn")
+                put(
+                    "errors",
+                    JsonArray(
+                        listOf(
+                            buildJsonObject {
+                                put("type", "error")
+                                put("message", "Expected an expression")
+                            },
+                        ),
+                    ),
+                )
+            },
+        )
+    }
+
     fun snapshotBody(creature: JsonObject, properties: List<JsonObject>): JsonObject = buildJsonObject {
         put("creatures", JsonArray(listOf(creature)))
         put("creatureProperties", JsonArray(properties))

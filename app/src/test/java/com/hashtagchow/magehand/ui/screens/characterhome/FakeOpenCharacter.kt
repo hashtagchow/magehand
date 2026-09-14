@@ -189,6 +189,16 @@ class FakeOpenCharacter(
         writes += "toggle ${condition.propertyId}"
     }
 
+    /**
+     * FR-53. The **name** is recorded alongside the id, unlike [toggle]: the receipt is
+     * *"Turned off Shield"* and the name is the half of this intent a view model has to resolve
+     * off the board before calling, so a fake that swallowed it could not tell a correct call from
+     * one that shipped an empty string.
+     */
+    override fun turnOffBuff(propertyId: String, targetName: String) {
+        writes += "turnOffBuff $propertyId name=$targetName"
+    }
+
     override fun rest(kind: RestKind) {
         writes += "rest $kind"
     }

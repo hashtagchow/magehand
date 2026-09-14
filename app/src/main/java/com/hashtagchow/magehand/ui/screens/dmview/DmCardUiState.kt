@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.ui.screens.dmview
 
 import com.hashtagchow.magehand.core.model.InventoryBoard
 import com.hashtagchow.magehand.ui.screens.characterhome.inventory.formatAmount
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.BuffChipState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConditionChipState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ConnectionTone
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpState
@@ -138,6 +139,17 @@ data class DmCardUiState(
     val hp: HpState? = null,
     val slots: List<PipRowState> = emptyList(),
     val resources: List<PipRowState> = emptyList(),
+    /**
+     * The buffs running on this character, drawn **before** [conditions] in the card's chip row
+     * (FR-53 R5).
+     *
+     * The tracker's order, for the tracker's reason: a buff is what is running on the character
+     * right now, and a DM scanning six cards mid-combat is looking for exactly that. Read
+     * straight off `TrackerUiState.buffs`, so FR-6's `show_toggles` switch reaches the card the
+     * same way it reaches the tab — a DM who hid the section on their own screen hid it here too,
+     * which is one setting rather than two that could disagree.
+     */
+    val buffs: List<BuffChipState> = emptyList(),
     val conditions: List<ConditionChipState> = emptyList(),
     /** Decision 12's concentration banner. `null` when the character is not concentrating. */
     val concentratingOn: String? = null,
@@ -370,6 +382,7 @@ fun toDmCardUiState(
         hp = tracker.hp.takeIf { isAvailable },
         slots = if (isAvailable) tracker.slots else emptyList(),
         resources = if (isAvailable) tracker.resources else emptyList(),
+        buffs = if (isAvailable) tracker.buffs else emptyList(),
         conditions = if (isAvailable) tracker.conditions else emptyList(),
         concentratingOn = tracker.concentratingOn.takeIf { isAvailable },
         inventory = inventory.takeIf { isAvailable },

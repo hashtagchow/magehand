@@ -116,6 +116,7 @@ class ScreensGoldenTest {
                 onRestore = {},
                 onChangeHitPoints = {},
                 onToggleCondition = {},
+                onTurnOffBuff = {},
             )
         }
     }

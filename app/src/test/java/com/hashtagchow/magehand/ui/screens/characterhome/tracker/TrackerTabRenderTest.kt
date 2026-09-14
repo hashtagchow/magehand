@@ -5,11 +5,14 @@ import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -21,6 +24,10 @@ import com.hashtagchow.magehand.ui.testing.MageHandTestSurface
 import com.hashtagchow.magehand.ui.testing.Sabriel
 import com.hashtagchow.magehand.ui.testing.setMageHandContent
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
+import androidx.compose.ui.unit.width
+import kotlin.math.absoluteValue
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -534,6 +541,250 @@ class TrackerTabRenderTest {
      * holders, throws the composition away and rebuilds it from the saved `Bundle`, which is the
      * same mechanism a rotation uses — so the sweep item now has a JVM witness.
      */
+    // ---- FR-53: the buff chips ---------------------------------------------
+
+    /**
+     * A [TrackerUiState] carrying one buff — Sabriel's board plus the chip R3 describes.
+     *
+     * A **generic** name and a description with markdown already stripped, because the strip is
+     * `TrackerUiState`'s job (pinned in `TrackerUiStateTest`) and this file's seam starts one
+     * layer later: what the composable does with the state it is handed.
+     */
+    private fun withBuff(canWrite: Boolean = true) = Sabriel.tracker(canWrite = canWrite).copy(
+        buffs = listOf(BuffChipState("b1", "Shield", "+5 to AC until your next turn.")),
+    )
+
+    /**
+     * R3's two spoken sentences, on the two nodes a finger can reach.
+     *
+     * The chip's own description is *"Shield, buff"* rather than the bare name — a screen-reader
+     * user hears one flat row where a sighted one sees two chip shapes, so the kind has to be
+     * said. The ✕ carries its own, *"Turn off Shield"*, and it is asserted as a separate node
+     * precisely because the failure this guards is BUG-6's: a control drawn inside a chip that
+     * folds into the chip's label and becomes unreachable as an action.
+     */
+    @Test
+    fun `a buff chip speaks its name and its cross speaks the turn-off`() {
+        compose.setMageHandContent { TrackerTab(state = withBuff()) }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:buff:b1"))
+        compose.onNodeWithTag("tracker:buff:b1").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Shield, buff").assertIsDisplayed()
+        compose.onNodeWithTag("tracker:buff:b1:off").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Turn off Shield").assertIsDisplayed()
+    }
+
+    /** The ✕ fires the turn-off intent, and the chip body does not. */
+    @Test
+    fun `the cross fires the turn-off and the chip body does not`() {
+        val turnedOff = mutableListOf<String>()
+        compose.setMageHandContent {
+            TrackerTab(
+                state = withBuff(),
+                actions = TrackerActions(onTurnOffBuff = { turnedOff += it }),
+            )
+        }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:buff:b1"))
+        compose.onNodeWithTag("tracker:buff:b1").performClick()
+        assertTrue("the body opens the sheet; it must not write", turnedOff.isEmpty())
+
+        compose.onNodeWithTag("tracker:buff:b1:off").performClick()
+        assertEquals(listOf("b1"), turnedOff)
+    }
+
+    /**
+     * MEDIUM-5's ruling: the ✕ keeps its 24 dp glyph and gets Material's 48 dp minimum **touch**
+     * target.
+     *
+     * `Modifier.clickable` applies no minimum interactive size, so before this the hit rect was
+     * exactly the icon — 24 × 24 dp — on the only control on the tab that ends a spell, against
+     * 04 §3's *"min 48 dp"* that the concentration banner's ✕ (`.size(48.dp)`), the pips and the
+     * steppers all honour.
+     *
+     * Asserted on the **tag's own node**, which is why `minimumInteractiveComponentSize()` is
+     * placed outside `size`/`clickable` in the chain: attached inside, the tag would name the
+     * inner 24 dp box and this assertion would pass while a finger still missed. Both dimensions,
+     * because a target that is 48 dp tall and 24 dp wide is still half a target.
+     */
+    @Test
+    fun `the buff cross is at least a 48 dp touch target`() {
+        compose.setMageHandContent { TrackerTab(state = withBuff()) }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:buff:b1"))
+        val cross = compose.onNodeWithTag("tracker:buff:b1:off").getUnclippedBoundsInRoot()
+
+        assertTrue(
+            "04 §3's minimum, on the one control that ends a spell. Was " +
+                "${cross.width} × ${cross.height}.",
+            cross.width >= 48.dp && cross.height >= 48.dp,
+        )
+    }
+
+    /**
+     * NEW-1 (1.19.0 closing pass): the label is centred against the chip the ✕ grew.
+     *
+     * Material3 lays the label slot out with `paddingFromBaseline` sized for a 32 dp container, so
+     * growing the chip from the trailing slot left the text pinned near the top — 9 dp high at
+     * 100 %, 13 dp at 150 % — while the star and the ✕ centred correctly. Both goldens recorded
+     * it, which is the part that makes a bounds pin worth having here: a re-recorded image
+     * *defends* the layout it captured, and the next person to centre the label would have seen
+     * two goldens go red and wondered what they had broken.
+     *
+     * Asserted centre-against-centre rather than against a number, so it stays true if the target
+     * size or the type scale ever changes. The tolerance is 1 dp for rounding; what this catches
+     * was nine.
+     */
+    @Test
+    fun `the buff chip label is centred against its own height`() {
+        compose.setMageHandContent { TrackerTab(state = withBuff()) }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:buff:b1"))
+        val chip = compose.onNodeWithTag("tracker:buff:b1").getUnclippedBoundsInRoot()
+        val cross = compose.onNodeWithTag("tracker:buff:b1:off").getUnclippedBoundsInRoot()
+        // `useUnmergedTree`: the chip is a merging clickable carrying its own spoken sentence
+        // ("Shield, buff"), so the label's own node exists only in the unmerged tree. That merge
+        // is the accessibility contract this feature wants and is asserted two tests up; here it
+        // just means the layout question has to be asked of the unmerged node.
+        val label = compose.onNode(
+            hasAnyAncestor(hasTestTag("tracker:buff:b1")) and hasText("Shield"),
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+
+        val chipCentre = chip.top + chip.height / 2
+        val labelCentre = label.top + label.height / 2
+        val crossCentre = cross.top + cross.height / 2
+
+        assertTrue(
+            "the ✕ is the reference — a plain icon, and always centred. Chip centre " +
+                "$chipCentre, cross centre $crossCentre.",
+            (crossCentre - chipCentre).value.absoluteValue <= 1f,
+        )
+        assertTrue(
+            "the label rode high in both goldens before this. Chip centre $chipCentre, label " +
+                "centre $labelCentre.",
+            (labelCentre - chipCentre).value.absoluteValue <= 1f,
+        )
+    }
+
+    /**
+     * …and the enlarged area is the ✕'s, not the chip body's — the half that makes the target do
+     * something rather than merely measure larger.
+     *
+     * A tap at the centre of the ✕'s bounds must write and must **not** open the detail sheet.
+     * Compose gives descendants precedence in hit-testing and the ✕ is a descendant of the chip's
+     * own clickable, so this holds by construction; it is pinned because "by construction" is
+     * exactly what stops being true when somebody moves the icon out of the `trailingIcon` slot.
+     */
+    @Test
+    fun `a tap inside the cross's target turns the buff off rather than opening the sheet`() {
+        val turnedOff = mutableListOf<String>()
+        compose.setMageHandContent {
+            TrackerTab(
+                state = withBuff(),
+                actions = TrackerActions(onTurnOffBuff = { turnedOff += it }),
+            )
+        }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:buff:b1"))
+        compose.onNodeWithTag("tracker:buff:b1:off").performClick()
+
+        assertEquals(listOf("b1"), turnedOff)
+        compose.onAllNodesWithTag("tracker:buff:b1:detail").assertCountEquals(0)
+    }
+
+    /**
+     * R3: the chip body opens the detail sheet, and the sheet carries the description **verbatim**
+     * plus its own *Turn off*.
+     *
+     * Verbatim is asserted as an exact text match rather than a substring: the sheet is the one
+     * place this app shows a buff's own words, and a truncation or a re-flow there would be the
+     * app editing the sheet.
+     */
+    @Test
+    fun `the chip body opens a detail sheet whose turn-off writes`() {
+        val turnedOff = mutableListOf<String>()
+        compose.setMageHandContent {
+            TrackerTab(
+                state = withBuff(),
+                actions = TrackerActions(onTurnOffBuff = { turnedOff += it }),
+            )
+        }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:buff:b1"))
+        compose.onNodeWithTag("tracker:buff:b1").performClick()
+
+        compose.onNodeWithTag("tracker:buff:b1:detail").assertIsDisplayed()
+        // Scoped to the sheet: the chip behind it says "Shield" too, and an unscoped match would
+        // pass on the chip while the sheet drew nothing.
+        compose.onNode(
+            hasAnyAncestor(hasTestTag("tracker:buff:b1:detail")) and hasText("Shield"),
+        ).assertIsDisplayed()
+        compose.onNodeWithText("+5 to AC until your next turn.").assertIsDisplayed()
+
+        compose.onNodeWithTag("tracker:buff:b1:detail:off").performClick()
+        assertEquals(listOf("b1"), turnedOff)
+    }
+
+    /**
+     * A buff the sheet describes nowhere: the app says **the sheet** is silent rather than drawing
+     * an empty paragraph or inventing a description.
+     */
+    @Test
+    fun `a buff with no description says so rather than showing nothing`() {
+        compose.setMageHandContent {
+            TrackerTab(
+                state = Sabriel.tracker().copy(buffs = listOf(BuffChipState("b2", "Bless", null))),
+            )
+        }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:buff:b2"))
+        compose.onNodeWithTag("tracker:buff:b2").performClick()
+
+        compose.onNodeWithText("No description on the sheet.").assertIsDisplayed()
+    }
+
+    /**
+     * R3: *"nothing to show → the section is unchanged"*.
+     *
+     * The default fixture has no buffs, which is the majority of the party most of the time. No
+     * chip, and — the half that matters — the Conditions section is still there with its toggle
+     * chips, so the feature is invisible rather than merely empty.
+     */
+    @Test
+    fun `a character with no buffs draws no chip and an unchanged section`() {
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker()) }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:conditions:inactive"))
+        compose.onAllNodesWithTag("tracker:buff:b1").assertCountEquals(0)
+        compose.onNodeWithText("Darkvision Switch").assertIsDisplayed()
+    }
+
+    /**
+     * Offline: the ✕ is inert and the **body is not**.
+     *
+     * Reading what a buff does is not a write, and a player looking at a stale sheet has more
+     * reason to want the text, not less — so the read half stays live while the write half dims,
+     * which is the split every control on this screen makes.
+     */
+    @Test
+    fun `with writes refused the cross is inert but the text is still reachable`() {
+        val turnedOff = mutableListOf<String>()
+        compose.setMageHandContent {
+            TrackerTab(
+                state = withBuff(canWrite = false),
+                actions = TrackerActions(onTurnOffBuff = { turnedOff += it }),
+            )
+        }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:buff:b1"))
+        compose.onNodeWithTag("tracker:buff:b1:off").performClick()
+        assertTrue("the queue would refuse it anyway; the control says so first", turnedOff.isEmpty())
+
+        compose.onNodeWithTag("tracker:buff:b1").performClick()
+        compose.onNodeWithText("+5 to AC until your next turn.").assertIsDisplayed()
+    }
+
     @Test
     fun `the opened drawer survives an activity recreation`() {
         val restoration = StateRestorationTester(compose)

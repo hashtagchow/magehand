@@ -762,6 +762,132 @@ sealed class WriteOp {
     }
 
     /**
+     * `creatureProperties.softRemove {_id}` — the tracker's buff chip ✕ (FR-53 R4, design 21
+     * decision 4).
+     *
+     * ### The same method as [RemoveProperty], and a different op
+     *
+     * Both send `softRemove` with one id, so a reader may reasonably ask why this is not that
+     * type with another name. **Three** things differ, and every one of them is visible to a user:
+     *
+     *  - **the sentence** — *"Turned off Shield"*, not *"Deleted Shield"*. A player did not delete
+     *    anything; a spell effect ended. [TrackerWriteKind.BUFF_OFF] exists for that sentence and
+     *    for no other reason, which is [TrackerWriteKind.CAST_SPELL]'s precedent exactly;
+     *  - **coalescing** — this one merges on the id and [RemoveProperty] deliberately does not. A
+     *    delete arrives through a destructive confirm dialog, one considered tap at a time; a ✕ on
+     *    a chip is a bare tap with nothing in front of it, and a double-tap must cost one call
+     *    rather than two of the five the server allows per five seconds;
+     *  - **the optimistic layer** — this one predicts the chip's disappearance and
+     *    [RemoveProperty] predicts nothing, for the same reason: a confirmed delete has a dialog's
+     *    worth of latency cover, and an unconfirmed tap has none. A chip that sits there for a
+     *    round trip after the ✕ reads as a dead control and earns a second tap.
+     *
+     * ### The rate lane is the SAME, and this used to claim otherwise
+     *
+     * A fourth bullet here read *"the rate class — `default`, per R4, rather than
+     * [RemoveProperty]'s slow lane"*. There is no such distinction: [SLOW_SPACING_MILLIS] **is**
+     * this server's `default` 5-calls-per-5-seconds class — its own KDoc says so, and every method
+     * but `damage` and `doAction` sits in it — so R4's *"rate class `default`"* and
+     * [RemoveProperty]'s spacing are one number, `1000`, in one lane. Both ops declare
+     * [SLOW_SPACING_MILLIS] and the export's own two vectors print `1000` / `default` for each.
+     *
+     * Corrected in the 1.19.0 review (MEDIUM-1) rather than quietly dropped, because the same
+     * sentence had been *exported* as contract text — see `rules.json#softRemove.twoIntentsOneMethod`
+     * — where a WebHand author reading it would have built a queue divergence MageHand does not
+     * have. Three differences is a sufficient argument for the split; the KDoc did not need a
+     * fourth and certainly not a false one.
+     *
+     * ### The write is verified, and it is the sheet's own
+     *
+     * The 2026-09-14 probe read the server's client bundle: there is **no buff-specific method**,
+     * and DiceCloud's own remove button on an applied buff sends this exact call. `buffRemover`
+     * properties (*"Dismiss Spell: Disguise Self"*) are the library's way of reaching the same
+     * place through `doAction` and are not used here. The server soft-removes the buff's
+     * descendants with it (`removedWith`) and recomputes the character's AC; this client predicts
+     * none of that (decision 4) — only that the chip goes.
+     */
+    data class TurnOffBuff(
+        val propertyId: String,
+        override val targetName: String = "",
+    ) : WriteOp() {
+        override val method: String get() = "creatureProperties.softRemove"
+        override val targetId: String get() = propertyId
+        override val params: List<JsonElement>
+            get() = listOf(buildJsonObject { put("_id", propertyId) })
+        override val minSpacingMillis: Long get() = SLOW_SPACING_MILLIS
+
+        /** R4's *"coalesce on the id"*. Two ✕ taps on one chip are one call. */
+        override val coalesceKey: String get() = "buff:$propertyId"
+
+        /**
+         * The chip leaves the row now (R4).
+         *
+         * [OptimisticChange.Removed] rather than a [OptimisticChange.ToggleTo] with `false`: a
+         * buff is not a toggle and does not go grey, it goes *away*, and the overlay has to drop
+         * it from a list rather than change a field on it.
+         */
+        override val optimistic: OptimisticChange get() = OptimisticChange.Removed(propertyId)
+
+        override val intent: TrackerWriteKind get() = TrackerWriteKind.BUFF_OFF
+
+        /** `1`: you turn the buff off, not some of it. */
+        override val magnitude: Int get() = 1
+
+        override val inverse: WriteOp get() = RestoreBuff(propertyId, targetName)
+
+        /**
+         * Merging two of these yields **one of them**, not a [Noop].
+         *
+         * That is the difference from [FlipToggle], whose pair genuinely cancels: two flips return
+         * a toggle to where it started, and two soft-removes of one property leave it removed. A
+         * `Noop` here would silently swallow the write the user asked for.
+         */
+        override fun coalesceWith(other: WriteOp): WriteOp? =
+            (other as? TurnOffBuff)?.takeIf { it.propertyId == propertyId }
+
+        override val description: String get() = "softRemove buff $propertyId"
+    }
+
+    /**
+     * `creatureProperties.restore {_id}` — [TurnOffBuff]'s inverse, and the only way this app
+     * sends it for a buff.
+     *
+     * [RestoreProperty]'s shape and [RestoreProperty]'s reason for existing: the undo stack needs
+     * something to hold. There is no `restoreBuff` intent on `OpenCharacter` and there will not
+     * be one — a buff comes back by pressing UNDO on the turn-off, not from a list of ended
+     * spells this app does not draw.
+     *
+     * Separate from [RestoreProperty] only so that the pair's *vocabulary* stays matched: undoing
+     * *"Turned off Shield"* files [TrackerWriteKind.BUFF_RESTORE], and an undo that read
+     * *"Restored Shield"* in the item-deletion sense would be the same word for two different
+     * events on one history sheet.
+     *
+     * **No optimistic layer**, deliberately, and asymmetrically with [TurnOffBuff]. The chip's
+     * disappearance is predicted because a tap with no dialog needs latency cover; its
+     * *reappearance* is the result of a button the user pressed knowingly, and predicting it would
+     * mean this app minting an `AppliedBuff` — a name and a description it would have to remember
+     * or invent — rather than waiting the round trip for the sheet's own.
+     */
+    data class RestoreBuff(
+        val propertyId: String,
+        override val targetName: String = "",
+    ) : WriteOp() {
+        override val method: String get() = "creatureProperties.restore"
+        override val targetId: String get() = propertyId
+        override val params: List<JsonElement>
+            get() = listOf(buildJsonObject { put("_id", propertyId) })
+        override val minSpacingMillis: Long get() = SLOW_SPACING_MILLIS
+        override val coalesceKey: String? get() = null
+        override val optimistic: OptimisticChange? get() = null
+        override val intent: TrackerWriteKind get() = TrackerWriteKind.BUFF_RESTORE
+        override val magnitude: Int get() = 1
+
+        override val inverse: WriteOp get() = TurnOffBuff(propertyId, targetName)
+
+        override val description: String get() = "restore buff $propertyId"
+    }
+
+    /**
      * `organize.organizeDoc {docRef, parentRef, order}` — the detail sheet's "Move to…"
      * (12 decision 8, FR-9).
      *
@@ -1441,6 +1567,21 @@ sealed class WriteOp {
          */
         fun removeItem(propertyId: String, targetName: String = ""): WriteOp =
             RemoveProperty(propertyId = propertyId, targetName = targetName)
+
+        /**
+         * End a buff that is running on the character — the chip's ✕ (FR-53 R4).
+         *
+         * [removeItem]'s shape and, like it, no current state to capture: the inverse of
+         * soft-removing a property is restoring the same property. It is a separate factory
+         * because it produces a separate op — see [TurnOffBuff] for the four differences from a
+         * delete, all of which a user can see.
+         *
+         * @param targetName the buff's name at tap time, for the receipt and the history row.
+         *   `DefaultOpenCharacter` re-reads it off the live board and this is only the fallback
+         *   for a caller that already has one — `removeItem`'s convention exactly.
+         */
+        fun turnOffBuff(propertyId: String, targetName: String = ""): WriteOp =
+            TurnOffBuff(propertyId = propertyId, targetName = targetName)
 
         /**
          * Move an item into a container or back to the carried root (12 decision 8).

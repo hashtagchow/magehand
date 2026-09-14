@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.BuffChipState
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.HpState
 import com.hashtagchow.magehand.ui.testing.Sabriel
 import com.hashtagchow.magehand.ui.testing.setMageHandContent
@@ -66,6 +67,8 @@ class DmCardRenderTest {
          * the badge because its own fixture supplies one.
          */
         armorClass: Int? = null,
+        /** FR-53 R5. Empty by default, for [armorClass]'s reason: every earlier test is unmoved. */
+        buffs: List<BuffChipState> = emptyList(),
     ) = DmCardUiState(
         creatureId = Sabriel.CREATURE_ID,
         name = "Sabriel",
@@ -73,6 +76,7 @@ class DmCardRenderTest {
         availability = availability,
         hp = HpState(propertyId = "hp", current = 11, max = 17, tempHp = 0, armorClass = armorClass),
         slots = listOf(Sabriel.firstLevel),
+        buffs = buffs,
         showsWriteControls = showsWriteControls,
         writeControlsEnabled = writeControlsEnabled,
         permissionDenied = permissionDenied,
@@ -290,6 +294,56 @@ class DmCardRenderTest {
         }
     }
 
+    // ---- FR-53 R5: the card's buff chips ------------------------------------
+
+    private val shield = BuffChipState("b1", "Shield", "+5 to AC")
+
+    /**
+     * A read-only card **names** the buff and offers no way to end it.
+     *
+     * The name is asserted through the card's **one spoken sentence** rather than through the
+     * chip's test tag, and that is this file's standing rule rather than a workaround: the read
+     * half of a card is `clearAndSetSemantics`, so every tag and description inside it is gone
+     * from the tree by construction (the same reason `dm:hp:<id>` is unreachable). That sentence
+     * is therefore all a screen-reader user gets from the read half — a chip row that draws two
+     * shapes and speaks one of them would be BUG-6's defect on a new surface.
+     *
+     * The absence half is the capability rule: "you may not edit this character" is absence, not
+     * a dimmed control. The ✕ is outside the cleared region when it exists (every write control
+     * is), so its non-existence here is a meaningful assertion.
+     */
+    @Test
+    fun `a read-only card names the buff and offers no cross`() {
+        compose.setMageHandContent {
+            dmCard(card(showsWriteControls = false, buffs = listOf(shield)))
+        }
+
+        compose.onNodeWithTag("dm:card:${Sabriel.CREATURE_ID}")
+            .assertContentDescriptionContains("Shield", substring = true)
+        compose.onNodeWithContentDescription("Turn off Shield").assertDoesNotExist()
+    }
+
+    /** With the gate open the ✕ is there, speaks, and fires the turn-off for this card. */
+    @Test
+    fun `a writable card's buff cross fires the turn-off`() {
+        val turnedOff = mutableListOf<String>()
+        compose.setMageHandContent {
+            DmCard(
+                card = card(showsWriteControls = true, buffs = listOf(shield)),
+                onClick = {},
+                onSpend = {},
+                onRestore = {},
+                onChangeHitPoints = {},
+                onToggleCondition = {},
+                onTurnOffBuff = { turnedOff += it },
+            )
+        }
+
+        compose.onNodeWithContentDescription("Turn off Shield").assertIsDisplayed()
+        compose.onNodeWithTag("dm:buff:${Sabriel.CREATURE_ID}:b1:off").performClick()
+        assertEquals(listOf("b1"), turnedOff)
+    }
+
     @Composable
     private fun dmCard(
         card: DmCardUiState,
@@ -302,5 +356,6 @@ class DmCardRenderTest {
         onRestore = {},
         onChangeHitPoints = onChangeHitPoints,
         onToggleCondition = {},
+        onTurnOffBuff = {},
     )
 }

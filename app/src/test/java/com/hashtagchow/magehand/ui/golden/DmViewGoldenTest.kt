@@ -67,6 +67,7 @@ class DmViewGoldenTest {
                 onRestore = { _, _, _ -> },
                 onChangeHitPoints = { _, _ -> },
                 onToggleCondition = { _, _ -> },
+                onTurnOffBuff = { _, _ -> },
             )
         }
 

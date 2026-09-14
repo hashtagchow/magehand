@@ -64,12 +64,17 @@ import com.hashtagchow.magehand.core.model.ConcentrationPrompt
  *
  * ### The action is absent, not disabled, when it cannot work
  *
- * [ConcentrationPrompt.toggleId] is `null` whenever the banner's source is not a flippable toggle
- * — a `buff`-sourced concentration, which `flipToggle` refuses (see
+ * [ConcentrationPrompt.canDrop] is false whenever the banner's source is something this app cannot
+ * correctly end — in practice a **computed** toggle, which `flipToggle` refuses (see
  * `TrackerBoard.concentrationToggle`). A greyed "Drop concentration" would promise a control the
  * server has no method behind; the prompt is then purely informational, which decision 10 permits
- * in as many words. That is the same limitation the tracker's own ✕ has carried since WP7, from
- * the same cause, and it is stated in the wave report rather than hidden here.
+ * in as many words.
+ *
+ * **A buff-sourced prompt used to be in that set and no longer is** (FR-53 R6). The paragraph here
+ * read *"a `buff`-sourced concentration, which `flipToggle` refuses"* and treated that as the end
+ * of the matter; the 2026-09-14 probe found the write DiceCloud's own sheet makes on an applied
+ * buff, so a buff source now carries a live Drop through `turnOffBuff`. Nothing about the refusal
+ * was wrong — `flipToggle` still refuses a buff — what changed is that a second method exists.
  *
  * @param subjectName whose check this is, for the DM dashboard — decision 9's *"the DM's own write
  *   prompts on the DM's screen"*, where six characters share one banner slot and the sentence is
@@ -77,15 +82,19 @@ import com.hashtagchow.magehand.core.model.ConcentrationPrompt
  * @param canWrite the tracker's own dimming rule (`TrackerScreen`'s `ConcentrationBanner` ✕,
  *   mirrored here): the queue refuses a write while disconnected, so the Drop action is absent
  *   under the same condition rather than composed and left to fail silently.
- * @param onDrop handed the toggle id, which is never null when this is called: the button that
- *   calls it is only composed when [ConcentrationPrompt.canDrop] and [canWrite].
+ * @param onDrop invoked when the player presses Drop, with **no argument**: the caller already
+ *   holds the [prompt] and is the only layer that knows which of its two ids it has and therefore
+ *   which write to send. Handing over an id would have meant either a second lambda or a caller
+ *   re-deriving the kind from a bare string — the drift `TrackerBoard`'s two derived properties
+ *   exist to prevent. The button is composed only when [ConcentrationPrompt.canDrop] and
+ *   [canWrite], so a caller can rely on one of the two ids being non-null inside it.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun ConcentrationPromptBanner(
     prompt: ConcentrationPrompt,
     canWrite: Boolean,
-    onDrop: (String) -> Unit,
+    onDrop: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
     subjectName: String? = null,
@@ -149,9 +158,9 @@ fun ConcentrationPromptBanner(
                 )
             }
 
-            if (canWrite) prompt.toggleId?.let { toggleId ->
+            if (canWrite && prompt.canDrop) {
                 TextButton(
-                    onClick = { onDrop(toggleId) },
+                    onClick = onDrop,
                     modifier = Modifier
                         .heightIn(min = 48.dp)
                         .testTag("tracker:concentration:prompt:drop"),

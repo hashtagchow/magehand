@@ -121,6 +121,128 @@ class ActionsUiStateTest {
     }
 
     // -----------------------------------------------------------------------
+    // D2 — the tab survives FR-55, and the three empty states stay apart
+    // -----------------------------------------------------------------------
+
+    private val allSwitchedOff = ActionBoard(
+        spellLists = listOf(SpellListHeader(propertyId = "l1", name = "Wizard", dc = 15, abilityMod = 4)),
+        switchedOffRowCount = 3,
+    )
+
+    /**
+     * The surface exists, and it says what is true rather than what the filter did.
+     *
+     * Three empty states and all three have to stay distinct, because they have three different
+     * fixes: `isEmpty` is the sheet's, `showsNoMatches` is the query's, and this one is the
+     * player's to fix in DiceCloud. Asserting the other two are false is the half that matters —
+     * a state that reported both would be the screen arguing with itself.
+     */
+    @Test
+    fun `a board of nothing but switched-off rows keeps the surface and says so`() {
+        val state = toActionsUiState("c1", allSwitchedOff)
+
+        assertTrue("D2: FR-55 must not cost the tab", state.hasRows)
+        assertTrue(state.showsNoneAvailable)
+        assertFalse("not the sheet-has-nothing state", state.isEmpty)
+        assertFalse(state.showsNoMatches)
+    }
+
+    /** A character who genuinely has nothing keeps the old answer, and loses the tab as before. */
+    @Test
+    fun `a board with no rows at all is empty and has no surface`() {
+        val state = toActionsUiState("c1", ActionBoard())
+
+        assertFalse(state.hasRows)
+        assertTrue(state.isEmpty)
+        assertFalse(state.showsNoneAvailable)
+    }
+
+    /** With rows to list, the switched-off count changes nothing about what is drawn. */
+    @Test
+    fun `switched-off rows alongside listed ones show neither empty state`() {
+        val state = toActionsUiState("c1", board.copy(switchedOffRowCount = 2))
+
+        assertTrue(state.hasRows)
+        assertFalse(state.isEmpty)
+        assertFalse(state.showsNoneAvailable)
+    }
+
+    /**
+     * D2's third clause: a spell list whose sections are all empty draws no DC header.
+     *
+     * The header is a stat *for spells*; with no spell section under it, it floats over nothing —
+     * which is exactly the shape FR-55 makes reachable, a sheet whose spells are all switched off
+     * while its actions stay. The second case is the one that proves the gate is about spell
+     * sections and not merely about the board being non-empty.
+     */
+    @Test
+    fun `a spell list draws no header when no spell section survives`() {
+        assertFalse(
+            "every row switched off — nothing at all to head",
+            toActionsUiState("c1", allSwitchedOff).showsSpellLists,
+        )
+        assertFalse(
+            "actions listed, every spell switched off — the DC heads an empty list",
+            toActionsUiState(
+                "c1",
+                ActionBoard(
+                    actions = listOf(action("Dash", ActionType.ACTION)),
+                    spellLists = allSwitchedOff.spellLists,
+                    switchedOffRowCount = 4,
+                ),
+            ).showsSpellLists,
+        )
+        assertTrue("one live spell is enough", toActionsUiState("c1", board).showsSpellLists)
+    }
+
+    /**
+     * NEW-5, ruled to match WebHand: a search narrows the rows and **never** takes the DC block
+     * away.
+     *
+     * The first cut of `showsSpellLists` read `sections`, which `withView` has already filtered by
+     * the time the screen sees them — so typing *"dagger"* on a caster dropped the spell save DC,
+     * a search-behaviour change D2 did not ask for (the old gate was `spellLists.isNotEmpty()`,
+     * which a query never touched). The block is a stat about the character, like the tracker's AC
+     * badge; FR-55 may take it away because FR-55 changes what is available, a query may not
+     * because it changes only what is on screen.
+     *
+     * The second case is the boundary: with no spell surviving discovery there is nothing for the
+     * DC to be about, and that is FR-55's business rather than the query's.
+     */
+    @Test
+    fun `a search that matches only actions keeps the spell list's DC block`() {
+        assertTrue(
+            "typing 'dagger' on a caster must not remove their save DC",
+            toActionsUiState("c1", board, query = "dagger").showsSpellLists,
+        )
+        assertEquals(
+            "…and the query really did narrow to actions only",
+            listOf("group:ATTACKS"),
+            toActionsUiState("c1", board, query = "dagger").sections.map { it.key },
+        )
+        assertFalse(
+            "no spell survives discovery at all — nothing for the DC to head",
+            toActionsUiState("c1", allSwitchedOff, query = "dagger").showsSpellLists,
+        )
+    }
+
+    /**
+     * The count is **board-derived and survives a search**: a query narrows what is listed, and
+     * how many rows the sheet has switched off is not something a query changes.
+     *
+     * The `showsNoneAvailable` half is the one that would bite: while filtering, an empty result
+     * is `showsNoMatches`' sentence, which prints the query back.
+     */
+    @Test
+    fun `a search does not disturb the switched-off count or claim nothing is available`() {
+        val filtered = toActionsUiState("c1", allSwitchedOff, query = "zzz")
+
+        assertEquals(3, filtered.switchedOffRowCount)
+        assertFalse("the query's own empty state owns this frame", filtered.showsNoneAvailable)
+        assertTrue(filtered.showsNoMatches)
+    }
+
+    // -----------------------------------------------------------------------
     // Decision 6 — search
     // -----------------------------------------------------------------------
 
@@ -320,6 +442,14 @@ class ActionsUiStateTest {
      * `useTarget`, there is no way for a later edit to this file to produce one for these rows
      * either. What the sheet gets instead is a *sentence*, which decision 2 asks for in as many
      * words — a missing button explains nothing.
+     *
+     * ### FR-55: the two `inactive` rows are hand-built and no engine will produce them
+     *
+     * `ActionEngine` stopped listing switched-off rows on 2026-09-14, so `UnusableReason.INACTIVE`
+     * is now unreachable from a DiceCloud sheet. The case is corrected in place rather than
+     * deleted, per R2, because the gate it pins is what makes that safe: `isUsable` still reads
+     * `inactive`, so a row arriving by any other route still offers no Use and still says why. A
+     * deleted test would have left that gate unguarded the day something else built one.
      */
     @Test
     fun `unprepared and switched-off rows offer no use, and say why`() {
@@ -609,6 +739,38 @@ class ActionsUiStateTest {
         assertEquals("long", state.detailFor("a1")!!.body)
         assertEquals("short", state.detailFor("a2")!!.body)
         assertNull("blank is absent, never an empty paragraph", state.detailFor("a3")!!.body)
+    }
+
+    /**
+     * BUG-25 R2: the emphasis the library writes into the rendered description comes off **here**,
+     * at render, and nowhere earlier.
+     *
+     * The third row is the case the regex exists for (FR-47 review LOW-5): a spaced `*` is a
+     * multiplication sign in prose, and eating it would be this app deleting a character the
+     * server sent. The engine's model object still carries the asterisks — that is what makes the
+     * contract export faithful — so this property is the only place they may disappear.
+     */
+    @Test
+    fun `the detail body strips markdown emphasis and leaves a spaced asterisk alone`() {
+        val bolded = ActionEntry(
+            "a1", "Mind Sliver", ActionType.ACTION,
+            description = "The target must succeed a **DC 12** Intelligence Saving Throw.",
+        )
+        val italic = ActionEntry("a2", "Nick", ActionType.ACTION, summary = "*Mastery.* Extra attack.")
+        val product = ActionEntry("a3", "Scale", ActionType.ACTION, description = "Heals 2 * your level.")
+        val state = toActionsUiState("c1", ActionBoard(actions = listOf(bolded, italic, product)))
+
+        assertEquals(
+            "The target must succeed a DC 12 Intelligence Saving Throw.",
+            state.detailFor("a1")!!.body,
+        )
+        assertEquals("Mastery. Extra attack.", state.detailFor("a2")!!.body)
+        assertEquals("Heals 2 * your level.", state.detailFor("a3")!!.body)
+        assertEquals(
+            "the model keeps the server's characters — only the screen strips them",
+            "The target must succeed a **DC 12** Intelligence Saving Throw.",
+            bolded.description,
+        )
     }
 
     // -----------------------------------------------------------------------

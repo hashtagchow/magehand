@@ -276,15 +276,25 @@ class ConcentrationPromptTest {
     // --- decision 10: the drop action, and when it is absent ----------------
 
     /**
-     * A buff-sourced banner gives an **informational** prompt (decision 10's *"if not cheaply
-     * writable … recorded honestly"*).
+     * A buff-sourced banner gives a prompt **with a Drop**, and the drop soft-removes the buff
+     * (FR-53 R6).
      *
-     * `flipToggle` refuses anything that is not a toggle, and DiceCloud publishes no method that
-     * ends a buff — so a Drop button here would promise a write this app cannot make. The prompt
-     * still fires, because the *check* is owed regardless of whether the app can end the spell.
+     * ### Corrected, not deleted — and the old wording is why it is worth reading
+     *
+     * This case was `a buff-sourced concentration prompts with no drop action` and asserted
+     * `toggleId == null` with the reason *"no method ends a buff, so there is nothing to offer"*.
+     * The **first half of that is still true and is still asserted**: `flipToggle` refuses
+     * anything that is not a manual toggle, so `toggleId` is `null` here and always was. What
+     * expired is the second half. The 2026-09-14 probe read DiceCloud's own client bundle and
+     * found the call its sheet makes on an applied buff — `creatureProperties.softRemove` — so the
+     * write exists, is documented, and is not a guess. The prompt keeps firing for the same reason
+     * it always did (the *check* is owed either way) and now has something to offer with it.
+     *
+     * Decision 10's informational prompt is not gone; it moved to the case below, which is the one
+     * that actually has no write behind it.
      */
     @Test
-    fun `a buff-sourced concentration prompts with no drop action`() = runTest {
+    fun `a buff-sourced concentration prompts with a drop that soft-removes`() = runTest {
         val h = harness(hp(current = 40), concentrationBuff())
 
         h.character.changeHitPoints(-13)
@@ -294,7 +304,42 @@ class ConcentrationPromptTest {
         assertEquals("Concentration: Web", prompt.sourceName)
         assertEquals(13, prompt.damage)
         assertEquals("half of 13, floored, is 6 — under the floor, so 10", 10, prompt.dc)
-        assertNull("no method ends a buff, so there is nothing to offer", prompt.toggleId)
+        assertNull("flipToggle still refuses a buff — that half is unchanged", prompt.toggleId)
+        assertEquals("buf1", prompt.buffId)
+        assertEquals(true, prompt.canDrop)
+
+        // And the id the prompt hands over is one `turnOffBuff` actually accepts — the half a
+        // field on a data class cannot prove. Without it the prompt could carry a plausible id
+        // that the write path drops, which is a Drop button that does nothing.
+        h.caller.reset()
+        h.character.turnOffBuff(prompt.buffId!!)
+        advanceUntilIdle()
+        assertEquals("creatureProperties.softRemove", h.caller.calls.single().method)
+    }
+
+    /**
+     * Decision 10's **informational** prompt, which R6 keeps: a source that is neither a flippable
+     * toggle nor a buff.
+     *
+     * A **computed** toggle — one carrying neither `enabled` nor `disabled`, which is what most
+     * concentration sources on a real sheet are. `flipToggle` refuses it (the server's own
+     * `Computed toggle` precondition) and it is not a buff, so there is no correct write and the
+     * prompt offers none. The check still fires, because it is owed either way.
+     */
+    @Test
+    fun `a computed-toggle concentration prompts with no drop action`() = runTest {
+        val h = harness(
+            hp(current = 40),
+            """{"_id":"tog1","type":"toggle","name":"Concentration","order":1}""",
+        )
+
+        h.character.changeHitPoints(-13)
+        settle()
+
+        val prompt = h.prompts.single()
+        assertEquals("Concentration", prompt.sourceName)
+        assertNull("the server refuses flipToggle on a computed toggle", prompt.toggleId)
+        assertNull("and it is not a buff", prompt.buffId)
         assertEquals(false, prompt.canDrop)
     }
 
