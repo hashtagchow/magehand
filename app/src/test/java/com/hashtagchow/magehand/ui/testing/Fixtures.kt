@@ -129,7 +129,16 @@ object Sabriel {
         kind = TrackerKind.RESOURCE,
     )
 
-    /** FR-30's row. `dieSize` is what makes it print *"Hit Dice d6"* rather than its raw name. */
+    /**
+     * FR-30's row. `dieSize` is what makes it print *"Hit Dice d6"* rather than its raw name, and
+     * FR-51's `dieModifier` is what makes it read *"Hit Dice d6 + 1"*.
+     *
+     * `1` is the capture's own number: the sheet's *d6 Hit Dice* carries `constitutionMod: 1` at
+     * Constitution 13, so the goldens photograph a real row rather than a chosen one. The signed
+     * forms the ruling names — `+ 3`, `+ 0`, `− 1` — are pinned as strings in
+     * `TrackerTabRenderTest` instead, where a wrong sign is a failure rather than a picture
+     * somebody has to notice.
+     */
     val hitDice = PipRowState(
         propertyId = "hitdice-d6",
         label = "d6 Hit Dice",
@@ -137,8 +146,12 @@ object Sabriel {
         value = 3,
         total = 3,
         pinned = false,
-        kind = TrackerKind.RESOURCE,
+        // NIT-5: `HIT_DICE`, not `RESOURCE`. Inert — `PipRow` branches on `dieSize`, not on
+        // `kind` — but this fixture is what six goldens photograph and what every hit-dice
+        // assertion in `TrackerTabRenderTest` is built on, so it should say what it is.
+        kind = TrackerKind.HIT_DICE,
         dieSize = "d6",
+        dieModifier = 1,
     )
 
     /**
@@ -151,12 +164,19 @@ object Sabriel {
         canWrite: Boolean = true,
         concentratingOn: String? = "Bless",
         status: ConnectionStatus = ConnectionStatus(tone = ConnectionTone.LIVE, syncedAt = "14:52"),
+        /**
+         * FR-50. **Defaults to absent**, which is the case the six committed
+         * `TrackerScreen_*.png` goldens photograph and the case R3 promises is pixel-identical
+         * to a build without the feature. `TrackerGoldenTest` passes the capture's own 14 so the
+         * corpus shows the badge; every other consumer of this fixture keeps the block it had.
+         */
+        armorClass: Int? = null,
     ) = TrackerUiState(
         creatureId = CREATURE_ID,
         status = status,
         concentratingOn = concentratingOn,
         concentrationToggleId = "toggle-bless",
-        hp = HpState(propertyId = "hp", current = 17, max = 17, tempHp = 0),
+        hp = HpState(propertyId = "hp", current = 17, max = 17, tempHp = 0, armorClass = armorClass),
         // The capture's two half-multipliers, already merged by kind and alphabetised the way
         // `toDefenseRows` merges them — the two source features are named on the store-safety
         // gate's list, and the merge is exactly why the row does not need them.

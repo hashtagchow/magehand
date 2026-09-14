@@ -149,6 +149,30 @@ data class TrackedResource(
      */
     val dieSize: String? = null,
     /**
+     * The modifier the player adds to every roll of [dieSize] — the sheet's own
+     * `constitutionMod` (FR-51 R1, 18 decision 24). `null` on every other kind, and `null` on a
+     * hit-dice row whose sheet expresses the number nowhere.
+     *
+     * ### A separate field, for [dieSize]'s reason
+     *
+     * The word "Hit Dice", the space either side of the sign and the choice of U+2212 over a
+     * hyphen are all **copy**, and copy lives in `strings.xml`. So the engine carries the *fact*
+     * — which number — and `PipRow` spends it on `tracker_hit_dice_row_mod`. Composing
+     * `"Hit Dice d8 + 3"` in `:core:data` would put three English rendering decisions in the
+     * discovery layer, exactly as baking the die size into [name] would have.
+     *
+     * ### Nullable, and the null is not a zero
+     *
+     * 18 decision 25: a sheet that expresses no modifier keeps today's *"Hit Dice d8"*, because
+     * the app must never invent a `+ 0`. A modifier that is genuinely zero is a different fact
+     * and **does** print — it applies to every roll, so it is the answer to a question the player
+     * would otherwise leave the table to look up. Only `null` suppresses the clause, which is why
+     * this is an `Int?` rather than an `Int` defaulting to `0`.
+     *
+     * May be negative: a CON of 8 is `−1`, and that is the number the player adds.
+     */
+    val dieModifier: Int? = null,
+    /**
      * The server's `order` field. Not in 03's field list; kept because it is the only
      * stable tie-breaker the server gives us, so two rows with the same name/level do
      * not swap places between syncs.
@@ -470,6 +494,37 @@ data class RollModifier(
 data class TrackerBoard(
     val hp: TrackedResource? = null,
     val tempHp: TrackedResource? = null,
+    /**
+     * The character's armour class, or `null` when the source expresses none (FR-50 R1/R2,
+     * 18 decision 22).
+     *
+     * ### A plain `Int?`, deliberately not a [TrackedResource]
+     *
+     * Every consumer of a `TrackedResource` is built on "spend this and it goes down": the pip
+     * row, the steppers, the `spend`/`restore` intents, the optimistic overlay, the rest
+     * dialog's restore list, `WriteOp.adjust`'s kind branch. AC has **no count and no mutator**
+     * — DiceCloud computes it from armour, shield and Dexterity and publishes the answer, and
+     * there is no documented method that sets it. Reusing the row type would have put a row into
+     * every one of those lists and made "why can I tap my AC?" a question somebody has to answer
+     * with a special case.
+     *
+     * The structural half of that argument is [allCountableRows], and through it BUG-20: AC is
+     * not a row, so a tapped-row lookup can never resolve to it, and it cannot become the fourth
+     * instance of the discoverable-but-untappable defect. That is not a happy accident of the
+     * type — it is why the type was chosen.
+     *
+     * ### `null`, never `0`
+     *
+     * An unarmoured character still has an AC (10 + Dex), so `0` is not a value any sheet means:
+     * it could only ever be this app's word for "I did not find one". The tracker draws nothing
+     * at all in that case and the HP block is pixel-identical to a build that had never heard of
+     * this field.
+     *
+     * Both sources map onto this one field — `TrackerEngine` from the `armor` attribute's
+     * `total`, `LocalTrackerBoard` from `LocalCharacter.armorClass` — so the HP block and the DM
+     * card render one number from one place whichever kind of character is open (18 decision 23).
+     */
+    val armorClass: Int? = null,
     /** Ordered by spell-slot level, then by the server's `order`. */
     val slots: List<TrackedResource> = emptyList(),
     val resources: List<TrackedResource> = emptyList(),
@@ -601,10 +656,69 @@ data class TrackerBoard(
             activeToggles.firstOrNull { it.name == name && it.enabled && it.flippable }
         }
 
+    /**
+     * **Every [TrackedResource] this board carries, in one place** — BUG-20's fix.
+     *
+     * ### The defect this replaces
+     *
+     * `CharacterHomeViewModel.withRow` and `DmViewViewModel.withRow` each resolved a tapped
+     * `propertyId` against a hand-maintained sum — `slots + resources + limitedUses + hitDice +
+     * allItems + listOfNotNull(hp)` — written out twice, in two files, with no compiler and no
+     * test holding them to the board's actual field list. A new list on this class therefore
+     * shipped as a row that *renders*, draws its pips, speaks its name, and does nothing at all
+     * when tapped, because the id resolves against a sum that does not include it. FR-30 hit it
+     * for hit dice and FR-44 hit it for limited uses; both were patched by adding the list to
+     * both sums, which is the same fix twice and no fix at all. The ledger's words: *"third time
+     * is the pattern, not the fix"*.
+     *
+     * So the sum lives **here**, beside the fields it sums, and `TrackerBoardCountableRowsTest`
+     * walks every [TrackerKind] and fails if any kind cannot be reached through it. A new kind
+     * is then a failing test at the moment the list is declared, rather than a bug report about
+     * a pip that does not respond.
+     *
+     * ### What is in it, and why [tempHp] is too
+     *
+     * Every field of this class whose element type is [TrackedResource]. That is the rule, and
+     * it is deliberately mechanical rather than curated: a curated list is exactly what the two
+     * `withRow` copies were. [tempHp] joins the sum on those terms even though nothing on any
+     * screen can currently hand back its `propertyId` — `HpState` does not carry one, and 04's
+     * write table has no temp-HP write. Leaving it out because no control happens to exist today
+     * is the reasoning that produced this bug twice; `WriteOp` already branches on
+     * [TrackerKind.TEMP_HP], so a row this list omitted would be one control away from the same
+     * silence.
+     *
+     * [pinnedItems] is **not** added separately: it is a subset of [allItems] by construction,
+     * and adding it would resolve pinned ids twice. `armorClass` is not here either, and cannot
+     * be — it is an `Int?`, which is the structural half of 18 decision 22.
+     *
+     * Order is the boards' own; callers take the first match on `propertyId`, and property ids
+     * are unique within a creature, so the order is stable rather than significant.
+     */
+    val allCountableRows: List<TrackedResource>
+        get() = slots + resources + limitedUses + hitDice + allItems +
+            listOfNotNull(hp, tempHp)
+
+    /** The row a tapped `propertyId` names, or `null` when it names none. See [allCountableRows]. */
+    fun countableRow(propertyId: String): TrackedResource? =
+        allCountableRows.firstOrNull { it.propertyId == propertyId }
+
+    /**
+     * Whether this board has anything at all to draw.
+     *
+     * Derived from [allCountableRows] rather than from a second hand-written enumeration of the
+     * same six fields — the review's MEDIUM-4/LOW-4, and the free half of BUG-20: this property
+     * sat six lines below the one that now sums those lists and listed them again. Two sums of
+     * one thing is the shape of the bug, whatever the sum is for.
+     *
+     * The three lists that are **not** countable rows are still named, because they are genuinely
+     * different: a character with only condition chips, only defenses or only a rolls dropdown has
+     * a screen worth rendering. `deathSaves`, `concentratingOn` and [armorClass] are deliberately
+     * absent from both the old form and this one — none of them is content a screen exists for,
+     * and AC could not be in the sum anyway (18 decision 22).
+     */
     val isEmpty: Boolean
-        get() = hp == null && tempHp == null && slots.isEmpty() && resources.isEmpty() &&
-            limitedUses.isEmpty() && hitDice.isEmpty() && allItems.isEmpty() &&
-            activeToggles.isEmpty() && defenses.isEmpty() && rolls.isEmpty()
+        get() = allCountableRows.isEmpty() && activeToggles.isEmpty() &&
+            defenses.isEmpty() && rolls.isEmpty()
 
     companion object {
         val EMPTY: TrackerBoard = TrackerBoard()

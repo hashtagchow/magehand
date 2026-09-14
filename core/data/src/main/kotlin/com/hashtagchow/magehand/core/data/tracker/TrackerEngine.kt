@@ -81,8 +81,49 @@ object TrackerEngine {
     /** The die a hit-dice row counts — `"d8"` on the live sheet. See [hitDieSize]. */
     private const val FIELD_HIT_DICE_SIZE = "hitDiceSize"
 
+    /**
+     * FR-51 R1's field: the modifier the server has already added up for this hit die, written
+     * onto the `hitDice` property itself (fixture: `"constitutionMod": 1` on *d6 Hit Dice*, at
+     * CON 13).
+     *
+     * Read from the row rather than derived from the `constitution` ability, because the server
+     * recomputes and re-publishes it whenever CON changes and it is therefore the sheet's own
+     * answer. [constitutionModifier] is the fallback for a row that does not carry it, and it is
+     * a fallback rather than the primary source for 10 decision 3's reason: never compute over a
+     * number the server already stated.
+     *
+     * Public for [VAR_HIT_POINTS]' reason: the contract export states the discovery rule from the
+     * constant that implements it, so the exported field name and the one this engine reads
+     * cannot drift apart.
+     */
+    const val FIELD_CONSTITUTION_MOD = "constitutionMod"
+
     /** Public so the contract export states the rule from the constant that implements it. */
     const val VAR_HIT_POINTS = "hitPoints"
+
+    /**
+     * FR-50 R1's discriminator — DiceCloud publishes armour class as an `attribute` whose
+     * `variableName` is `armor` (18 decision 21).
+     *
+     * The `attributeType` is deliberately **unchecked**, exactly as it is for [VAR_HIT_POINTS]
+     * and the death-save pair: the live sheet types this one `stat`, no other rule in this
+     * engine reads a `stat` attribute, and keying on a sub-type would re-create the fragility
+     * the variable-name rules exist to remove. The variable name is what the sheet's own
+     * formulas compute against, so it is the server's word rather than ours.
+     *
+     * Public for [VAR_HIT_POINTS]' reason: the contract export states the discovery rule from
+     * the constant that implements it, so the two cannot drift.
+     */
+    const val VAR_ARMOR = "armor"
+
+    /**
+     * FR-51 R2's fallback source — the `constitution` ability row, whose `modifier` the engine
+     * already parses for the rolls list ([abilityCheck]).
+     *
+     * Not a second implementation of anything: the same [FIELD_MODIFIER] read, on the row the
+     * server computes it on. See [constitutionModifier].
+     */
+    const val VAR_CONSTITUTION = "constitution"
 
     /**
      * FR-23 decision 19's discriminators. `Fails`, not `Failures` — DiceCloud's own spelling,
@@ -159,7 +200,11 @@ object TrackerEngine {
         val slots = properties.mapNotNull { spellSlot(it) }
         val resources = properties.mapNotNull { resource(it) }
         val limitedUses = properties.mapNotNull { limitedUse(it) }
-        val hitDice = properties.mapNotNull { hitDice(it) }
+        // FR-51 R2. Resolved once for the whole sheet rather than per row: it is a property of
+        // the character, every hit-dice row would find the same one, and a multiclass sheet has
+        // several rows to scan the property list for.
+        val constitutionMod = constitutionModifier(properties)
+        val hitDice = properties.mapNotNull { hitDice(it, constitutionMod) }
         val items = properties.mapNotNull { item(it) }
         val toggles = properties.mapNotNull { toggle(it) }
         val defenses = properties.mapNotNull { damageDefense(it) }
@@ -172,6 +217,11 @@ object TrackerEngine {
                 ?.takeUnless { overrides[it.propertyId]?.hidden == true },
             tempHp = properties.firstNotNullOfOrNull { healthAttribute(it, TrackerKind.TEMP_HP) }
                 ?.takeUnless { overrides[it.propertyId]?.hidden == true },
+            // FR-50 R1/R2. Deliberately **not** override-filtered, and not because the layer was
+            // forgotten: an override is keyed by `propertyId` and AC is not a row, so there is no
+            // id here for a preference to name and no control anywhere that could set one. See
+            // `TrackerBoard.armorClass`.
+            armorClass = armorClass(properties),
             slots = order(slots, overrides, SLOT_ORDER),
             resources = order(resources, overrides, NATURAL_ORDER),
             // FR-44 R1. Sorted but **not** override-filtered, for the reason on the line below
@@ -384,7 +434,7 @@ object TrackerEngine {
      * would be losing a resource the player can spend over a *label*, which is the wrong thing to
      * be strict about — the same tolerance [DamageDefense]'s free-text types get.
      */
-    private fun hitDice(p: JsonObject): TrackedResource? {
+    private fun hitDice(p: JsonObject, constitutionMod: Int?): TrackedResource? {
         if (!p.isAttribute(ATTR_HIT_DICE) || p.isSkipped()) return null
         val total = p.number("total") ?: 0
         val value = p.remaining(total)
@@ -394,8 +444,77 @@ object TrackerEngine {
             total = total,
             reset = null,
             dieSize = p.hitDieSize(),
+            // FR-51 R1/R2: the row's own number first, the ability row's second, `null` third —
+            // and `null` is a real answer that keeps today's label, never an invented `+ 0`.
+            dieModifier = p.number(FIELD_CONSTITUTION_MOD) ?: constitutionMod,
         )
     }
+
+    /**
+     * FR-51 R2's fallback: the `constitution` ability row's [FIELD_MODIFIER].
+     *
+     * ### Why there is a fallback at all
+     *
+     * Every `hitDice` property the live sheets publish carries [FIELD_CONSTITUTION_MOD], so this
+     * path is for the sheets nobody here has seen: an older document, a homebrew row typed by
+     * hand, a creature imported from somewhere that did not write the field. The number is the
+     * same number — the ability row is where the server computed it in the first place — so
+     * reading it there is honesty about a *missing field*, not a second implementation of the
+     * rule. Decision 24 names it in exactly those terms.
+     *
+     * ### And why it stops at `null`
+     *
+     * A sheet with neither the field nor a `constitution` ability row gets `null`, and the row
+     * keeps today's *"Hit Dice d8"*. The alternative — deriving `floor((score − 10) / 2)` from a
+     * score, or printing `+ 0` — is this app inventing a number the player will add to a die at
+     * a table. 18 decision 25 forbids the second and `abilityCheck`'s own KDoc forbids the first
+     * ("a missing `modifier` is a skip rather than a fallback to arithmetic on the score").
+     *
+     * Matched by `variableName`, not by name: *"Constitution"* is copy on the sheet and
+     * translatable, `constitution` is what DiceCloud's own formulas compute against.
+     */
+    private fun constitutionModifier(properties: List<JsonObject>): Int? = properties
+        .firstOrNull {
+            it.isAttribute(ATTR_ABILITY) &&
+                !it.isSkipped() &&
+                it.string("variableName") == VAR_CONSTITUTION
+        }
+        ?.number(FIELD_MODIFIER)
+
+    /**
+     * FR-50 R1: armour class, discovered by `variableName == 'armor'` (18 decision 21).
+     *
+     * ### The same rule HP uses, one variable name over
+     *
+     * `type == 'attribute'` is checked and `attributeType` deliberately is not — see [VAR_ARMOR].
+     * The blanket [isSkipped] rule applies as everywhere else, so a soft-removed or deactivated
+     * armour attribute is not the character's AC.
+     *
+     * ### `total`, falling back to `value`
+     *
+     * `total` is the computed answer — the fixture's *"Armor Class"* carries
+     * `baseValue: 10+dexterity.modifier` and `total: 14`, which is base plus every effect the
+     * server folded in. `value` is the same number on every sheet seen here and is read only
+     * when `total` is absent, for [remaining]'s reason inverted: never *ignore* a number the
+     * server already stated. Both go through [number], which resolves DiceCloud's
+     * `_calculation` wrapper and stringified numbers, so an `armor` attribute that publishes its
+     * total as `{"calculation":…, "value":14}` reads 14 rather than nothing.
+     *
+     * ### Absent is `null`, and `firstNotNullOfOrNull` is why
+     *
+     * The scan returns the first `armor` attribute that yields a **readable number**, rather
+     * than the first one that matches and then whatever it happens to hold — so a matching
+     * property mid-recompute (wrapper present, `value` not yet written) does not shadow a
+     * readable one behind it, and a sheet with no readable number at all lands on `null`. Never
+     * `0`: an unarmoured character is AC 10, so zero would be this app's word for "not found"
+     * printed as if it were the sheet's. See `TrackerBoard.armorClass`.
+     */
+    private fun armorClass(properties: List<JsonObject>): Int? = properties
+        .firstNotNullOfOrNull { p ->
+            if (p.string("type") != TYPE_ATTRIBUTE || p.isSkipped()) return@firstNotNullOfOrNull null
+            if (p.string("variableName") != VAR_ARMOR) return@firstNotNullOfOrNull null
+            p.number("total") ?: p.number("value")
+        }
 
     /**
      * `hitDiceSize` as the row should print it — `"d8"`.
@@ -405,6 +524,14 @@ object TrackerEngine {
      * `8`, and a `_calculation` wrapper holding either under `value`. The live sheet publishes the
      * first; the other two cost four lines and remove a whole class of "renders on my sheet, not
      * on yours".
+     *
+     * **FR-51's `constitutionMod` needed no twin of this function**, and the ruling's *"factor
+     * the shape reader into one helper if that is cheaper than two copies"* resolved to "neither":
+     * [number] already resolves all three shapes for an `Int` — `intOrNull`, then
+     * `content.toDoubleOrNull()` for a stringified one, then the wrapper's `value` recursively —
+     * so the modifier is a one-line `number(FIELD_CONSTITUTION_MOD)`. This function exists only
+     * because a die size is a *string* the app must not normalise, which is the one case
+     * [number] cannot serve.
      *
      * The `d` is **prepended only when it is missing**, rather than the size being parsed to an
      * `Int` and re-rendered. That keeps a homebrew `"d3"`, a `"d20"` and anything else the sheet
@@ -767,6 +894,8 @@ object TrackerEngine {
         level: Int? = null,
         /** [TrackerKind.HIT_DICE] only — see [TrackedResource.dieSize]. */
         dieSize: String? = null,
+        /** [TrackerKind.HIT_DICE] only — see [TrackedResource.dieModifier]. */
+        dieModifier: Int? = null,
         /**
          * What is left, when [remaining]'s `value ?: total − damage` is the wrong arithmetic for
          * this row (FR-44: an `action`/`spell` counts consumption in `usesUsed`, and carries
@@ -782,6 +911,7 @@ object TrackerEngine {
         reset = reset,
         spellSlotLevel = level,
         dieSize = dieSize,
+        dieModifier = dieModifier,
         sortOrder = number("order") ?: 0,
     )
 

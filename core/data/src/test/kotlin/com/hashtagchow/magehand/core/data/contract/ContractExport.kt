@@ -182,8 +182,37 @@ object ContractExport {
      * The rest half is the good news and is exported as such: `creature.methods.rest` **does**
      * clear `usesUsed` on a row whose `reset` matches, and logs it — so unlike hit dice these
      * rows belong in a rest dialog's restore list.
+     *
+     * **9** — FR-50's armour class and FR-51's hit-die modifier
+     * (`domain/rules.json#discovery.armorClass`, `#discovery.hitDice.modifier`, `armorClass` on
+     * every exported `TrackerBoard` and `dieModifier` on every exported row). A bump rather than
+     * a quiet addition, for 4/5/6/7/8's reason: both numbers are already on the wire, already
+     * published to every consumer, and **nothing in the export said they were there**. A client
+     * implementing the schema-8 rules literally renders a tracker with no AC on it and a hit-dice
+     * row that makes the player go and look up their Constitution — which is the same silent
+     * class of miss as `tempHitPoints`, with the same shape: no field, no error, and no way to
+     * tell "this sheet has none" from "my discovery is one rule short".
+     *
+     * Two facts here are not guessable from the match:
+     *
+     *  - **AC is found by `variableName`, not by `attributeType`.** DiceCloud types it `stat`,
+     *    and `stat` is a sub-type no other discovery rule in this app reads — so a consumer that
+     *    reasoned from the sub-types it already knew would never look at it. `total` is the
+     *    computed answer (`baseValue` is `10+dexterity.modifier` and is *not* it), and absent
+     *    must read `null` rather than `0`: an unarmoured character is AC 10, so a zero could
+     *    only ever be the client's word for "not found" printed as if it were the sheet's.
+     *  - **The hit-die modifier is on the hit-dice property itself.** `constitutionMod` is
+     *    server-computed and re-published whenever CON changes, so it is the number to read; the
+     *    `constitution` ability row's `modifier` is the fallback for a row that lacks the field,
+     *    and a sheet offering neither gets `null` — never a synthesised `+ 0`, and never
+     *    `floor((score − 10) / 2)` re-derived from the score.
+     *
+     * Neither is a write. AC has no mutator at all (it is a server computation), and the
+     * modifier is a label on a row whose only write is the `damage` increment schema 7 already
+     * exported — so `ddp/method-vectors.json` is untouched by this bump, which is itself worth
+     * stating: a consumer diffing 8 → 9 needs to know there is no new call to implement.
      */
-    const val SCHEMA_VERSION: Int = 8
+    const val SCHEMA_VERSION: Int = 9
 
     /** Where the export lives, relative to the repository root. */
     const val DIRECTORY: String = "contract-export"
@@ -2097,6 +2126,76 @@ object ContractExport {
                         "else, which drops them with no row and no error. If your tracker shows " +
                         "no hit dice, check your predicate before you check the wire.",
                 )
+                put(
+                    "modifier",
+                    "**Schema 9 (FR-51).** The property carries " +
+                        "`${TrackerEngine.FIELD_CONSTITUTION_MOD}` — the modifier the player adds " +
+                        "to every roll of this die, server-computed and re-published whenever CON " +
+                        "changes. Read it from the ROW, in the same three shapes every numeric " +
+                        "field here arrives in (plain number, stringified number, `_calculation` " +
+                        "wrapper). Exported as `dieModifier` on the row.",
+                )
+                put(
+                    "modifierFallback",
+                    "A `${TrackerEngine.ATTR_HIT_DICE}` row that does not carry the field takes " +
+                        "the `${TrackerEngine.VAR_CONSTITUTION}` ability row's " +
+                        "`${TrackerEngine.FIELD_MODIFIER}` — the same number, read where the " +
+                        "server computed it. A sheet offering NEITHER gets `null`, and `null` is " +
+                        "an answer: render the die alone. Do not synthesise `+ 0`, and do not " +
+                        "re-derive `floor((score − 10) / 2)` from the ability SCORE — that is a " +
+                        "second implementation of the server's arithmetic, and it drops every " +
+                        "effect the server folded into the real number.",
+                )
+                put(
+                    "modifierZero",
+                    "`0` and absent are DIFFERENT and a client must render them differently. A " +
+                        "known zero applies to every roll and is the answer to the question the " +
+                        "player would otherwise leave the table to look up, so it prints; absent " +
+                        "means the sheet never said. Exporting both as `0` — or both as `null` — " +
+                        "collapses a fact into a silence.",
+                )
+            },
+        )
+        put(
+            "armorClass",
+            buildJsonObject {
+                put(
+                    "match",
+                    "type == 'attribute' && variableName == '${TrackerEngine.VAR_ARMOR}'",
+                )
+                put(
+                    "note",
+                    "**Schema 9 (FR-50).** Found by `variableName`, NOT by `attributeType` — the " +
+                        "same rule #discovery.hitPoints and #discovery.deathSaves use, and for " +
+                        "the same reason. The live sheet types this one `stat`, which is a " +
+                        "sub-type no other rule here reads: a consumer reasoning from the " +
+                        "sub-types it already knew would never look at this property, and would " +
+                        "render a tracker with no AC on it and no error to say why.",
+                )
+                put(
+                    "number",
+                    "`total`, falling back to `value` — through the same wrapped-number reader as " +
+                        "everything else (#discovery.remaining's posture: never compute over, and " +
+                        "never ignore, a number the server already stated). `baseValue` is NOT it: " +
+                        "on the live sheet that field is the calculation `10+dexterity.modifier` " +
+                        "and reads 11 while `total` reads 14, because armour, a shield and every " +
+                        "effect are folded into the total and not into the base.",
+                )
+                put(
+                    "absent",
+                    "`null`, never `0`. An unarmoured character is AC 10, so no sheet ever means " +
+                        "zero — a `0` here could only be the client's word for \"not found\" " +
+                        "printed as though it were the character's armour class. Exported as " +
+                        "`armorClass` on the board.",
+                )
+                put(
+                    "readOnly",
+                    "There is NO write. AC is a server computation with no mutator — nothing in " +
+                        "ddp/method-vectors.json touches it, and this schema bump adds no call. " +
+                        "It is therefore not a countable row: no id to spend, no total to draw " +
+                        "pips against, no reset rule. A client that models it as a tracker row " +
+                        "will build a control with nothing on the server to point it at.",
+                )
             },
         )
         put(
@@ -3030,6 +3129,12 @@ object ContractExport {
     private fun TrackerBoard.toJson(): JsonObject = buildJsonObject {
         put("hp", hp?.toJson() ?: JsonNull)
         put("tempHp", tempHp?.toJson() ?: JsonNull)
+        // FR-50: a plain number and NOT a row — which is the half of decision 22 a consumer can
+        // see from here. It sits beside `hp` rather than in one of the row arrays because it has
+        // no id to spend, no total to draw pips against and no method to write it with; a client
+        // that modelled it as a countable row would build a control for it and find nothing on
+        // the server to point that control at. `null` when the sheet expresses none, never `0`.
+        put("armorClass", armorClass?.let { JsonPrimitive(it) } ?: JsonNull)
         put("slots", JsonArray(slots.map { it.toJson() }))
         put("resources", JsonArray(resources.map { it.toJson() }))
         // M6: FR-30's own list — omitted here would mean the export's own `TrackerBoard.toJson`
@@ -3079,6 +3184,11 @@ object ContractExport {
         // M6: FR-30's die, `[TrackerKind.HIT_DICE]` only — `null` everywhere else, same as
         // `spellSlotLevel` above.
         put("dieSize", dieSize?.let { JsonPrimitive(it) } ?: JsonNull)
+        // FR-51: the modifier that goes with that die, on the same terms. `null` and `0` are
+        // DIFFERENT answers here and the export keeps them apart deliberately — `0` is a known
+        // modifier that a client must print, `null` is a sheet that never said and must not be
+        // printed as `+ 0`. See `domain/rules.json#discovery.hitDice.modifier`.
+        put("dieModifier", dieModifier?.let { JsonPrimitive(it) } ?: JsonNull)
         put("sortOrder", sortOrder)
         put("pinned", pinned)
     }

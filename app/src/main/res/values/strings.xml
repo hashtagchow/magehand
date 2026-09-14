@@ -217,12 +217,34 @@
          (TrackedResource.dieSize) and this is the one place the word "Hit Dice" is written. -->
     <string name="tracker_section_hit_dice">Hit dice</string>
     <string name="tracker_hit_dice_row">Hit Dice %1$s</string>
+    <!-- FR-51 (docs/design/18-table-pack.md decisions 24-26). The row with its modifier:
+         "Hit Dice d8 + 3". %2$s arrives already signed and spaced ("+ 3", "+ 0", "− 1" with a
+         real U+2212 minus) because the sign is a rendering decision PipRow makes from the
+         MINUS/PLUS glyph constants the steppers already use — the engine carries the number.
+         A sheet that expresses no modifier keeps tracker_hit_dice_row above; the app never
+         invents a "+ 0", though a modifier that IS zero prints, because it applies to every
+         roll (decision 25). -->
+    <string name="tracker_hit_dice_row_mod">Hit Dice %1$s %2$s</string>
+    <!-- Spoken in words, never as a bare glyph: TalkBack reads "−" as nothing useful, and
+         "Hit Dice d8 1" is a different and wrong sentence. Two resources rather than the one
+         the ruling names, because "plus"/"minus" is a word a translator must be able to move
+         within the sentence, not a fragment to concatenate; %2$d is therefore the ABSOLUTE
+         value and the sign lives in the copy. -->
+    <string name="tracker_hit_dice_row_mod_spoken">Hit Dice %1$s plus %2$d</string>
+    <string name="tracker_hit_dice_row_mod_spoken_negative">Hit Dice %1$s minus %2$d</string>
     <string name="tracker_section_conditions">Conditions</string>
     <string name="tracker_conditions_inactive">%1$d inactive</string>
     <string name="tracker_conditions_show_inactive">Show %1$d inactive conditions</string>
     <string name="tracker_conditions_hide_inactive">Hide inactive conditions</string>
     <string name="tracker_hit_points">Hit points</string>
     <string name="tracker_temp_hp">+%1$d temp HP</string>
+    <!-- FR-50 (docs/design/18-table-pack.md decisions 21-23). Information on the HP block, not
+         a control: a shield glyph and the number at the trailing edge of the current/max line.
+         Abbreviated in print because the block has no room for two words and "AC" is what every
+         sheet at the table prints; spelled out in the spoken form because "AC" read aloud is two
+         letters, not a fact. Absent AC draws neither. -->
+    <string name="tracker_armor_class">AC %1$d</string>
+    <string name="tracker_armor_class_spoken">Armor class %1$d</string>
     <string name="tracker_damage">Take damage</string>
     <string name="tracker_heal">Heal</string>
     <string name="tracker_use_one">Use one %1$s</string>

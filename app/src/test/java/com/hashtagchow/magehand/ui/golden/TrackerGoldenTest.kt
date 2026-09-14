@@ -33,7 +33,8 @@ import org.robolectric.annotation.GraphicsMode
  *
  * ### Fixture, not invention
  *
- * [Sabriel] transcribes the live capture — HP 17/17, slots 3/4 and 1/2, hit dice 3/3. The board is
+ * [Sabriel] transcribes the live capture — HP 17/17, AC 14, slots 3/4 and 1/2, hit dice 3/3 at
+ * "+ 1". The board is
  * live and writable, which is the state a player spends a session in; the read-only posture is
  * asserted behaviourally in `TrackerTabRenderTest` rather than photographed, because what makes it
  * correct is that the controls are *inert*, and a picture cannot show inertness.
@@ -74,6 +75,12 @@ class TrackerGoldenTest {
         scale: UiScale = UiScale.DEFAULT,
         darkTheme: Boolean = false,
     ) = compose.captureGolden(name, scale = scale, darkTheme = darkTheme) {
-        TrackerTab(state = Sabriel.tracker())
+        // FR-50: the capture's own AC (14), so the corpus photographs the badge rather than the
+        // absence of it. `Sabriel.tracker()` defaults to absent — which is what every other
+        // consumer of the fixture keeps, and what `TrackerTabRenderTest` asserts draws nothing —
+        // so the number is supplied here, at the one place whose job is to show what the screen
+        // looks like. Absent AC has no golden of its own on purpose: it is the state the whole
+        // corpus was recorded in before this wave, so the previous six images are its record.
+        TrackerTab(state = Sabriel.tracker(armorClass = 14))
     }
 }

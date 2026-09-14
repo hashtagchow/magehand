@@ -1137,21 +1137,18 @@ class CharacterHomeViewModel @Inject constructor(
      */
     private inline fun withRow(propertyId: String, act: (OpenCharacter, TrackedResource) -> Unit) {
         val character = open.value ?: return
-        val board = character.board.value
-        // FR-30: hit dice join the lookup, because decision 18 writes them through these same
-        // `spend`/`restore` intents — the row a tap names has to be findable or the tap is
-        // dropped. See `TrackerBoard.hitDice` for why they are their own list to begin with.
+        // BUG-20. This used to be a hand-written `slots + resources + limitedUses + hitDice +
+        // allItems + hp` sum, copied verbatim into `DmViewViewModel.withRow` — and twice (FR-30's
+        // hit dice, FR-44's limited uses) a new board list shipped missing from it, which renders
+        // a row that draws its pips, speaks its name and does nothing at all when tapped. The sum
+        // now lives on the board beside the fields it sums, with a test that walks every
+        // `TrackerKind`; see `TrackerBoard.allCountableRows`.
         //
-        // FR-44: and so do the limited uses, for exactly that reason and with exactly that
-        // failure mode. This is the price of every new board list — the section renders, the pips
-        // draw, the row speaks its name, and the tap does nothing at all, because the id resolves
-        // against a sum that does not include it. `TrackerTabIntentTest` pins the tap; nothing
-        // else in this file could have.
-        val row = (
-            board.slots + board.resources + board.limitedUses + board.hitDice + board.allItems +
-                listOfNotNull(board.hp)
-            )
-            .firstOrNull { it.propertyId == propertyId } ?: return
+        // The contract is otherwise unchanged: a stale row (one the server has since removed, or
+        // a burst that outran a re-sync) resolves to nothing and is dropped rather than written
+        // blind, and the board is already overlay-adjusted so `OpenCharacter`'s clamps see the
+        // value the user is looking at.
+        val row = character.board.value.countableRow(propertyId) ?: return
         act(character, row)
     }
 

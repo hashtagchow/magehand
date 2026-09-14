@@ -204,6 +204,12 @@ data class DmCardUiState(
      * @param loadingLabel likewise for [DmCardAvailability.LOADING]. A separate word from
      *   [unavailableLabel] because the two mean opposite things about whether waiting helps.
      * @param hpLabel "24 of 38 hit points", or `null` when the sheet expresses no HP.
+     * @param armorClassLabel "Armor class 14", or `null` when the sheet expresses none (FR-50
+     *   R5). A fragment rather than a child node's own description, because the read half of
+     *   this card is `clearAndSetSemantics` and drops every description inside it — the same
+     *   reason every other fact on the card arrives here as a string. It follows [hpLabel]
+     *   because that is the order the badge is drawn in and the order a DM's eye takes: how hurt,
+     *   then how hard to hit.
      * @param slotsLabel "3 spell slots spent", or `null` when nothing is spent — an unspent
      *   caster and a character with no slots at all are the same silence, which is correct: both
      *   are "nothing to report".
@@ -218,6 +224,7 @@ data class DmCardUiState(
         unavailableLabel: String,
         loadingLabel: String,
         hpLabel: String?,
+        armorClassLabel: String?,
         slotsLabel: String?,
         conditionsLabel: String?,
         concentrationLabel: String?,
@@ -229,6 +236,7 @@ data class DmCardUiState(
         DmCardAvailability.AVAILABLE -> listOfNotNull(
             name,
             hpLabel,
+            armorClassLabel,
             slotsLabel,
             conditionsLabel,
             concentrationLabel,

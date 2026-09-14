@@ -68,6 +68,12 @@ object ContractFixtures {
     val emptyResourceId: String = fakeId("resource-empty")
     val hitPointsId: String = fakeId("hit-points")
     val tempHitPointsId: String = fakeId("temp-hit-points")
+    // FR-50 R1: armour class, discovered by `variableName == "armor"` exactly as HP is. Folded
+    // into `trackerSheetBody` rather than given its own sheet — unlike hit dice, this is not a
+    // new discriminator a consumer could miss wholesale, it is one more `variableName` beside the
+    // three the tracker vector already carries, and the vector's value is that the whole board
+    // comes out of one input.
+    val armorClassId: String = fakeId("armor-class")
     // M6: FR-30's own row, exercised as its own vector rather than folded into
     // `trackerSheetBody` — see `hitDiceSheetBody`.
     val hitDiceD8Id: String = fakeId("hit-dice-d8")
@@ -212,6 +218,14 @@ object ContractFixtures {
                 id = tempHitPointsId, name = "Temp HP", attributeType = "healthBar",
                 variableName = "tempHitPoints", total = 8, damage = 0, order = 2,
             ),
+            // FR-50 R1: armour class. `attributeType: "stat"` on purpose — it is what the live
+            // sheet publishes, no other rule in the engine reads a `stat` attribute, and a
+            // consumer that keyed on the sub-type rather than on `variableName` would pass every
+            // other assertion in this vector and find no AC on any real character.
+            attribute(
+                id = armorClassId, name = "Armor Class", attributeType = "stat",
+                variableName = TrackerEngine.VAR_ARMOR, total = 14, damage = 0, order = 3,
+            ),
             // Rule 5: toggles. `enabled`/`disabled` is what makes one flippable — a toggle
             // carrying neither is computed and the server refuses to flip it.
             toggle(id = rageToggleId, name = "Rage", enabled = true, order = 30),
@@ -235,7 +249,7 @@ object ContractFixtures {
         properties = listOf(
             attribute(
                 id = hitDiceD8Id, name = "Hit Dice", attributeType = TrackerEngine.ATTR_HIT_DICE,
-                total = 4, damage = 1, order = 10, hitDiceSize = "d8",
+                total = 4, damage = 1, order = 10, hitDiceSize = "d8", constitutionMod = 3,
             ),
         ),
     )
@@ -612,6 +626,12 @@ object ContractFixtures {
          * [TrackerEngine.ATTR_HIT_DICE] rows only.
          */
         hitDiceSize: String? = null,
+        /**
+         * FR-51 R1: `constitutionMod` — the modifier the server has already added up for this
+         * die. [TrackerEngine.ATTR_HIT_DICE] rows only, and present on every one the live sheets
+         * publish.
+         */
+        constitutionMod: Int? = null,
     ): JsonObject = buildJsonObject {
         put("_id", id)
         put("type", "attribute")
@@ -627,6 +647,7 @@ object ContractFixtures {
         if (removed) put("removed", true)
         if (inactive) put("inactive", true)
         if (hitDiceSize != null) put("hitDiceSize", hitDiceSize)
+        if (constitutionMod != null) put("constitutionMod", constitutionMod)
     }
 
     /**

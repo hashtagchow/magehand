@@ -69,6 +69,19 @@ object LocalTrackerBoard {
 
         return TrackerBoard(
             hp = hitPointsRow(character),
+            // FR-50 R4: the form's own AC onto the same board field a DiceCloud sheet's `armor`
+            // attribute lands on, so the HP block renders one number from one place whichever
+            // kind of character is open — 09 decision 5's "same screen" claim held at one more
+            // field. Non-null by construction (the column is `INTEGER NOT NULL` and the form
+            // validates a range), which is the local counterpart of a sheet that carries the
+            // attribute; the nullability lives on the board because a *sheet* may not.
+            //
+            // The reference strip above the tabs keeps its own "AC 16" cell and is untouched
+            // (09 decision 6 — the strip is reference for both tabs, not a tracker row). The two
+            // now print the same number twice on the tracker tab, which is the accepted cost of
+            // the block being the surface: a player who has scrolled past the strip should not
+            // have to scroll back for the one defensive number.
+            armorClass = character.armorClass,
             rolls = abilityChecks(character),
             slots = resources.filter { it.kind == TrackerKind.SPELL_SLOT },
             resources = resources.filter { it.kind == TrackerKind.RESOURCE },

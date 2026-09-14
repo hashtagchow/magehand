@@ -30,6 +30,7 @@ import androidx.compose.ui.semantics.semantics
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.ui.components.PORTRAIT_SIZE_CARD
 import com.hashtagchow.magehand.ui.components.PortraitAvatar
+import com.hashtagchow.magehand.ui.screens.characterhome.tracker.ArmorClassBadge
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.MINUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.PLUS
 import com.hashtagchow.magehand.ui.screens.characterhome.tracker.PipRowState
@@ -188,10 +189,32 @@ private fun CardBody(card: DmCardUiState) {
 
     card.hp?.let { hp ->
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                text = stringResource(R.string.dm_view_card_hp, hp.current, hp.max),
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            // FR-50 R5: the same shield and number the tracker's HP block draws, beside the bar
+            // — so a DM reads AC without opening the sheet, which is the fact they ask for first
+            // and the one thing decision 12's five never carried. The same composable, not a
+            // second drawing of the same idea: see `ArmorClassBadge`.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = stringResource(R.string.dm_view_card_hp, hp.current, hp.max),
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                // The `spoken` argument is ignored on this screen — every descendant of the read
+                // half is silenced by `spokenAs` — so the sentence is carried by
+                // `DmCardUiState.spokenLabel`'s own armour-class fragment instead. Passed anyway
+                // rather than blanked: the badge's contract is that it always says what it draws,
+                // and a call site that hands it an empty string is one refactor away from being
+                // the call site that drops it.
+                hp.armorClass?.let { ac ->
+                    ArmorClassBadge(
+                        armorClass = ac,
+                        spoken = stringResource(R.string.tracker_armor_class_spoken, ac),
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+            }
             // `HpState.fraction` is already clamped, so a server value briefly out of range
             // cannot draw a bar past its track — the tracker's own guarantee, reused rather
             // than re-derived.
@@ -390,6 +413,9 @@ private fun DmCardUiState.spoken(): String = spokenLabel(
     unavailableLabel = stringResource(R.string.dm_view_card_unavailable),
     loadingLabel = stringResource(R.string.dm_view_card_loading),
     hpLabel = hp?.let { stringResource(R.string.dm_view_card_hp, it.current, it.max) },
+    // FR-50 R5's "same spoken form": the tracker's own `tracker_armor_class_spoken`, so a DM and
+    // a player hear one sentence for one number. Dropped when absent, like every other fragment.
+    armorClassLabel = hp?.armorClass?.let { stringResource(R.string.tracker_armor_class_spoken, it) },
     slotsLabel = spentSlots
         .takeIf { it > 0 }
         ?.let { pluralStringResource(R.plurals.dm_view_card_slots_spent, it, it) },

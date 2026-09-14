@@ -60,12 +60,18 @@ class DmCardRenderTest {
          * tests read exactly as they did — the availability dimension is Q15's and nothing else's.
          */
         availability: DmCardAvailability = DmCardAvailability.AVAILABLE,
+        /**
+         * FR-50 R5. Absent by default for [Sabriel.tracker]'s reason — every test written before
+         * this wave asserts the card it was written against, and the `DmCard.png` golden shows
+         * the badge because its own fixture supplies one.
+         */
+        armorClass: Int? = null,
     ) = DmCardUiState(
         creatureId = Sabriel.CREATURE_ID,
         name = "Sabriel",
         monogram = "S",
         availability = availability,
-        hp = HpState(propertyId = "hp", current = 11, max = 17, tempHp = 0),
+        hp = HpState(propertyId = "hp", current = 11, max = 17, tempHp = 0, armorClass = armorClass),
         slots = listOf(Sabriel.firstLevel),
         showsWriteControls = showsWriteControls,
         writeControlsEnabled = writeControlsEnabled,
@@ -184,6 +190,49 @@ class DmCardRenderTest {
         listOf("Take damage", "Heal", "Spend one 1st Level", "Restore one 1st Level").forEach {
             compose.onNodeWithContentDescription(it).assertHasClickAction()
         }
+    }
+
+    /**
+     * **FR-50 R5**: the DM card draws the same badge the tracker's HP block does, beside its bar,
+     * and folds the same sentence into the card's one spoken summary.
+     *
+     * ### Two claims, and the second is the one a state test cannot make
+     *
+     * That the number is *drawn* is the badge; that it is *heard* is the merge. The read half of
+     * this card is `clearAndSetSemantics`, which silences every descendant — so the badge's own
+     * `contentDescription` is dropped on the floor here, and the fragment has to come through
+     * `DmCardUiState.spokenLabel` instead. That asymmetry with the tracker (where the badge speaks
+     * for itself into the HP pad's merge) is invisible to both state tests and is exactly what
+     * would break silently: the card would draw an AC that TalkBack never mentions.
+     *
+     * The badge is found through the unmerged tree because its tag lives inside the card's merge,
+     * for the reason the read-only test above gives about `dm:hp:<id>`.
+     */
+    @Test
+    fun `a card with an armor class draws the badge and speaks it in the summary`() {
+        compose.setMageHandContent { dmCard(card(showsWriteControls = false, armorClass = 16)) }
+
+        // `useUnmergedTree` for the text as well as the tag: the card's read half is
+        // `clearAndSetSemantics`, so in the MERGED tree this card exposes one sentence and no
+        // child text at all. That is the whole reason the spoken fragment has to travel through
+        // `spokenLabel` — asserted on the next line.
+        compose.onNodeWithTag("tracker:hp:ac", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("AC 16", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag("dm:card:${Sabriel.CREATURE_ID}")
+            .assertContentDescriptionContains("Armor class 16", substring = true)
+    }
+
+    /** A sheet with no AC draws no badge and spends no clause on saying so. */
+    @Test
+    fun `a card with no armor class draws no badge`() {
+        compose.setMageHandContent { dmCard(card(showsWriteControls = false)) }
+
+        compose.onNodeWithTag("tracker:hp:ac", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("AC", substring = true, useUnmergedTree = true).assertDoesNotExist()
+        // And the sentence goes straight from the hit points to the slots — an absent fact is a
+        // dropped fragment, never "no armour class".
+        compose.onNodeWithTag("dm:card:${Sabriel.CREATURE_ID}")
+            .assertContentDescriptionContains("11 of 17 hit points, 1 spell slot spent", substring = true)
     }
 
     /**

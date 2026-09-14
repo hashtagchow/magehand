@@ -548,21 +548,12 @@ class DmViewViewModel @Inject constructor(
         act: (OpenCharacter, TrackedResource) -> Unit,
     ) {
         val character = writable(creatureId) ?: return
-        val board = character.board.value
-        // FR-30: hit dice join the lookup for `CharacterHomeViewModel.withRow`'s reason — they are
-        // written through these same `spend`/`restore` intents (18 decision 18). No DM card draws
-        // one today, and the lookup is one list rather than a rule to remember if one ever does.
-        //
-        // FR-44's limited uses join it on that comment's own terms. R4 leaves the DM cards
-        // untouched, so nothing here renders one either — but the comment above promised a list
-        // rather than a rule, and a list that is kept only where a control happens to exist is
-        // exactly the rule it was promising not to be. The sibling view model shipped this gap for
-        // one commit and its symptom was a row that draws and does nothing.
-        val row = (
-            board.slots + board.resources + board.limitedUses + board.hitDice + board.allItems +
-                listOfNotNull(board.hp)
-            )
-            .firstOrNull { it.propertyId == propertyId } ?: return
+        // BUG-20: the same lookup as `CharacterHomeViewModel.withRow`, and now literally the same
+        // code. The two used to be independent copies of one sum, which is how a board list could
+        // be added to one and not the other — this file shipped exactly that gap for a commit,
+        // and its symptom was a row that draws and does nothing. See
+        // `TrackerBoard.allCountableRows`.
+        val row = character.board.value.countableRow(propertyId) ?: return
         act(character, row)
     }
 

@@ -214,6 +214,61 @@ class LocalTrackerBoardTest {
     }
 
     // -----------------------------------------------------------------------
+    // FR-50 R4 — armour class, onto the same board field the sheet path uses
+    // -----------------------------------------------------------------------
+
+    /**
+     * The form's `armorClass` reaches the board, so the HP block draws it for a local character
+     * exactly as it does for a signed-in one (18 decision 23).
+     *
+     * The point of the assertion is the **field**, not the number: the two sources — a DiceCloud
+     * `armor` attribute's `total` and a column the player typed — converge here, which is what
+     * makes 09 decision 5's *"the screen is reused, not forked"* true of one more thing. If this
+     * were a second field, or a second rendering path, the two kinds of character would be one
+     * edit away from disagreeing about where AC goes.
+     */
+    @Test
+    fun `the character's armor class reaches the board`() {
+        val board = LocalTrackerBoard.build(character(), emptyList())
+
+        assertEquals(15, board.armorClass)
+    }
+
+    /**
+     * A rebuild does not lose it, and an HP edit does not disturb it.
+     *
+     * Cheap to assert and worth asserting: `build` reconstructs the whole board on every change,
+     * so "carried through" is a claim about a constructor call that a future field added above it
+     * could silently drop — which is the `TrackerBoard.defenses` accident `OptimisticOverlay`'s
+     * KDoc records, in the other builder.
+     */
+    @Test
+    fun `armor class survives a rebuild that changes hit points`() {
+        val hurt = LocalTrackerBoard.build(character(maxHp = 20, currentHp = 3), emptyList())
+
+        assertEquals(15, hurt.armorClass)
+        assertEquals(3, hurt.hp!!.value)
+    }
+
+    /**
+     * It is **not** a row: a local board's countable rows are HP and whatever the player typed,
+     * and AC is neither.
+     *
+     * 18 decision 22 from the local side, and the same guard `ArmorClassDiscoveryTest` puts on the
+     * sheet side. A local AC folded in as a `LocalRowKind`-less resource would be spendable, and
+     * `LocalCharacterHomeViewModel.withRow` would happily resolve a tap on it.
+     */
+    @Test
+    fun `armor class is not one of the local board's countable rows`() {
+        val board = LocalTrackerBoard.build(character(), listOf(row("r-1", LocalRowKind.RESOURCE)))
+
+        assertEquals(
+            listOf("r-1", LocalTrackerBoard.HP_ROW_ID),
+            board.allCountableRows.map { it.propertyId },
+        )
+    }
+
+    // -----------------------------------------------------------------------
     // FR-7 — the six ability checks
     // -----------------------------------------------------------------------
 

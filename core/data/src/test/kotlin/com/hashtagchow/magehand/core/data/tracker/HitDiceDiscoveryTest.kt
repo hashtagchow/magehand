@@ -230,6 +230,202 @@ class HitDiceDiscoveryTest {
         assertEquals("Hit Dice", row.name)
     }
 
+    // --- FR-51: the modifier beside the die (18 decisions 24-25) -------------
+
+    /**
+     * The row carries its own `constitutionMod`, and that is the number.
+     *
+     * Server-computed and re-published whenever CON changes, so reading it here rather than
+     * deriving it is 10 decision 3's rule in the discovery layer: never compute over a number the
+     * server already stated. The fixture matches the capture's *d6 Hit Dice*, which carries
+     * `constitutionMod: 1` at CON 13.
+     */
+    @Test
+    fun `the modifier is read from the hit-dice row itself`() {
+        val board = TrackerEngine.build(
+            sheetOf(hitPoints(), hitDice("hd8", extra = ""","constitutionMod":3""")),
+        )
+
+        assertEquals(3, board.hitDice.single().dieModifier)
+    }
+
+    /**
+     * R2's fallback: a row without the field takes the `constitution` ability row's `modifier`.
+     *
+     * The same number, read where the server computed it — the engine already parses ability
+     * rows for the rolls list, so this is one more reader on a value that is already on the
+     * board, not a second implementation of anything. Matched by `variableName` and not by name,
+     * because *"Constitution"* is copy on the sheet and `constitution` is what the sheet's own
+     * formulas compute against.
+     */
+    @Test
+    fun `a row with no modifier falls back to the constitution ability row`() {
+        val board = TrackerEngine.build(sheetOf(hitPoints(), hitDice("hd8"), constitution(modifier = 2)))
+
+        assertEquals(2, board.hitDice.single().dieModifier)
+    }
+
+    /** The row's own field wins: the fallback is for its **absence**, not a second opinion. */
+    @Test
+    fun `the row's own modifier wins over the ability row`() {
+        val board = TrackerEngine.build(
+            sheetOf(hitPoints(), hitDice("hd8", extra = ""","constitutionMod":3"""), constitution(modifier = 2)),
+        )
+
+        assertEquals(3, board.hitDice.single().dieModifier)
+    }
+
+    /**
+     * **Neither source means `null`, and `null` is an answer.**
+     *
+     * Decision 25: the row keeps today's *"Hit Dice d8"*. The two things this must not do are
+     * invent a `+ 0` — which would be the app telling a player to add zero to a die when it does
+     * not know what to add — and re-derive `floor((score − 10) / 2)` from the ability *score*,
+     * which would drop every effect the server folded into the real modifier. The fixture
+     * therefore carries a `constitution` row with a **score and no `modifier`**, which is the
+     * shape that would tempt the derivation.
+     */
+    @Test
+    fun `a sheet with neither the field nor an ability modifier gets no modifier`() {
+        val board = TrackerEngine.build(
+            sheetOf(
+                hitPoints(),
+                hitDice("hd8"),
+                """{"_id":"con","type":"attribute","attributeType":"ability","name":"Constitution",
+                    "variableName":"constitution","total":13,"value":13}""",
+            ),
+        )
+
+        assertNull(board.hitDice.single().dieModifier)
+    }
+
+    /**
+     * A **zero** modifier is a value, not an absence — and the type is what keeps them apart.
+     *
+     * Decision 25's argument in one assertion: `0` prints as *"+ 0"* because it applies to every
+     * roll and is the answer the player would otherwise leave the table to look up, while `null`
+     * suppresses the clause entirely. An engine that collapsed the two — `?: 0`, or
+     * `takeIf { it != 0 }` — would pass every other test in this group.
+     */
+    @Test
+    fun `a zero modifier is discovered as zero and not as absent`() {
+        val board = TrackerEngine.build(
+            sheetOf(hitPoints(), hitDice("hd8", extra = ""","constitutionMod":0""")),
+        )
+
+        assertEquals(0, board.hitDice.single().dieModifier)
+    }
+
+    /**
+     * **A stated `constitutionMod: 0` beats the ability row** — LOW-3.
+     *
+     * The two rules the wave already pins meet here for the first time: the row's own field wins
+     * over the fallback, *and* zero is a value rather than an absence. Kotlin's elvis on an `Int?`
+     * does the right thing (`number()` returns `0`, not `null`, for JSON `0`), so this is the
+     * behaviour today — but the suite had no fixture carrying **both** a zero and an ability row,
+     * so the exact refactor `TrackedResource.dieModifier`'s KDoc warns about,
+     * `?.takeIf { it != 0 } ?: constitutionMod`, would have passed everything and quietly made a
+     * CON-10 character's row read "+ 2" off a stale ability parse.
+     */
+    @Test
+    fun `a stated zero modifier beats the constitution fallback`() {
+        val board = TrackerEngine.build(
+            sheetOf(
+                hitPoints(),
+                hitDice("hd8", extra = ""","constitutionMod":0"""),
+                constitution(modifier = 2),
+            ),
+        )
+
+        assertEquals(0, board.hitDice.single().dieModifier)
+    }
+
+    /** Negative modifiers exist — CON 8 is `−1`, and it is the number the player adds. */
+    @Test
+    fun `a negative modifier survives`() {
+        val board = TrackerEngine.build(
+            sheetOf(hitPoints(), hitDice("hd8", extra = ""","constitutionMod":-1""")),
+        )
+
+        assertEquals(-1, board.hitDice.single().dieModifier)
+    }
+
+    /**
+     * The same three shapes [dieSize] tolerates, and for the same reason — DiceCloud is not
+     * uniform about which one a field arrives in.
+     *
+     * No second reader was written for this: `JsonObject.number` already resolves a plain number,
+     * a stringified one and the `_calculation` wrapper, which is why the ruling's *"factor the
+     * shape reader into one helper if that is cheaper"* resolved to "neither". This test is what
+     * makes that claim checkable rather than asserted in a comment.
+     */
+    @Test
+    fun `the modifier is read from a number, a string or a calculation wrapper`() {
+        fun modOf(field: String): Int? = TrackerEngine
+            .build(sheetOf(hitPoints(), hitDice("hd8", extra = ",$field")))
+            .hitDice.single().dieModifier
+
+        assertEquals(3, modOf(""""constitutionMod":3"""))
+        assertEquals("a stringified number", 3, modOf(""""constitutionMod":"3""""))
+        assertEquals(
+            "the wrapper the server publishes a computed field in",
+            -2,
+            modOf(""""constitutionMod":{"calculation":"constitution.modifier","value":-2}"""),
+        )
+    }
+
+    /** The modifier is a hit-dice fact: every other kind carries `null`, whatever else is on the sheet. */
+    @Test
+    fun `no other kind of row carries a die modifier`() {
+        val board = TrackerEngine.build(
+            sheetOf(
+                hitPoints(),
+                hitDice("hd8", extra = ""","constitutionMod":3"""),
+                resource("res1", "Rage"),
+                spellSlot("slot1"),
+                constitution(modifier = 2),
+            ),
+        )
+
+        assertNull(board.hp!!.dieModifier)
+        assertNull(board.resources.single().dieModifier)
+        assertNull(board.slots.single().dieModifier)
+        assertEquals(3, board.hitDice.single().dieModifier)
+    }
+
+    /**
+     * The fallback is resolved **once** and reaches every row, which is what a multiclass sheet
+     * needs: the modifier is a property of the character, not of the die.
+     */
+    @Test
+    fun `every die size on a multiclass sheet gets the fallback`() {
+        val board = TrackerEngine.build(
+            sheetOf(
+                hitPoints(),
+                hitDice("hd10", size = "d10", total = 3, damage = 0, order = 11),
+                hitDice("hd6", size = "d6", total = 2, damage = 1, order = 10),
+                constitution(modifier = 2),
+            ),
+        )
+
+        assertEquals(listOf(2, 2), board.hitDice.map { it.dieModifier })
+    }
+
+    /** An `inactive` ability row is not the character's Constitution, by the blanket skip rule. */
+    @Test
+    fun `an inactive constitution row is not used as the fallback`() {
+        val board = TrackerEngine.build(
+            sheetOf(hitPoints(), hitDice("hd8"), constitution(modifier = 2, extra = ""","inactive":true""")),
+        )
+
+        assertNull(board.hitDice.single().dieModifier)
+    }
+
+    private fun constitution(modifier: Int, extra: String = "") =
+        """{"_id":"con","type":"attribute","attributeType":"ability","name":"Constitution",
+            "variableName":"constitution","total":13,"value":13,"modifier":$modifier,
+            "order":5$extra}"""
+
     // --- the override layer, deliberately not applied ------------------------
 
     /**

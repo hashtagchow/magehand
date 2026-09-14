@@ -976,6 +976,113 @@ class TrackerUiStateTest {
         assertEquals(5, target.max)
     }
 
+    // --- FR-51: the hit-die modifier (18 decisions 24-25) --------------------
+
+    /**
+     * The modifier reaches [PipRowState] as a **number**, not as rendered text.
+     *
+     * The mapping's whole job here is to carry a fact across the seam; the sign, the U+2212 and
+     * the word "plus" are `PipRow`'s, because they are copy and this layer has no `R` class.
+     * `TrackerTabRenderTest` pins what the composable does with it.
+     */
+    @Test
+    fun `a hit-dice row carries its modifier onto the pip row`() {
+        val board = sabriel.copy(hitDice = listOf(hitDie("hd8", "d8", 3, 5).copy(dieModifier = 3)))
+
+        assertEquals(3, map(board = board).hitDice.single().dieModifier)
+    }
+
+    /**
+     * `0` and `null` are different states and both survive the mapping intact.
+     *
+     * Decision 25 lives or dies on this distinction: a known zero prints as *"+ 0"* because it
+     * applies to every roll, and an absent modifier keeps today's *"Hit Dice d8"* because the app
+     * must never invent one. A mapping that normalised either into the other — `?: 0`, or
+     * `takeIf { it != 0 }` — would make the composable's branch unreachable and the render test
+     * would be pinning a case that cannot occur.
+     */
+    @Test
+    fun `a zero modifier and an absent one stay distinguishable across the mapping`() {
+        val zero = sabriel.copy(hitDice = listOf(hitDie("hd8", "d8", 3, 5).copy(dieModifier = 0)))
+        val absent = sabriel.copy(hitDice = listOf(hitDie("hd8", "d8", 3, 5)))
+
+        assertEquals(0, map(board = zero).hitDice.single().dieModifier)
+        assertNull(map(board = absent).hitDice.single().dieModifier)
+    }
+
+    /** Negative modifiers survive with their sign — the rendering decision is downstream. */
+    @Test
+    fun `a negative modifier keeps its sign across the mapping`() {
+        val board = sabriel.copy(hitDice = listOf(hitDie("hd8", "d8", 3, 5).copy(dieModifier = -1)))
+
+        assertEquals(-1, map(board = board).hitDice.single().dieModifier)
+    }
+
+    /** No other section carries one; the field is a hit-dice fact. */
+    @Test
+    fun `slots, resources and consumable rows carry no die modifier`() {
+        val state = map(board = multiclass)
+
+        assertTrue(state.slots.all { it.dieModifier == null })
+        assertTrue(state.resources.all { it.dieModifier == null })
+    }
+
+    // --- FR-50: armour class (18 decisions 21-23) ---------------------------
+
+    /**
+     * The board's number reaches the HP block, which is the only surface that renders it.
+     */
+    @Test
+    fun `the board's armor class reaches the hp block`() {
+        assertEquals(14, map(board = sabriel.copy(armorClass = 14)).hp!!.armorClass)
+    }
+
+    /**
+     * **R6's absent-AC case**: a sheet with no `armor` attribute maps to an `HpState` whose
+     * `armorClass` is `null`, and nothing else about the block changes.
+     *
+     * The second half is the half worth writing down. R3's promise is that the block is
+     * *pixel-identical* to a build without this feature when AC is absent, and the state layer's
+     * share of that promise is that the mapping introduces no other difference — no `0`, no
+     * placeholder, no other field nudged. `sabriel` carries no AC, which is why this is asserted
+     * on the shipped fixture rather than on a copy with the field cleared.
+     */
+    @Test
+    fun `a sheet with no armor class leaves the hp block otherwise unchanged`() {
+        val hp = map().hp!!
+
+        assertNull(hp.armorClass)
+        assertEquals(17, hp.current)
+        assertEquals(17, hp.max)
+        assertEquals(0, hp.tempHp)
+        assertEquals(HpState(propertyId = "hp1", current = 17, max = 17, tempHp = 0), hp)
+    }
+
+    /**
+     * AC is **not** a row, so nothing that walks the board's rows can see it.
+     *
+     * 18 decision 22 at the UI seam, and the third place it is pinned (the engine's
+     * `ArmorClassDiscoveryTest` and the model's `TrackerBoardCountableRowsTest` are the others).
+     * The sections a tap can reach are unchanged by an AC being present, which is what "it is not
+     * a row" has to mean on the screen rather than in the type.
+     */
+    @Test
+    fun `an armor class adds no row to any section`() {
+        val without = map(board = sabriel)
+        val with = map(board = sabriel.copy(armorClass = 14))
+
+        assertEquals(without.slots, with.slots)
+        assertEquals(without.resources, with.resources)
+        assertEquals(without.hitDice, with.hitDice)
+        assertEquals(without.consumables, with.consumables)
+    }
+
+    /** A board that is otherwise empty stays empty: a number is not content to render a screen for. */
+    @Test
+    fun `an armor class alone does not make the board non-empty`() {
+        assertTrue(map(board = TrackerBoard(armorClass = 14)).isEmpty)
+    }
+
     /** A character with hit dice and nothing else is not an empty board. */
     @Test
     fun `hit dice alone make the board non-empty`() {

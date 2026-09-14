@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Armor class — a shield (FR-50, docs/design/18-table-pack.md decision 23).
+
+  Vendored glyph: `shield`, filled, from Google's Material icon set (Material Symbols /
+  Material Icons), 24 dp grid, transcribed verbatim into an Android vector drawable.
+  Licensed under the Apache License, Version 2.0
+  (https://www.apache.org/licenses/LICENSE-2.0). Copyright Google LLC.
+
+  Vendored for `ic_rest_short.xml`'s reason, in that file's own words: the icon set this
+  app depends on is `material-icons-core`, which does not carry this glyph, and
+  `material-icons-extended` is ~50 MB for a handful of them (see the note beside
+  `androidx-compose-material-icons-core` in gradle/libs.versions.toml). One drawable costs
+  one file.
+
+  A drawable and not a text glyph, deliberately: the shield characters Unicode offers are
+  emoji, and an emoji renders as a colour bitmap that ignores `LocalContentColor`, changes
+  shape between fonts, and would make a golden a picture of whichever emoji font the JVM
+  happened to load. `fillColor` is opaque black for `ic_rest_short.xml`'s reason —
+  Compose's `Icon` tints a painter with `LocalContentColor`, so the block's own colours
+  apply exactly as they do to every `ImageVector` icon in the app.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M12,2L4,5v6.09c0,5.05 3.41,9.76 8,10.91 4.59,-1.15 8,-5.86 8,-10.91V5L12,2z" />
+</vector>

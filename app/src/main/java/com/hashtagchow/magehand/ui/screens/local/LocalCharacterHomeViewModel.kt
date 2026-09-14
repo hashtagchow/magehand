@@ -901,9 +901,12 @@ class LocalCharacterHomeViewModel @Inject constructor(
      */
     private inline fun withRow(propertyId: String, act: (OpenCharacter, TrackedResource) -> Unit) {
         val character = open.value ?: return
-        val board = character.board.value
-        val row = (board.slots + board.resources + board.allItems + listOfNotNull(board.hp))
-            .firstOrNull { it.propertyId == propertyId } ?: return
+        // BUG-20's third copy, and the narrowest of the three: this one summed four lists rather
+        // than six. That is currently harmless — `LocalTrackerBoard` builds no hit-dice and no
+        // limited-use rows (18 decision 8) — but "harmless because the other file happens not to
+        // produce one" is precisely the reasoning the bug is made of, and a local board is one
+        // feature away from producing one. It reads the board's own sum like the other two.
+        val row = character.board.value.countableRow(propertyId) ?: return
         act(character, row)
     }
 

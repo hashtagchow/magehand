@@ -1,6 +1,8 @@
 package com.hashtagchow.magehand.ui.screens.characterhome.tracker
 
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasScrollAction
@@ -18,6 +20,8 @@ import com.hashtagchow.magehand.core.model.TrackerKind
 import com.hashtagchow.magehand.ui.testing.MageHandTestSurface
 import com.hashtagchow.magehand.ui.testing.Sabriel
 import com.hashtagchow.magehand.ui.testing.setMageHandContent
+import androidx.compose.ui.unit.dp
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -90,8 +94,10 @@ class TrackerTabRenderTest {
         compose.onNodeWithTag("tracker:slot:${Sabriel.firstLevel.propertyId}:pip:3").assertIsDisplayed()
 
         // FR-30 decision 17: a hit-dice row prints the composed label, not its source's raw name.
+        // FR-51 adds the modifier to that same label — the fixture carries the capture's own
+        // `constitutionMod: 1`, so the shipped board reads "Hit Dice d6 + 1".
         compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:hitdie:${Sabriel.hitDice.propertyId}"))
-        compose.onNodeWithText("Hit Dice d6").assertIsDisplayed()
+        compose.onNodeWithText("Hit Dice d6 + 1").assertIsDisplayed()
     }
 
     @Test
@@ -214,6 +220,282 @@ class TrackerTabRenderTest {
         pinned = false,
         kind = TrackerKind.LIMITED_USE,
     )
+
+    // ---- FR-50: armour class on the HP block --------------------------------
+
+    /**
+     * The number is drawn, and it is **spoken in words**.
+     *
+     * `TrackerUiStateTest` pins that the board's AC reaches `HpState`; what only a composition can
+     * show is that the badge then draws it and that the sentence reaches the accessibility tree.
+     * "AC" is right in print — it is what every sheet at the table prints and the block has no
+     * room for two words — and wrong read aloud, where it is two letters rather than a fact. Both
+     * strings are asserted because the split between them is the decision.
+     */
+    @Test
+    fun `the hp block draws the armor class and speaks it in words`() {
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker(armorClass = 14)) }
+
+        compose.onNodeWithTag("tracker:hp:ac", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("AC 14").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Armor class 14", substring = true).assertIsDisplayed()
+    }
+
+    /**
+     * **R3's no-click assertion.** The badge is information, not a control.
+     *
+     * 18 decision 23 — the "0 HP?" chip's reasoning: a number a player reads is not a number a
+     * player taps, and a tap target here would invite a gesture with nothing behind it (AC is a
+     * server computation with no mutator at all). The node carries no click action of its own,
+     * and it is not a focus stop of its own either: it sits inside the HP pad's merged node, so
+     * TalkBack reaches it as part of the block's own sentence rather than as one more swipe.
+     *
+     * `useUnmergedTree` for both reasons at once — the tag and the semantics are on the badge
+     * itself, and in the merged tree they belong to the pad.
+     */
+    @Test
+    fun `the armor class is not a tap target`() {
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker(armorClass = 14)) }
+
+        compose.onNodeWithTag("tracker:hp:ac", useUnmergedTree = true).assertHasNoClickAction()
+    }
+
+    /**
+     * Absent AC draws **nothing** — not a placeholder, not an empty row, not a zero.
+     *
+     * R3: the block is pixel-identical to a build without the feature. A test cannot assert
+     * "pixel-identical" (the goldens do that), but it can assert the composable is not there at
+     * all, which is the structural half and the one that would fail first.
+     */
+    @Test
+    fun `a character with no armor class draws no badge`() {
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker()) }
+
+        compose.onNodeWithTag("tracker:hp:ac", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("AC", substring = true).assertDoesNotExist()
+    }
+
+    // ---- FR-51: the hit-die modifier ----------------------------------------
+
+    /**
+     * *"Hit Dice d6 + 1"* — the composed label, and the spoken form that says "plus".
+     *
+     * The two strings differ on purpose and that is the whole of R3's *"never a bare glyph"*:
+     * TalkBack reads U+2212 as nothing at all, so a screen reader on the visible label would
+     * announce *"Hit Dice d6 1"* — a different number, and a wrong one.
+     */
+    @Test
+    fun `a hit-dice row prints and speaks its modifier`() {
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker()) }
+
+        compose.onNode(hasScrollAction())
+            .performScrollToNode(hasTestTag("tracker:hitdie:${Sabriel.hitDice.propertyId}"))
+
+        compose.onNodeWithText("Hit Dice d6 + 1").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Hit Dice d6 plus 1").assertIsDisplayed()
+    }
+
+    /**
+     * `+ 3` — the ordinary case, and the one the FR was written for.
+     *
+     * Three tests rather than a loop, because a Compose rule may `setContent` exactly once and
+     * the thing under test *is* a composition. The three are the three forms R3 names.
+     */
+    @Test
+    fun `a positive modifier prints with a plus`() = assertModifier(
+        modifier = 3,
+        visible = "Hit Dice d8 + 3",
+        spoken = "Hit Dice d8 plus 3",
+    )
+
+    /**
+     * **`+ 0` prints** (18 decision 25) — the case a reasonable implementation suppresses.
+     *
+     * Suppressing it sends the player to the abilities list for a number the app already holds,
+     * which is the errand this FR exists to remove. The reset badge's "no *Never*" rule describes
+     * an absence and does not reach a value; `PipRowState.dieModifier` carries the argument.
+     */
+    @Test
+    fun `a zero modifier prints rather than being suppressed`() = assertModifier(
+        modifier = 0,
+        visible = "Hit Dice d8 + 0",
+        spoken = "Hit Dice d8 plus 0",
+    )
+
+    /**
+     * `− 1` with a **U+2212**, written here as the escape.
+     *
+     * Deliberately the escape and not the character: a hyphen and a minus sign are one pixel
+     * apart in a diff and worlds apart on a line beside a die size, where a hyphen reads as a
+     * range. This assertion cannot pass against the wrong one; an eye reviewing the source can.
+     */
+    @Test
+    fun `a negative modifier prints a true minus sign`() = assertModifier(
+        modifier = -1,
+        visible = "Hit Dice d8 \u2212 1",
+        spoken = "Hit Dice d8 minus 1",
+    )
+
+    /**
+     * **No modifier means today's label**, unchanged — the app never invents a `+ 0`.
+     *
+     * Decision 25's other half, and the reason `PipRowState.dieModifier` is an `Int?` rather than
+     * an `Int`: this row and the `+ 0` row above are different facts and must read differently.
+     */
+    @Test
+    fun `a hit-dice row with no modifier keeps the label FR-30 shipped`() = assertModifier(
+        modifier = null,
+        visible = "Hit Dice d8",
+        spoken = "Hit Dice d8",
+    )
+
+    /**
+     * **MEDIUM-1**: every spoken string on a `− 1` row says "minus", and none of them says the
+     * glyph.
+     *
+     * The name node was right from the first cut; the *count* node and the *pips* were not — they
+     * were handed the visible label, so the row announced itself correctly and then said
+     * "Hit Dice d8 − 1, 3 of 5, tap to enter a number" one swipe later, which TalkBack reads as
+     * "Hit Dice d8 1". A different and wrong number, in the same composable, from the ruling the
+     * wave itself wrote the fix for.
+     *
+     * All three nodes are asserted in one test because the defect is precisely that they can
+     * disagree: pinning the name alone is what let this ship.
+     */
+    @Test
+    fun `every spoken string on a negative-modifier row says minus, never the glyph`() {
+        val row = Sabriel.hitDice.copy(dieSize = "d8", dieModifier = -1, value = 3, total = 5)
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker().copy(hitDice = listOf(row))) }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:hitdie:${row.propertyId}"))
+
+        // 1 — the name node.
+        compose.onNodeWithContentDescription("Hit Dice d8 minus 1").assertIsDisplayed()
+        // 2 — the count node's direct-entry sentence.
+        compose.onNodeWithContentDescription("Hit Dice d8 minus 1, 3 of 5, tap to enter a number")
+            .assertIsDisplayed()
+        // 3 — the pips, both halves. Three filled of five, so three spends and two restores.
+        compose.onAllNodesWithContentDescription("Spend one Hit Dice d8 minus 1").assertCountEquals(3)
+        compose.onAllNodesWithContentDescription("Restore one Hit Dice d8 minus 1").assertCountEquals(2)
+
+        // And nothing anywhere speaks the glyph. `\u2212` is written as the escape so this cannot
+        // pass against a hyphen that looks the same in a diff.
+        compose.onAllNodesWithContentDescription("Hit Dice d8 \u2212 1", substring = true)
+            .assertCountEquals(0)
+    }
+
+    /**
+     * The FR-20 reset clause is spoken **once**, on the name node, and not repeated by the count.
+     *
+     * This is the constraint that stopped MEDIUM-1's fix from being "hand `spoken` to both nodes":
+     * `spokenLabel` appends "restores on a long rest", and a count node carrying it would have
+     * TalkBack say the rule twice on every slot and resource row on the screen — the duplication
+     * `ResetBadge`'s `clearAndSetSemantics` already exists to prevent one line lower.
+     */
+    @Test
+    fun `the count node speaks the row's name without repeating its reset rule`() {
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker()) }
+
+        compose.onNodeWithContentDescription("1st Level, restores on a long rest").assertIsDisplayed()
+        compose.onNodeWithContentDescription("1st Level, 3 of 4, tap to enter a number").assertIsDisplayed()
+        compose.onAllNodesWithContentDescription("restores on a long rest, 3 of 4", substring = true)
+            .assertCountEquals(0)
+    }
+
+    /**
+     * **LOW-7** — the **bar row's** steppers say "minus" too, and now something checks it.
+     *
+     * Above [PipRowState.MAX_PIPS] (8) a row stops drawing pips and draws a bar with a pair of
+     * steppers instead, and those steppers speak the row's name through the same
+     * `tracker_spend_one` / `tracker_restore_one` strings the pips do. MEDIUM-1's fix reached
+     * them; nothing held them there. Putting `label` back on both `contentDescription`s left the
+     * **entire** `:app` suite green, because no test in it had ever composed a hit-dice row with
+     * `total >= 9` — so the one branch of the four that the fix's own comment singles out as
+     * reachable ("a 9th-level multiclass character") was the one branch with no witness.
+     *
+     * A 9-die row is the whole fixture: same negative modifier as the pip case above, one more
+     * die. The stepper tag is asserted first, because if `MAX_PIPS` ever grows this test would
+     * otherwise quietly go back to testing the pip branch a sibling already covers and stop
+     * covering this one at all.
+     */
+    @Test
+    fun `the bar row's steppers say minus on a negative-modifier row above MAX_PIPS`() {
+        val row = Sabriel.hitDice.copy(dieSize = "d8", dieModifier = -1, value = 6, total = 9)
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker().copy(hitDice = listOf(row))) }
+
+        val tag = "tracker:hitdie:${row.propertyId}"
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag(tag))
+
+        // This is the bar row and not the pip row — 9 > MAX_PIPS. If this fails, the rest of the
+        // test is asserting the wrong branch.
+        compose.onNodeWithTag("$tag:minus").assertIsDisplayed()
+        compose.onNodeWithTag("$tag:plus").assertIsDisplayed()
+
+        compose.onNodeWithContentDescription("Spend one Hit Dice d8 minus 1").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Restore one Hit Dice d8 minus 1").assertIsDisplayed()
+        compose.onAllNodesWithContentDescription("Hit Dice d8 \u2212 1", substring = true)
+            .assertCountEquals(0)
+    }
+
+    /** One composition, one hit-dice row, one pair of assertions. See the four callers. */
+    private fun assertModifier(modifier: Int?, visible: String, spoken: String) {
+        val row = Sabriel.hitDice.copy(dieSize = "d8", dieModifier = modifier)
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker().copy(hitDice = listOf(row))) }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:hitdie:${row.propertyId}"))
+
+        compose.onNodeWithText(visible).assertIsDisplayed()
+        compose.onNodeWithContentDescription(spoken).assertIsDisplayed()
+    }
+
+    // ---- FR-51 R4: the 1.15.0 sweep's long-name LOW -------------------------
+
+    /**
+     * **A long row name never touches its count**, which is the whole of the sweep's LOW.
+     *
+     * The name is `weight(1f)` with an end ellipsis, so before this change it took *all* the
+     * remaining width and the count began at the pixel the ellipsis ended:
+     * "Guiding Bolt (Star Ma…3 / 4", with nothing to tell the eye where the name stopped. The fix
+     * is a fixed arrangement gap, and the fix is only correct because `weight` measures **after**
+     * the arrangement's spacing — a `Spacer` between the two would have been measured after the
+     * weighted child had already claimed everything, and changed nothing at all.
+     *
+     * So the assertion is on the **geometry**, not on the text: the name's right edge and the
+     * count's left edge, with the gap between them. A golden shows this to an eye; this fails a
+     * build. The name is deliberately long enough to be truncated at 411 dp, because a gap that
+     * only exists when the name is short is the bug.
+     */
+    @Test
+    fun `a long row name keeps a gap before its count`() {
+        val long = PipRowState(
+            propertyId = "res-long",
+            label = "Channel Divinity: Preserve Life (Circle of the Stars)",
+            reset = ResetRule.LONG_REST,
+            value = 3,
+            total = 4,
+            pinned = false,
+            kind = TrackerKind.RESOURCE,
+        )
+        compose.setMageHandContent { TrackerTab(state = Sabriel.tracker().copy(resources = listOf(long))) }
+
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("tracker:resource:${long.propertyId}"))
+
+        // The count is intact — the gap must come out of the NAME's budget, never the count's.
+        compose.onNodeWithTag("tracker:resource:${long.propertyId}").assertTextEquals("3 / 4")
+
+        val name = compose.onNodeWithContentDescription(long.spokenLabel).getUnclippedBoundsInRoot()
+        val count = compose.onNodeWithTag("tracker:resource:${long.propertyId}").getUnclippedBoundsInRoot()
+
+        assertTrue(
+            "the name must be truncated for this to be testing anything: name ended at ${name.right}",
+            name.right < count.left,
+        )
+        assertTrue(
+            "a long name ran into its count — the 1.15.0 sweep LOW, back. Gap was " +
+                "${count.left - name.right}, expected at least 8.dp.",
+            count.left - name.right >= 8.dp,
+        )
+    }
 
     // ---- collapse / expand (the FR-16 item class) ---------------------------
 

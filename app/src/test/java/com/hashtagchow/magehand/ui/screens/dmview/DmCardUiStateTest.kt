@@ -278,6 +278,7 @@ class DmCardUiStateTest {
             unavailableLabel = "Not available",
             loadingLabel = "Loading",
             hpLabel = "24 of 38 hit points",
+            armorClassLabel = "Armor class 14",
             slotsLabel = "3 spell slots spent",
             conditionsLabel = "conditions: Prone",
             concentrationLabel = "concentrating on Bless",
@@ -286,7 +287,7 @@ class DmCardUiStateTest {
         )
 
         assertEquals(
-            "Sabriel, 24 of 38 hit points, 3 spell slots spent, conditions: Prone, " +
+            "Sabriel, 24 of 38 hit points, Armor class 14, 3 spell slots spent, conditions: Prone, " +
                 "concentrating on Bless, 12 items, 47 lb",
             spoken,
         )
@@ -302,6 +303,7 @@ class DmCardUiStateTest {
             unavailableLabel = "Not available",
             loadingLabel = "Loading",
             hpLabel = "24 of 38 hit points",
+            armorClassLabel = null,
             slotsLabel = null,
             conditionsLabel = null,
             concentrationLabel = null,
@@ -324,6 +326,7 @@ class DmCardUiStateTest {
             // Deliberately non-null: an unavailable card must not speak them even when a caller
             // hands them over.
             hpLabel = "24 of 38 hit points",
+            armorClassLabel = "Armor class 14",
             slotsLabel = "3 spell slots spent",
             conditionsLabel = "conditions: Prone",
             concentrationLabel = "concentrating on Bless",
@@ -332,6 +335,38 @@ class DmCardUiStateTest {
         )
 
         assertEquals("Sabriel, Not available", spoken)
+    }
+
+    /**
+     * FR-50 R5: the armour class is spoken **after** the hit points and dropped when absent.
+     *
+     * Position is the assertion. A DM's eye takes a card as who → how hurt → how hard to hit, and
+     * the badge is drawn on the HP line, so the sentence has to arrive in the same order or a
+     * screen-reader user is navigating a different card from the one on screen. The absent case
+     * is the second half: a sheet with no `armor` attribute must not spend a clause saying so —
+     * `spokenEquipLabel`'s rule, which every other fragment on this card already follows.
+     */
+    @Test
+    fun `armor class is spoken after hit points and dropped when the sheet has none`() {
+        val state = card()
+
+        fun spoken(armorClassLabel: String?) = state.spokenLabel(
+            unavailableLabel = "Not available",
+            loadingLabel = "Loading",
+            hpLabel = "24 of 38 hit points",
+            armorClassLabel = armorClassLabel,
+            slotsLabel = "3 spell slots spent",
+            conditionsLabel = null,
+            concentrationLabel = null,
+            inventoryLabel = null,
+            readOnlyLabel = null,
+        )
+
+        assertEquals(
+            "Sabriel, 24 of 38 hit points, Armor class 14, 3 spell slots spent",
+            spoken("Armor class 14"),
+        )
+        assertEquals("Sabriel, 24 of 38 hit points, 3 spell slots spent", spoken(null))
     }
 
     @Test

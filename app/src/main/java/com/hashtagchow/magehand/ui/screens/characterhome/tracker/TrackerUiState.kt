@@ -162,6 +162,29 @@ data class HpState(
     val current: Int,
     val max: Int,
     val tempHp: Int,
+    /**
+     * The character's armour class, or `null` when the source expresses none (FR-50 R2/R3,
+     * 18 decision 23).
+     *
+     * ### On the HP block, and why it lives on *this* state rather than beside it
+     *
+     * The block is the surface (decision 23), and both consumers of that surface — `HpBlock` on
+     * the tracker and `DmCard`, which takes a whole `HpState` — then get the number without a
+     * second field to thread and without two decisions about where it goes. `TrackerBoard`
+     * carries the same plain `Int?` for the same reason: see that field for why AC is not a
+     * `TrackedResource`.
+     *
+     * ### The accepted consequence
+     *
+     * A player who has hidden their HP row hides AC with it, because there is no block to draw
+     * it on. Recorded rather than worked around (decision 23): hiding HP is rare, and the
+     * alternative — a floating AC with no home when the block is gone — is a second layout to
+     * design and test for a case nobody is in.
+     *
+     * `null` draws nothing at all; the block is then pixel-identical to a build without the
+     * feature, which is what `TrackerUiStateTest`'s absent-AC case pins.
+     */
+    val armorClass: Int? = null,
 ) {
     val hasTempHp: Boolean get() = tempHp > 0
 
@@ -201,6 +224,21 @@ data class PipRowState(
      * `TrackerEngine.hitDice` for why that tolerance is deliberate.
      */
     val dieSize: String? = null,
+    /**
+     * The modifier printed beside [dieSize] — *"Hit Dice d8 **+ 3**"* (FR-51 R3, 18 decisions
+     * 24–25). `null` on every other row, and on a hit-dice row whose sheet expresses no modifier.
+     *
+     * Carried as an `Int?` rather than as the rendered `"+ 3"` for [dieSize]'s reason: the sign,
+     * the U+2212 minus, the spaces around it and the word *"plus"* in the spoken form are four
+     * rendering decisions, and `PipRow` is the layer with an `R` class to make them in.
+     *
+     * **Zero prints.** `0` and `null` are different facts here and the type keeps them apart: a
+     * known `+ 0` is applied to every roll and is the answer the player would otherwise go and
+     * look up, while `null` means the sheet never said, and the row falls back to today's
+     * *"Hit Dice d8"*. The FR-20 badge's "no *Never*" rule is about an absence and does not
+     * reach this.
+     */
+    val dieModifier: Int? = null,
 ) {
     val spent: Int get() = (total - value).coerceAtLeast(0)
 
@@ -712,7 +750,7 @@ fun toTrackerUiState(
             showingSnapshot = isShowingSnapshot,
         ),
         concentratingOn = board.concentratingOn,
-        hp = board.hp?.toHpState(tempHp = board.tempHp?.value ?: 0),
+        hp = board.hp?.toHpState(tempHp = board.tempHp?.value ?: 0, armorClass = board.armorClass),
         // Discovery, carried through unchanged. The trigger's other half is `deathSaves`.
         deathSavePair = board.deathSaves,
         defenses = toDefenseRows(board.defenses),
@@ -865,11 +903,15 @@ fun formatSyncedAt(epochMillis: Long?, zone: ZoneId = ZoneId.systemDefault()): S
 
 private val HOUR_MINUTE: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
-private fun TrackedResource.toHpState(tempHp: Int) = HpState(
+private fun TrackedResource.toHpState(tempHp: Int, armorClass: Int?) = HpState(
     propertyId = propertyId,
     current = value,
     max = total,
     tempHp = tempHp,
+    // FR-50 R2, carried through unchanged from the board — there is nothing to derive. Both
+    // sources have already resolved it to one nullable number (`TrackerBoard.armorClass`), so
+    // the mapping is where the two paths stop being two.
+    armorClass = armorClass,
 )
 
 private fun TrackedResource.toPipRow() = PipRowState(
@@ -881,6 +923,7 @@ private fun TrackedResource.toPipRow() = PipRowState(
     pinned = pinned,
     kind = kind,
     dieSize = dieSize,
+    dieModifier = dieModifier,
 )
 
 private fun TrackedResource.toConsumable() = ConsumableState(

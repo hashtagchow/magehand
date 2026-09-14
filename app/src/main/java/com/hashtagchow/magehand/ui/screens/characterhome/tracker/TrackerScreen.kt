@@ -12,6 +12,7 @@ import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -61,6 +62,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -81,6 +83,7 @@ import com.hashtagchow.magehand.ui.components.directEntry
 import com.hashtagchow.magehand.ui.theme.DisabledContent
 import com.hashtagchow.magehand.ui.theme.hyphenated
 import com.hashtagchow.magehand.ui.theme.mageHandIconButtonColors
+import kotlin.math.abs
 
 /**
  * Everything the tracker can ask of the ViewModel.
@@ -767,20 +770,59 @@ private fun HpBlock(
                         .testTag("tracker:hp:pad"),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Row(verticalAlignment = Alignment.Bottom) {
-                        Text(
-                            text = "${hp.current}",
-                            style = MaterialTheme.typography.displayMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.testTag("tracker:hp:current"),
-                        )
-                        Text(
-                            text = " / ${hp.max}",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(bottom = 6.dp).testTag("tracker:hp:max"),
-                        )
+                    // A `FlowRow` and not a `Row`, and the 150 % golden is why: at that scale
+                    // `displayMedium` "17 / 17" already fills the column between the two steppers,
+                    // and a plain Row measures its last child to zero and clips it — the badge
+                    // vanished silently, which is the worst possible failure for a number a player
+                    // came to the screen to read. Wrapping puts it on its own line inside the same
+                    // block instead: still the HP block, still not a control, still spoken, and at
+                    // 100 % still at the trailing edge of the current/max line, which is what
+                    // decision 23 asks for. Recorded rather than fought, because the alternative —
+                    // shrinking the HP number to make room — trades the screen's most important
+                    // number for its newest one.
+                    //
+                    // `spacedBy(_, CenterHorizontally)` rather than a start padding on the badge,
+                    // because the gap must exist only BETWEEN items on a line: a padding survives
+                    // the wrap and leaves the badge visibly off-centre on its own row.
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                        itemVerticalAlignment = Alignment.Bottom,
+                    ) {
+                        // The two numbers stay ONE FlowRow child, so a wrap can never separate
+                        // "17" from "/ 17" — only the badge is allowed to move to a second line.
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text(
+                                text = "${hp.current}",
+                                style = MaterialTheme.typography.displayMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.testTag("tracker:hp:current"),
+                            )
+                            Text(
+                                text = " / ${hp.max}",
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 6.dp).testTag("tracker:hp:max"),
+                            )
+                        }
+                        // FR-50 R3: the trailing edge of the current/max line, inside this
+                        // Column and therefore inside the pad's merged accessibility node — see
+                        // [ArmorClassBadge] for why "not its own focus stop" is what puts it
+                        // here rather than beside the block. It adds no gesture of its own; the
+                        // long-press/tap it inherits is the pad's, which already covers every
+                        // pixel of this column including the blank space this fills.
+                        //
+                        // `null` draws NOTHING — not an empty Row, not a Spacer — so a sheet
+                        // with no `armor` attribute composes exactly the tree it composed before
+                        // this feature and the block is pixel-identical (R3). A FlowRow with one
+                        // child lays that child out exactly where the Row did.
+                        hp.armorClass?.let { ac ->
+                            ArmorClassBadge(
+                                armorClass = ac,
+                                spoken = stringResource(R.string.tracker_armor_class_spoken, ac),
+                                modifier = Modifier.padding(bottom = 8.dp),
+                            )
+                        }
                     }
                     Text(
                         text = stringResource(R.string.tracker_hit_points),
@@ -1016,16 +1058,72 @@ private fun PipRow(
     // `DirectEntryTarget.label` already makes for the HP row's name. Every other row prints its
     // source's own name, and a hit-dice row with no readable die size falls back to doing the
     // same.
+    //
+    // FR-51 R3 adds the modifier to the same composition, and it is composed here for the same
+    // reason: the sign, the space either side of it and the word "plus" are copy, and this is the
+    // layer with an `R` class. `dieModifier == null` falls through to the label FR-30 shipped —
+    // the app never invents a `+ 0` (decision 25), while a modifier that IS zero prints.
     val label = row.dieSize
-        ?.let { stringResource(R.string.tracker_hit_dice_row, it) }
+        ?.let { size ->
+            row.dieModifier
+                ?.let { stringResource(R.string.tracker_hit_dice_row_mod, size, renderDieModifier(it)) }
+                ?: stringResource(R.string.tracker_hit_dice_row, size)
+        }
         ?: row.label
     // The spoken form follows the visible one. `spokenLabel` appends FR-20's reset rule, and a
     // hit-dice row provably has none — `TrackerEngine.hitDice` passes `reset = null` because the
     // property carries no such field (decision 17) — so for these rows the two are the same
     // string, and substituting the composed label loses nothing.
-    val spoken = row.dieSize?.let { label } ?: row.spokenLabel
+    //
+    // Except for the modifier, which is spoken in **words**: TalkBack reads U+2212 as nothing at
+    // all, so "Hit Dice d8 − 1" arrives as "Hit Dice d8 1" — a different and wrong number. R3's
+    // "never a bare glyph", which is why this is not simply `label`.
+    //
+    // **Three strings, not two** (MEDIUM-1). The first cut composed a spoken *name* and a visible
+    // one and then handed the visible one to every other spoken string on the row — the count's
+    // direct-entry sentence and the pips' "Spend one …" — so a CON-8 character's row announced
+    // its name correctly as "Hit Dice d8 minus 1" and then, one swipe later, "Hit Dice d8 − 1,
+    // 3 of 5, tap to enter a number", which reaches the user as "Hit Dice d8 1". The same wrong
+    // number the fix above exists to prevent, in the same composable, on the same row. Every
+    // spoken string below now takes [spokenName]; nothing takes [label].
+    //
+    // [spokenName] is the row's name **as it should be heard**, and [spoken] is that plus FR-20's
+    // reset clause. They are separate because only the *name* node speaks the rule: folding the
+    // clause into the count node too would have TalkBack say "restores on a long rest" twice on
+    // every row that has one, which is the duplication `PipRowState.spokenLabel` and `ResetBadge`
+    // are both written to avoid.
+    val spokenName = row.dieSize?.let { size ->
+        row.dieModifier?.let { mod ->
+            stringResource(
+                if (mod < 0) {
+                    R.string.tracker_hit_dice_row_mod_spoken_negative
+                } else {
+                    R.string.tracker_hit_dice_row_mod_spoken
+                },
+                size,
+                abs(mod),
+            )
+        } ?: label
+    } ?: row.label
+    // A hit-dice row provably carries no reset rule — `TrackerEngine.hitDice` passes
+    // `reset = null` because the property has no such field (decision 17) — so for those rows
+    // this is exactly [spokenName], and for every other row it is `spokenLabel`'s
+    // "name, restores on a long rest".
+    val spoken = row.dieSize?.let { spokenName } ?: row.spokenLabel
     Column(modifier = modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        // FR-51 R4 — the 1.15.0 sweep's LOW, fixed in the change that made the label longer.
+        //
+        // The name has always been `weight(1f)` with an end ellipsis, so it took *all* the
+        // remaining width and the count began at the exact pixel the ellipsis ended: "Guiding
+        // Bolt (Star Ma…3 / 4", with no gap and no way to tell where the name stopped. A fixed
+        // arrangement gap is the whole fix, and it is the right one because `weight` measures
+        // after the arrangement's spacing — so the name's own budget shrinks by the gap rather
+        // than the gap being taken out of the count. A `Spacer` between them would have been
+        // measured *after* the weighted child had already claimed everything.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ROW_NAME_COUNT_GAP_DP.dp),
+        ) {
             Text(
                 text = label,
                 style = MaterialTheme.typography.titleMedium,
@@ -1055,9 +1153,12 @@ private fun PipRow(
                 modifier = Modifier
                     .directEntry(
                         enabled = canWrite,
+                        // [spokenName], never `label` — MEDIUM-1. This node is a second place the
+                        // row says its own name out loud, and the visible name carries a U+2212
+                        // that TalkBack drops on the floor.
                         spoken = stringResource(
                             R.string.direct_entry_spoken_of,
-                            label,
+                            spokenName,
                             row.value,
                             row.total,
                         ),
@@ -1090,9 +1191,11 @@ private fun PipRow(
                         // tapped is irrelevant — only whether it was a full one — so the
                         // whole row behaves like one control with two halves.
                         onClick = { if (filled) onSpend(row.propertyId) else onRestore(row.propertyId) },
+                        // [spokenName] for the count node's reason: a pip that says "Spend one
+                        // Hit Dice d8 − 1" is read out as "Spend one Hit Dice d8 1".
                         contentDescription = stringResource(
                             if (filled) R.string.tracker_spend_one else R.string.tracker_restore_one,
-                            label,
+                            spokenName,
                         ),
                         modifier = Modifier.testTag("$testTag:pip:$index"),
                     )
@@ -1102,7 +1205,10 @@ private fun PipRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StepperButton(
                     glyph = MINUS,
-                    contentDescription = stringResource(R.string.tracker_spend_one, label),
+                    // [spokenName], as for the pips: this is the same sentence on the row shape
+                    // that draws a bar instead of pips, and a hit-dice row with more than
+                    // `MAX_PIPS` dice is reachable (a 9th-level multiclass character).
+                    contentDescription = stringResource(R.string.tracker_spend_one, spokenName),
                     enabled = canWrite && row.value > 0,
                     onStep = { onSpend(row.propertyId) },
                     testTag = "$testTag:minus",
@@ -1119,7 +1225,7 @@ private fun PipRow(
                 )
                 StepperButton(
                     glyph = PLUS,
-                    contentDescription = stringResource(R.string.tracker_restore_one, label),
+                    contentDescription = stringResource(R.string.tracker_restore_one, spokenName),
                     enabled = canWrite && row.value < row.total,
                     onStep = { onRestore(row.propertyId) },
                     testTag = "$testTag:plus",
@@ -1665,6 +1771,100 @@ internal fun StepperButton(
         )
     }
 }
+
+/**
+ * FR-50 R3/R5's shield and number — *"AC 14"* with a shield glyph — as **one** composable used by
+ * both surfaces.
+ *
+ * ### Why it is shared rather than drawn twice
+ *
+ * R5 puts the same thing on the DM card, and "the same" has to be structural or it is a
+ * coincidence that lasts until the next edit: the glyph, its size, the gap, the abbreviation and
+ * the spoken words are five agreements, and two copies is five chances for the tracker and the
+ * dashboard to disagree about what a DM and a player are looking at. `DmCard` already imports
+ * `HpState` and [MINUS] from this package, so there is precedent and no new seam.
+ *
+ * ### It is information, not a control (18 decision 23)
+ *
+ * No `clickable`, no `Role.Button`, no minimum touch target — the "0 HP?" chip's reasoning. On
+ * the tracker this sits inside the HP pad's existing merged node and on the DM card inside the
+ * card's, so it is **not its own focus stop** in either place; [spoken] joins the sentence that
+ * node already speaks rather than becoming one more thing to swipe past.
+ *
+ * ### It is inside the HP pad's tap area, and that is ruled rather than overlooked
+ *
+ * 18 decision 23, as amended on 2026-09-14 against the review's MEDIUM-3: *"The badge is not a
+ * control of its own; it lies within the HP pad's existing tap area, which opens the number pad
+ * as tapping beside the number always did."* So `assertHasNoClickAction` on this node is the
+ * whole of the claim being made — it says the badge adds no gesture, not that its pixels are
+ * inert — and the pad's extent is unchanged by this feature. A reader who expects a tap on
+ * "AC 14" to do nothing at all should read that decision before changing this.
+ *
+ * The icon's `contentDescription` is `null` on purpose: [spoken] already says "Armor class",
+ * and a decorative glyph that also announces itself is the duplication `ResetBadge` documents.
+ *
+ * @param spoken passed in rather than resolved here so `DmCard` can fold the same sentence into
+ *   [com.hashtagchow.magehand.ui.screens.dmview.DmCardUiState.spokenLabel], whose whole read half
+ *   is `clearAndSetSemantics` and would otherwise drop a child's description on the floor.
+ */
+@Composable
+internal fun ArmorClassBadge(
+    armorClass: Int,
+    spoken: String,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(AC_GLYPH_GAP_DP.dp),
+        modifier = modifier
+            .semantics { contentDescription = spoken }
+            .testTag("tracker:hp:ac"),
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_shield),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(AC_GLYPH_DP.dp),
+        )
+        Text(
+            text = stringResource(R.string.tracker_armor_class, armorClass),
+            // The temp-HP line's typography (decision 23). Both are one-line annotations on the
+            // HP block and must read as a pair rather than as two ranks of importance.
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+    }
+}
+
+/**
+ * FR-51 R3's rendered modifier — `"+ 3"`, `"+ 0"`, `"− 1"`.
+ *
+ * A space either side of the sign, and [MINUS] rather than a hyphen for that constant's own
+ * reason: the glyph has to match the `+` optically, and at a table a hyphen beside a die size
+ * reads as a range. The **absolute** value is printed because the sign is supplied here, which
+ * also makes it the same number the spoken form's `%2$d` carries beside the word "plus" or
+ * "minus".
+ *
+ * Zero renders `"+ 0"`, deliberately — decision 25: the modifier applies to every roll, so zero
+ * is the answer to the question the player would otherwise leave the table to ask. Only a `null`
+ * modifier suppresses the clause, and that decision is the caller's.
+ */
+internal fun renderDieModifier(modifier: Int): String =
+    "${if (modifier < 0) MINUS else PLUS} ${abs(modifier)}"
+
+/** The shield's box and the gap before the number, sized against `labelLarge`'s cap height. */
+private const val AC_GLYPH_DP = 14
+private const val AC_GLYPH_GAP_DP = 3
+
+/**
+ * FR-51 R4: the fixed gap between a `PipRow`'s name and its count.
+ *
+ * 8 dp is the arrangement spacing the rest of this screen already uses between two things on one
+ * line (the DM card's name row, the customize sheet's rows). The figure matters less than that it
+ * is *fixed*: the defect was a gap of zero at exactly the widths where the name needs an ellipsis.
+ */
+private const val ROW_NAME_COUNT_GAP_DP = 8
 
 /** U+2212 MINUS SIGN — not a hyphen; it matches the `+` optically at this size. */
 internal const val MINUS = "\u2212"

@@ -99,7 +99,9 @@ class ScreensGoldenTest {
                     name = "Sabriel",
                     monogram = "S",
                     availability = DmCardAvailability.AVAILABLE,
-                    hp = HpState(propertyId = "hp", current = 11, max = 17, tempHp = 0),
+                    // FR-50 R5: the same shield the tracker's HP block draws, beside the card's
+                    // bar. The capture's own 14, so the two pictures agree about one character.
+                    hp = HpState(propertyId = "hp", current = 11, max = 17, tempHp = 0, armorClass = 14),
                     slots = listOf(Sabriel.firstLevel, Sabriel.secondLevel),
                     concentratingOn = "Bless",
                     // The editing-on state, which is the one with something to photograph: a

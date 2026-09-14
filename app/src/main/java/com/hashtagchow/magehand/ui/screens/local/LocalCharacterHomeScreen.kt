@@ -552,8 +552,13 @@ private fun LocalCharacterHomeTab.isShowing(
  * responded to a tap would compete with the Edit action for that job while doing it worse.
  * Nothing here has a click handler, so there is no affordance to find.
  */
+// `internal` for `DmCardGrid`'s reason: FR-50 R4 puts AC on the tracker's HP block *and* leaves
+// this strip's own AC cell alone, so the one thing worth a picture is the two of them on screen
+// together — and `LocalCharacterHomeScreen` defaults its view model to `hiltViewModel()` wired to
+// a database, which no golden can enter. `LocalTrackerGoldenTest` composes this beside the real
+// `TrackerTab`; nothing else outside this file calls it.
 @Composable
-private fun ReferenceStrip(state: LocalReferenceState, modifier: Modifier = Modifier) {
+internal fun ReferenceStrip(state: LocalReferenceState, modifier: Modifier = Modifier) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         modifier = modifier
