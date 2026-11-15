@@ -773,6 +773,10 @@ data class TrackerUiState(
  *   It **does not** reach [TrackerUiState.concentrationToggleId], which is resolved from the
  *   board rather than from these lists — 09 decision 9: *"the concentration banner is
  *   property-driven and unaffected"*.
+ *
+ *   Defaults to [AppSettingsStore.DEFAULT_SHOW_TOGGLES] — **on** since FR-57 (operator ruling,
+ *   2026-11-15), so an applied buff such as Shield draws its chip on a default install —
+ *   rather than to a literal, for [showLimitedUses]' reason.
  * @param hasConnection false for a character with no server (09 decision 8). See
  *   [TrackerUiState.hasConnection].
  * @param selectedRollId FR-7's remembered dropdown selection, as a raw id. Resolved against
@@ -790,7 +794,7 @@ fun toTrackerUiState(
     canUndo: Boolean = false,
     history: List<TrackerWrite> = emptyList(),
     zone: ZoneId = ZoneId.systemDefault(),
-    showToggles: Boolean = true,
+    showToggles: Boolean = AppSettingsStore.DEFAULT_SHOW_TOGGLES,
     showLimitedUses: Boolean = AppSettingsStore.DEFAULT_SHOW_LIMITED_USES,
     hasConnection: Boolean = true,
     selectedRollId: String? = null,

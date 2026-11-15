@@ -19,11 +19,13 @@ data class SettingsUiState(
     val accounts: List<Account> = emptyList(),
     val activeAccountId: String? = null,
     /**
-     * FR-6's switch (docs/design/09-local-characters.md decision 9).
+     * FR-6's switch (docs/design/09-local-characters.md decision 9; default ON since FR-57,
+     * operator ruling 2026-11-15).
      *
      * Seeded from [AppSettingsStore.DEFAULT_SHOW_TOGGLES] rather than from a literal here, so
-     * the switch cannot render "on" for the frame before the first DataStore read lands and
-     * then flick off under the user's thumb.
+     * the switch cannot render the wrong position for the frame before the first DataStore
+     * read lands and then flick under the user's thumb — and so FR-57's flip of the default
+     * reached this seed without anyone having to remember it.
      */
     val showToggles: Boolean = AppSettingsStore.DEFAULT_SHOW_TOGGLES,
     /**
@@ -37,9 +39,9 @@ data class SettingsUiState(
     val uiScale: UiScale = UiScale.DEFAULT,
     /**
      * FR-44 R3's switch, seeded from [AppSettingsStore.DEFAULT_SHOW_LIMITED_USES] for
-     * [showToggles]' reason — and here the seeding matters more, because this default is **on**:
-     * a literal `false` here would show the switch off for one frame and then flick it on, which
-     * reads as the app changing a setting by itself.
+     * [showToggles]' reason. Both defaults are **on**: a literal `false` here would show the
+     * switch off for one frame and then flick it on, which reads as the app changing a setting
+     * by itself.
      */
     val showLimitedUses: Boolean = AppSettingsStore.DEFAULT_SHOW_LIMITED_USES,
 )

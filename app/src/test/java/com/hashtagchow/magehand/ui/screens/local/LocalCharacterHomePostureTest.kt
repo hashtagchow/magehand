@@ -113,13 +113,17 @@ class LocalCharacterHomePostureTest {
     // --- FR-6's default, which no other test can assert ----------------------
 
     @Test
-    fun `show_toggles is off by default, which is the operator's stated intent`() {
+    fun `show_toggles is on by default, which is FR-57's operator ruling`() {
         // Every other FR-6 test passes the flag explicitly (so that the pre-FR-6 assertions
-        // keep meaning what they meant). This is the one place the *default* is pinned, and
-        // it is the whole of FR-6's user-visible change on upgrade.
-        assertFalse(AppSettingsStore.DEFAULT_SHOW_TOGGLES)
-        // And the switch renders off before the first DataStore read lands, rather than
-        // rendering on and flicking off under the user's thumb.
-        assertFalse(SettingsUiState().showToggles)
+        // keep meaning what they meant). This is the one place the *default* is pinned.
+        //
+        // It was `false` from FR-6 (09 decision 9) until FR-57 (operator, 2026-11-15) flipped
+        // it: FR-53 put applied buffs in the section this switch hides, and with it off a
+        // player who cast an applied buff such as Shield had no chip on screen to see or end
+        // it. A buff is never build machinery, and a feature that ships off is never found.
+        assertTrue(AppSettingsStore.DEFAULT_SHOW_TOGGLES)
+        // And the switch renders on before the first DataStore read lands, rather than
+        // rendering off and flicking on as if the app changed a setting by itself.
+        assertTrue(SettingsUiState().showToggles)
     }
 }

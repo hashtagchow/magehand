@@ -1,5 +1,6 @@
 package com.hashtagchow.magehand.ui.screens.characterhome.tracker
 
+import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.model.TrackerBoard
 import com.hashtagchow.magehand.core.model.TrackerOverride
 
@@ -93,12 +94,16 @@ data class TrackerCustomizeState(
  *   Nothing is deleted by this — `tracker_prefs` keeps every condition override, so turning
  *   the switch back on restores exactly the arrangement the user had (09 decision 9: "when
  *   true: exactly the shipped FR-1/2 behavior").
+ *
+ *   Defaults to [AppSettingsStore.DEFAULT_SHOW_TOGGLES] (on since FR-57, operator ruling
+ *   2026-11-15) rather than to a literal, so this sheet and the tracker cannot disagree about
+ *   what an unset preference means.
  */
 fun toCustomizeState(
     board: TrackerBoard,
     overrides: List<TrackerOverride>,
     accentColor: String?,
-    showToggles: Boolean = true,
+    showToggles: Boolean = AppSettingsStore.DEFAULT_SHOW_TOGGLES,
     reorderOnly: Boolean = false,
 ): TrackerCustomizeState {
     val byId = overrides.associateBy { it.propertyId }

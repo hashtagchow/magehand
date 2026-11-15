@@ -400,12 +400,14 @@
     <string name="settings_signout_note">Signing out removes the token from this device only. DiceCloud has no \"log out everywhere\" API — do that on the website if you need it.</string>
     <string name="signout_dialog_title">Sign out?</string>
     <string name="signout_dialog_body">The sign-in token is deleted from this device. Your characters stay on the server.</string>
-    <!-- FR-6 (docs/design/09-local-characters.md decision 9). The note says what a toggle
-         *is* rather than what the switch does, because "show toggles" means nothing until you
-         know that most of them are the sheet's own plumbing. -->
+    <!-- FR-6 (docs/design/09-local-characters.md decision 9); note reworded by FR-57 R4
+         (operator, 2026-11-15), when the switch's default became ON. The note says what the
+         section carries — applied buffs (FR-53) and conditions — and that turning it off hides
+         both; the old note argued for the off default and said nothing about buffs. WebHand
+         carries the same label and note word for word. -->
     <string name="settings_tracker">Tracker</string>
     <string name="settings_show_toggles">Show toggles on tracker</string>
-    <string name="settings_show_toggles_note">Most sheets\' toggles are build machinery — hidden unless you use them.</string>
+    <string name="settings_show_toggles_note">Active buffs and conditions on the tracker — turning this off hides both.</string>
     <!-- FR-44 R3, wording from the ruling. The note names the thing rather than the switch,
          as the FR-6 note above does: "limited-use abilities" is jargon until you are told it
          means the ones with a use count, and an example is the shortest way to say it. -->

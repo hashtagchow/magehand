@@ -499,6 +499,27 @@ class TrackerUiStateTest {
         assertTrue(map(board = board, showToggles = false).buffs.isEmpty())
     }
 
+    /**
+     * FR-57 R1 (operator, 2026-11-15): with nobody having touched the switch, an applied buff such
+     * as Shield **is on screen**. Calls the mapper directly, without `showToggles`, because
+     * [map] passes it explicitly and so could never see the default — and the default is the
+     * whole of FR-57's gap: off, the chip and its ✕ were on no default install's tracker.
+     */
+    @Test
+    fun `with the default setting, a board with one applied buff draws its chip`() {
+        val state = toTrackerUiState(
+            creatureId = "FakeCreature23456",
+            board = TrackerBoard(buffs = listOf(AppliedBuff("b1", "Shield", null))),
+            connection = ConnectionState.LIVE,
+            lastSyncedAt = null,
+            isShowingSnapshot = false,
+            zone = utc,
+        )
+
+        assertEquals(listOf(BuffChipState("b1", "Shield", null)), state.buffs)
+        assertFalse(state.isEmpty)
+    }
+
     /** A character carrying only a buff still has a tracker worth drawing. */
     @Test
     fun `a board of nothing but a buff is not empty, and is empty once hidden`() {

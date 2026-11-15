@@ -30,13 +30,23 @@ import kotlinx.coroutines.flow.map
 interface AppSettingsStore {
 
     /**
-     * FR-6: whether the tracker shows the conditions section and the customize sheet shows
-     * its CONDITIONS group.
+     * FR-6: whether the tracker shows the conditions section — applied buffs (FR-53) and
+     * condition toggles — and the customize sheet shows its CONDITIONS group.
      *
-     * **Default `false`**, which is the operator's explicit intent (09 decision 9): most
-     * sheets' toggles are build machinery, and existing users who used them will see them
-     * vanish on upgrade with the switch one screen away. The default lives *here*, not at
-     * each read site, so a caller cannot accidentally opt a screen back in by forgetting it.
+     * **Default `true`** since FR-57 (operator ruling, 2026-11-15), reversing 09 decision 9's
+     * original `false`. FR-53 put applied buffs in this section, and a buff is never build
+     * machinery: off by default, a player who cast an applied buff such as Shield saw the AC
+     * change and nothing on screen that said why or could end it. Only *active* toggles draw
+     * (FR-1), so the old reason no longer outweighs that.
+     *
+     * **Retroactive without a migration**: the read is `stored ?: default`, so an install that
+     * never touched the switch has no entry and turns on at upgrade. A stored `false` is
+     * honoured because the only writer of the key is the player's own tap on the Settings
+     * switch ([setShowToggles] has no other caller) — keep it that way, or a stored value stops
+     * meaning "the player chose this" and FR-57 R2's one-time reset becomes necessary.
+     *
+     * The default lives *here*, not at each read site, so a caller cannot accidentally opt a
+     * screen into the opposite answer by forgetting it.
      */
     val showToggles: Flow<Boolean>
 
@@ -62,11 +72,10 @@ interface AppSettingsStore {
      * FR-44 R3: whether the tracker shows the **limited-use abilities** section — `action` and
      * `spell` rows carrying a use count, discovered by shape (`TrackerKind.LIMITED_USE`).
      *
-     * **Default `true`**, and the asymmetry with [showToggles] is deliberate rather than an
-     * inconsistency. R3 states it in one line: *"the table asked for the rows, the switch is for
-     * people who did not"*. FR-6's switch defaults off because most sheets' toggles are build
-     * machinery a player never wanted on screen; these rows are the feature the operator asked
-     * for, and a feature that ships off is a feature nobody finds.
+     * **Default `true`**. R3 states why in one line: *"the table asked for the rows, the switch
+     * is for people who did not"* — a feature that ships off is a feature nobody finds. This was
+     * once deliberately the opposite of [showToggles]' default; FR-57 (2026-11-15) applied the
+     * same sentence to that switch, so the two now agree.
      *
      * The default lives here, next to [DEFAULT_SHOW_TOGGLES] and for the same reason: a caller
      * that forgets it cannot accidentally opt a screen into the opposite answer.
@@ -76,8 +85,11 @@ interface AppSettingsStore {
     suspend fun setShowLimitedUses(value: Boolean)
 
     companion object {
-        /** 09 decision 9, stated once. */
-        const val DEFAULT_SHOW_TOGGLES: Boolean = false
+        /**
+         * FR-57's "default **ON**" (operator, 2026-11-15; was 09 decision 9's `false`), stated
+         * once.
+         */
+        const val DEFAULT_SHOW_TOGGLES: Boolean = true
 
         /** FR-44 R3's "default **ON**", stated once. */
         const val DEFAULT_SHOW_LIMITED_USES: Boolean = true
