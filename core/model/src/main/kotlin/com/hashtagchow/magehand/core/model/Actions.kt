@@ -568,6 +568,17 @@ sealed interface UseTarget {
          * row's own `total`.
          */
         val spendsOwnUses: Boolean = false,
+        /**
+         * The sheet says this spell is cast **without a spell slot** — `castWithoutSpellSlots:
+         * true` (design 22 addendum 2 item 1, review H1).
+         *
+         * Read from the server's own `doCastSpell`: when the flag is set the slot branch is
+         * skipped entirely, so a slot the app sent would not be spent. Before this field the
+         * confirm dialog said it would be, and a caster with no slots left could not confirm at
+         * all (`confirmDisabled`). Unlike [spendsOwnUses] this is the sheet's explicit word, so
+         * the server path reads it; `false` when absent.
+         */
+        val castWithoutSpellSlots: Boolean = false,
     ) : UseTarget {
         /**
          * Cantrips skip the picker (17 decision 3). Not because a cantrip has no slot it *could*
@@ -577,7 +588,7 @@ sealed interface UseTarget {
          * So does a spell that spends its own charges — see [spendsOwnUses], and 20 decision 4's
          * `needsSlot = spellLevel > 0 && total == 0`.
          */
-        val needsSlot: Boolean get() = level > 0 && !spendsOwnUses
+        val needsSlot: Boolean get() = level > 0 && !spendsOwnUses && !castWithoutSpellSlots
     }
 }
 
@@ -705,6 +716,11 @@ data class SpellEntry(
      * did before FR-49.
      */
     val spendsOwnUses: Boolean = false,
+    /**
+     * The sheet's `castWithoutSpellSlots` flag (FR-59 design 22 addendum 2 item 1) — see
+     * [UseTarget.Spell.castWithoutSpellSlots]. `false` when absent, and on every local row.
+     */
+    val castWithoutSpellSlots: Boolean = false,
     val sortOrder: Int = 0,
 ) {
     /**
@@ -777,6 +793,7 @@ data class SpellEntry(
                 level = level,
                 ritual = ritual,
                 spendsOwnUses = spendsOwnUses,
+                castWithoutSpellSlots = castWithoutSpellSlots,
             )
         }
 }

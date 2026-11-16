@@ -252,6 +252,21 @@
          free to describe nothing — so it says what the app knows rather than what the spell
          does. -->
     <string name="tracker_buff_no_description">No description on the sheet.</string>
+    <!-- FR-59 stage 1 (docs/design/22-charge-consumers.md R4): the chooser a spend opens on a
+         charge with an action behind it. The row shows the action's own name and, when exactly
+         one buff would be applied, that buff's name verbatim under it. Spoken as one sentence
+         per row, "Use <action>, applies <buff>", because the visible name alone does not say a
+         tap USES it. A disabled row is spoken as ONE sentence, "Can't use <action>[, which applies
+         <buff>]: <reason>", where the reason is the Actions tab's own sentence (action_use_* /
+         action_detail_unusable_*) or, for a consumer the Actions state has no row for, the
+         neutral tracker_consumer_unavailable (design 22 addendum 2 item 8). -->
+    <string name="tracker_consumer_applies">Applies %1$s</string>
+    <string name="tracker_consumer_spoken">Use %1$s</string>
+    <string name="tracker_consumer_spoken_applies">Use %1$s, applies %2$s</string>
+    <string name="tracker_consumer_spoken_disabled">Can\'t use %1$s: %2$s</string>
+    <string name="tracker_consumer_spoken_disabled_applies">Can\'t use %1$s, which applies %2$s: %3$s</string>
+    <string name="tracker_consumer_unavailable">Not available right now</string>
+    <string name="tracker_consumer_just_spend">Just spend a charge</string>
     <string name="tracker_hit_points">Hit points</string>
     <string name="tracker_temp_hp">+%1$d temp HP</string>
     <!-- FR-50 (docs/design/18-table-pack.md decisions 21-23). Information on the HP block, not

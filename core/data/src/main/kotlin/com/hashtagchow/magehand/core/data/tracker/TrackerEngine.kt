@@ -2,6 +2,7 @@ package com.hashtagchow.magehand.core.data.tracker
 
 import kotlinx.serialization.json.JsonObject
 import com.hashtagchow.magehand.core.model.AppliedBuff
+import com.hashtagchow.magehand.core.model.ChargeConsumer
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.DamageDefense
 import com.hashtagchow.magehand.core.model.DeathSaves
@@ -199,7 +200,19 @@ object TrackerEngine {
         val properties = sheet.propertyList
 
         val slots = properties.mapNotNull { spellSlot(it) }
-        val resources = properties.mapNotNull { resource(it) }
+        // FR-59 stage 1 (22 R1). Built once per board by the engine that owns every reader it
+        // needs — the cost reader, the FR-47 tag rule, the parent walk — and handed to the
+        // resource rule, which is the only rule that may carry consumers.
+        //
+        // Addendum 2 item 4: consumers attach only to a row whose `variableName` is unique among
+        // the live resource rows. The server spends whichever attribute the name resolves to, which
+        // may not be the row that was tapped, so a shared name gets no chooser at all.
+        val resourceVariables = properties
+            .filter { it.isAttribute(ATTR_RESOURCE) && !it.isSkipped() }
+            .mapNotNull { it.string("variableName") }
+        val sharedVariables = resourceVariables.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
+        val consumers = ActionEngine.chargeConsumers(sheet) - sharedVariables
+        val resources = properties.mapNotNull { resource(it, consumers) }
         val limitedUses = properties.mapNotNull { limitedUse(it) }
         // FR-51 R2. Resolved once for the whole sheet rather than per row: it is a property of
         // the character, every hit-dice row would find the same one, and a multiclass sheet has
@@ -293,13 +306,21 @@ object TrackerEngine {
         return p.toResource(TrackerKind.SPELL_SLOT, total = total, reset = reset, level = p.slotLevel())
     }
 
-    /** 03 §2. `attributeType == 'resource'`, kept when `total > 0 || value > 0`. */
-    private fun resource(p: JsonObject): TrackedResource? {
+    /**
+     * 03 §2. `attributeType == 'resource'`, kept when `total > 0 || value > 0`.
+     *
+     * FR-59 (22 R1): the row also carries the actions and spells that spend it and would apply a
+     * buff to the character, looked up by its own `variableName` — the key
+     * `attributesConsumed[].variableName` names. A resource with no `variableName` cannot be
+     * named by a cost and carries none.
+     */
+    private fun resource(p: JsonObject, consumers: Map<String, List<ChargeConsumer>>): TrackedResource? {
         if (!p.isAttribute(ATTR_RESOURCE) || p.isSkipped()) return null
         val total = p.number("total") ?: 0
         val value = p.remaining(total)
         if (total <= 0 && value <= 0) return null
         return p.toResource(TrackerKind.RESOURCE, total = total, reset = ResetRule.fromWire(p.string("reset")))
+            ?.copy(consumers = p.string("variableName")?.let { consumers[it] }.orEmpty())
     }
 
     /**

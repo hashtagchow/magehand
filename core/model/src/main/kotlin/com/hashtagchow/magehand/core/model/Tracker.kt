@@ -180,7 +180,43 @@ data class TrackedResource(
     val sortOrder: Int = 0,
     /** Set by the user-override layer (Room `tracker_prefs`), never by the server. */
     val pinned: Boolean = false,
+    /**
+     * The actions and spells that spend this charge **and apply a buff to the character** — FR-59
+     * stage 1, docs/design/22-charge-consumers.md R1/R2. Ordered by the consumer's own `order`.
+     *
+     * [TrackerKind.RESOURCE] rows only; empty on every other kind and on every local character.
+     * Empty is also the answer for the common resource — one whose consuming action applies
+     * nothing to the character — and that row behaves exactly as it always has (R2's last
+     * paragraph: the chooser is for the charge whose action changes the sheet).
+     *
+     * Discovered by shape in `ActionEngine.chargeConsumers`; never by a name.
+     */
+    val consumers: List<ChargeConsumer> = emptyList(),
 )
+
+/**
+ * Something that spends a resource's charge **and** puts a buff on the character — the row the
+ * tracker's spend chooser offers beside *"Just spend a charge"* (FR-59 stage 1,
+ * docs/design/22-charge-consumers.md R1).
+ *
+ * @property actionId the `action` / `spell` property's `_id` — what the Actions tab's *Use* names.
+ * @property name the action's own name, verbatim.
+ * @property kind which of the two *Use* writes the consumer takes (`doAction` / `doCastSpell`).
+ * @property applies the one self-targeted buff this use would apply, **verbatim**, or `null` when
+ *   more than one qualifies (R2: no name parsing, no prefix stripping, no guessing which one).
+ */
+data class ChargeConsumer(
+    val actionId: String,
+    val name: String,
+    val kind: ChargeConsumerKind,
+    val applies: String? = null,
+)
+
+/** The two property types a [ChargeConsumer] can be (R1: `type ∈ {action, spell}`). */
+enum class ChargeConsumerKind {
+    ACTION,
+    SPELL,
+}
 
 /**
  * The number a player typed into FR-22's direct-entry dialog — an **absolute target**, not a

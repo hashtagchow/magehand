@@ -1,5 +1,6 @@
 package com.hashtagchow.magehand.core.data.contract
 
+import com.hashtagchow.magehand.core.data.tracker.ActionEngine
 import com.hashtagchow.magehand.core.data.tracker.CreatureSheet
 import com.hashtagchow.magehand.core.data.tracker.InventoryEngine
 import com.hashtagchow.magehand.core.data.tracker.TrackerEngine
@@ -1386,6 +1387,102 @@ class ContractExportTest {
             "decision 17: no reset field on the discovered row, even though this rule's own " +
                 "`domain/rules.json#discovery.hitDice.noResetField` states the source carries none",
             row["reset"] is JsonNull,
+        )
+    }
+
+    /**
+     * FR-59 R7, schema 11: the `charge-consumers` vector's resource rows carry exactly the
+     * consumers each arm promises, in the exported shape WebHand reads — and the stripped arm is
+     * the complete trigger arm minus exactly one field, or it proves nothing about that field.
+     */
+    @Test
+    fun `the charge-consumers vector carries one answer per arm on the exported rows`() {
+        val vector = discoveryVector("charge-consumers")
+        val resources = vector.expected()["trackerBoard"]!!.jsonObject["resources"]!!.jsonArray
+            .map { it.jsonObject }
+            .associateBy { it.str("propertyId") }
+        fun consumersOf(id: String): List<JsonObject> =
+            resources[id]!!["consumers"]!!.jsonArray.map { it.jsonObject }
+
+        val direct = consumersOf(ContractFixtures.consumerDirectResourceId).single()
+        assertEquals(setOf("actionId", "name", "kind", "applies"), direct.keys)
+        assertEquals(ContractFixtures.consumerDirectActionId, direct.str("actionId"))
+        assertEquals("ACTION", direct.str("kind"))
+        assertEquals("An applied direct buff", direct.str("applies"))
+
+        assertEquals(
+            "An applied form buff",
+            consumersOf(ContractFixtures.consumerTriggerResourceId).single().str("applies"),
+        )
+        assertEquals("SPELL", consumersOf(ContractFixtures.consumerSpellResourceId).single().str("kind"))
+        assertTrue(consumersOf(ContractFixtures.consumerTwofoldResourceId).single()["applies"] is JsonNull)
+        assertEquals(
+            listOf(ContractFixtures.consumerSharedFirstActionId, ContractFixtures.consumerSharedSecondActionId),
+            consumersOf(ContractFixtures.consumerSharedResourceId).map { it.str("actionId") },
+        )
+        listOf(
+            ContractFixtures.consumerStrippedResourceId,
+            ContractFixtures.consumerSubsetResourceId,
+            ContractFixtures.consumerInactiveResourceId,
+            ContractFixtures.consumerRemovedResourceId,
+            ContractFixtures.consumerTargetedResourceId,
+            ContractFixtures.consumerZeroResourceId,
+        ).forEach { id ->
+            assertEquals("row $id must carry an empty consumers array", 0, consumersOf(id).size)
+        }
+
+        val input = vector["input"]!!.jsonObject["creatureProperties"]!!.jsonArray
+            .map { it.jsonObject }
+            .associateBy { it.str("_id") }
+        val complete = input[ContractFixtures.consumerTriggerId]!!
+        val stripped = input[ContractFixtures.consumerStrippedTriggerId]!!
+        assertEquals(ActionEngine.EVENT_DO_ACTION_PROPERTY, complete.str(ActionEngine.TRIGGER_EVENT))
+        assertEquals("action", complete.str(ActionEngine.ACTION_PROPERTY_TYPE))
+        assertNotNull(complete.str(ActionEngine.TRIGGER_TIMING))
+        assertEquals(complete.str(ActionEngine.TRIGGER_EVENT), stripped.str(ActionEngine.TRIGGER_EVENT))
+        assertEquals(complete.str(ActionEngine.TRIGGER_TIMING), stripped.str(ActionEngine.TRIGGER_TIMING))
+        assertFalse(ActionEngine.ACTION_PROPERTY_TYPE in stripped.keys)
+    }
+
+    /**
+     * R7: `consumers` is on EVERY exported row, so an empty array is the answer, not a missing key.
+     *
+     * Read from a FRESH generation, not the committed files: dropping the field from the emitter
+     * must fail this test on its own, not only the byte pin above (review: it read the committed
+     * files and stayed green under exactly that mutation).
+     */
+    @Test
+    fun `every exported row carries a consumers array and only resource rows fill it`() {
+        val fresh = ContractExport.generate(sourceCommit = "fresh", generatedOn = "fresh")
+        val document = Json.parseToJsonElement(fresh.getValue("domain/discovery-vectors.json")).jsonObject
+        val vectors = document["vectors"]!!.jsonArray.map { it.jsonObject }
+        var rows = 0
+        vectors.forEach { vector ->
+            val board = vector.expected()["trackerBoard"] as? JsonObject ?: return@forEach
+            board.values
+                .filterIsInstance<JsonArray>()
+                .flatMap { list -> list.mapNotNull { it as? JsonObject } }
+                .filter { it.containsKey("propertyId") && it.containsKey("kind") && it.containsKey("total") }
+                .forEach { row ->
+                    rows++
+                    val consumers = row["consumers"] as? JsonArray
+                    assertNotNull("${vector.str("name")}: row ${row.str("propertyId")} has no consumers array", consumers)
+                    if (row.str("kind") != "RESOURCE") assertEquals(0, consumers!!.size)
+                }
+        }
+        assertTrue("the walk must have reached rows, or it asserted nothing", rows > 20)
+    }
+
+    /** The rule states the trigger fields from the constants the engine matches on. */
+    @Test
+    fun `the charge-consumers rule names the three trigger fields the engine reads`() {
+        val rule = documentAt("domain/rules.json")["discovery"]!!.jsonObject["chargeConsumers"]!!.jsonObject
+        val stripped = rule.str("strippedTriggers").orEmpty()
+        listOf(ActionEngine.TRIGGER_EVENT, ActionEngine.ACTION_PROPERTY_TYPE, ActionEngine.TRIGGER_TIMING)
+            .forEach { assertTrue("strippedTriggers must name `$it`", stripped.contains("`$it`")) }
+        assertTrue(
+            rule["wouldApply"]!!.jsonArray.joinToString { it.jsonPrimitive().content }
+                .contains(ActionEngine.EVENT_DO_ACTION_PROPERTY),
         )
     }
 

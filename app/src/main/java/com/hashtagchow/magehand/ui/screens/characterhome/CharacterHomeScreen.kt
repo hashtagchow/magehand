@@ -391,8 +391,12 @@ fun CharacterHomeScreen(
                             onTurnOffBuff = viewModel::turnOffBuff,
                             onSelectRoll = viewModel::selectRoll,
                             onConnectionDetails = { connectionOpen = true },
+                            // FR-59 R5: the chooser's consumer rows take the Actions tab's own
+                            // Use — the same binding as `ActionsScreen.onUse` below.
+                            onUse = viewModel::use,
                         ),
                         shake = shake,
+                        useState = uiState.actions,
                     )
                 }
                 val inventory = @Composable {

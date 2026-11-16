@@ -191,8 +191,8 @@ android {
         // counters took their Room defaults on every edit: a rename emptied a wallet and cleared
         // the marks, silently. A save that stops destroying data is a correction to what a
         // screen already did, which is 26's case exactly.
-        versionCode = 33
-        versionName = "1.20.0"
+        versionCode = 34
+        versionName = "1.21.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -116,6 +116,27 @@ class LocalTrackerBoardTest {
     }
 
     /**
+     * FR-59 stage 1 R6 / `#discovery.chargeConsumers.localCharacters`: a local character has no
+     * buffs, so no row — a resource with an action spending it least of all — carries consumers,
+     * and the tracker's chooser can never open for one.
+     */
+    @Test
+    fun `a local character's rows carry no charge consumers`() {
+        val board = LocalTrackerBoard.build(
+            character(),
+            listOf(
+                row("s-1", LocalRowKind.SLOT, label = "1st Level", total = 4, current = 2, sortIndex = 0),
+                row("res-1", LocalRowKind.RESOURCE, label = "Form Charges", total = 2, current = 2, sortIndex = 1),
+                row("a-1", LocalRowKind.ACTION, label = "Form Action", total = 2, current = 2, sortIndex = 2),
+                row("i-1", LocalRowKind.ITEM, label = "Healing Potion", total = 2, current = 2, sortIndex = 3),
+            ),
+        )
+
+        assertTrue(board.allCountableRows.isNotEmpty())
+        assertTrue(board.allCountableRows.all { it.consumers.isEmpty() })
+    }
+
+    /**
      * The consumables section renders `pinnedItems`, not `allItems` (see `TrackerUiState`).
      * Every local item was typed in by the player, so every one of them belongs there —
      * unlike the server path, which discovers hundreds and pins a handful.

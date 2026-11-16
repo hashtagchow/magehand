@@ -218,7 +218,7 @@ fun ActionDetailSheet(
  * line. A crash is not an improvement over a slightly wrong sentence in a state that cannot occur.
  */
 @StringRes
-private fun UnusableReason?.labelRes(): Int = when (this) {
+internal fun UnusableReason?.labelRes(): Int = when (this) {
     UnusableReason.UNPREPARED -> R.string.action_detail_unusable_unprepared
     UnusableReason.INACTIVE -> R.string.action_detail_unusable_inactive
     UnusableReason.NO_USES -> R.string.action_detail_unusable_uses
@@ -442,10 +442,17 @@ private fun CostLine.label(): String = available
  * `enabled` is one recomposition too late to stop a double tap. It is belt to the braces of
  * `:core:data`'s single-flight latch — that one is the guarantee, this one is what keeps a second
  * tap from being *silently* dropped a layer down where the player cannot see why.
+ *
+ * ### Two callers, one dialog
+ *
+ * `internal` since FR-59 stage 1: the tracker's charge chooser confirms a consumer's use through
+ * **this** dialog (22 R5's *"the same path the Actions tab's button takes, including its use
+ * dialog"*), so the slot picker, the ritual box, the spend lines and the no-undo warning are one
+ * implementation whichever tab the player started from.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun UseConfirmDialog(
+internal fun UseConfirmDialog(
     use: UseAffordance,
     onConfirm: (String?, Boolean) -> Unit,
     onDismiss: () -> Unit,

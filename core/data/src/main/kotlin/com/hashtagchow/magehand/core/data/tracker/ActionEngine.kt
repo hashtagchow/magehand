@@ -9,6 +9,8 @@ import com.hashtagchow.magehand.core.model.ActionCost
 import com.hashtagchow.magehand.core.model.ActionEntry
 import com.hashtagchow.magehand.core.model.ActionType
 import com.hashtagchow.magehand.core.model.ActionUses
+import com.hashtagchow.magehand.core.model.ChargeConsumer
+import com.hashtagchow.magehand.core.model.ChargeConsumerKind
 import com.hashtagchow.magehand.core.model.CostLine
 import com.hashtagchow.magehand.core.model.DamageLine
 import com.hashtagchow.magehand.core.model.DamageRider
@@ -58,6 +60,30 @@ object ActionEngine {
     private const val SLOT_TAGS = "slotTags"
     private const val TARGET_TAGS = "targetTags"
     private const val TAGS = "tags"
+
+    // --- FR-59 charge-consumer vocabulary (docs/design/22-charge-consumers.md R2;
+    // docs/verification/probe-bug27.md §(b): the server files triggers by `event`, then
+    // `actionPropertyType`, then `timing`, and only then compares tags). Internal so the contract
+    // export states the rule from the constants that implement it. ---
+    private const val TYPE_BUFF = "buff"
+    internal const val TRIGGER_EVENT = "event"
+    internal const val EVENT_DO_ACTION_PROPERTY = "doActionProperty"
+    internal const val ACTION_PROPERTY_TYPE = "actionPropertyType"
+    internal const val TRIGGER_TIMING = "timing"
+    internal const val BUFF_TARGET = "target"
+    internal const val BUFF_TARGET_SELF = "self"
+    internal const val TRIGGER_CONDITION = "condition"
+    internal const val EXTRA_TAGS = "extraTags"
+    internal const val EXTRA_TAGS_OPERATION = "operation"
+    internal const val EXTRA_TAGS_NOT = "NOT"
+    private const val TYPE_FOLDER = "folder"
+    internal const val CAST_WITHOUT_SPELL_SLOTS = "castWithoutSpellSlots"
+
+    /** The running engine's own `timing` options for a trigger (addendum 2 item 2). */
+    internal val TRIGGER_TIMINGS: List<String> = listOf("before", "after", "afterChildren")
+
+    /** [MAX_DAMAGE_DEPTH]'s guard for [buffsUnder]'s folder walk (addendum 2 item 3: depth 6). */
+    private const val MAX_BUFF_DEPTH = 6
 
     /**
      * The tag that identifies the *"choose your weapon masteries"* slot — **not** its name.
@@ -299,6 +325,10 @@ object ActionEngine {
             damage = damageFor(id, childrenByParent),
             cost = costFor(resources),
             uses = usesFor(),
+            // Design 22 addendum 2 item 1: the sheet's explicit "no slot" flag. Drives
+            // `UseTarget.Spell.needsSlot`, and so the picker, the Confirm gate and the frame's
+            // `slotId` on both the Actions tab and the tracker's chooser.
+            castWithoutSpellSlots = isTrue(CAST_WITHOUT_SPELL_SLOTS),
             sortOrder = number("order") ?: 0,
         )
     }
@@ -421,13 +451,13 @@ object ActionEngine {
     private fun JsonObject.costFor(resources: ResourceIndex): ActionCost {
         val block = this[RESOURCES] as? JsonObject ?: return ActionCost.FREE
 
-        val attributes = block.entries(ATTRIBUTES_CONSUMED).mapNotNull { entry ->
-            val variable = entry.string(VARIABLE_NAME)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val attributes = consumedAttributes().map { consumed ->
+            val variable = consumed.variableName
             CostLine(
                 name = resources.names[variable]?.takeIf { it.isNotBlank() }
-                    ?: entry.string("statName")?.takeIf { it.isNotBlank() }
+                    ?: consumed.statName
                     ?: variable,
-                amount = entry.number(QUANTITY) ?: 1,
+                amount = consumed.quantity,
                 available = resources.attributeValues[variable],
             )
         }
@@ -477,6 +507,37 @@ object ActionEngine {
     /** The objects in an array-valued field; empty for a field that is absent or the wrong shape. */
     private fun JsonObject.entries(key: String): List<JsonObject> =
         (this[key] as? JsonArray)?.filterIsInstance<JsonObject>().orEmpty()
+
+    /**
+     * One `resources.attributesConsumed` entry, read once.
+     *
+     * @property quantity the entry's `quantity` calculation; **absent reads 1**, which is the
+     *   reading [costFor] has always made (an entry that names a resource and no amount spends
+     *   one of it).
+     * @property statName the entry's own display fallback, blank normalised to `null`.
+     */
+    internal class ConsumedAttribute(
+        val variableName: String,
+        val quantity: Int,
+        val statName: String?,
+    )
+
+    /**
+     * The **one** reader of `resources.attributesConsumed` — [costFor]'s cost lines and FR-59's
+     * [chargeConsumers] both read through it, so "which resource does this action spend, and how
+     * much" cannot be answered two ways. An entry with no `variableName` is dropped: it names
+     * nothing a tracker row could be.
+     */
+    internal fun JsonObject.consumedAttributes(): List<ConsumedAttribute> {
+        val block = this[RESOURCES] as? JsonObject ?: return emptyList()
+        return block.entries(ATTRIBUTES_CONSUMED).mapNotNull { entry ->
+            ConsumedAttribute(
+                variableName = entry.string(VARIABLE_NAME)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null,
+                quantity = entry.number(QUANTITY) ?: 1,
+                statName = entry.string("statName")?.takeIf { it.isNotBlank() },
+            )
+        }
+    }
 
     /**
      * A `spellList` header — the DC and ability modifier the surface shows *instead of* a
@@ -1037,7 +1098,7 @@ object ActionEngine {
         if (masteries.chosenTargetTags.isEmpty() || masteries.masteryByItem.isEmpty()) return null
 
         val tags = strings(TAGS).toSet()
-        if (masteries.chosenTargetTags.none { tags.containsAll(it) }) return null
+        if (masteries.chosenTargetTags.none { triggerTargets(it, tags) }) return null
 
         return masteries.masteryByItem[nearestItemId(masteries.byId)]
     }
@@ -1059,6 +1120,185 @@ object ActionEngine {
             current = parent
         }
         return null
+    }
+
+    /**
+     * FR-47 R3's subset rule — **the one copy**: a trigger with these `targetTags` fires for a
+     * property carrying `tags` when the target list is non-empty and every entry is among the
+     * property's tags. It is the server's own `triggerMatchTags` without the `extraTags` arms,
+     * which stay unread ([masteryFor]'s *"`extraTags` is ignored, deliberately"*).
+     *
+     * Shared by the mastery gate and FR-59's [chargeConsumers] (22 R2(b) names this rule by
+     * reference), so the two cannot come apart. An empty target list never matches: `containsAll`
+     * of nothing is vacuously true, and a trigger that names no tag is not one this app may
+     * claim fires for everything.
+     */
+    internal fun triggerTargets(targetTags: Collection<String>, tags: Collection<String>): Boolean =
+        targetTags.isNotEmpty() && tags.containsAll(targetTags)
+
+    // -----------------------------------------------------------------------
+    // FR-59 stage 1 — charge consumers (docs/design/22-charge-consumers.md R1/R2)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Every resource `variableName` → the actions and spells that spend it **and** would apply a
+     * self-targeted buff, each list ordered by the consumer's `order` (then name, the board's
+     * standing tie-break).
+     *
+     * Called by `TrackerEngine.build` to fill `TrackedResource.consumers` on resource rows (which
+     * also applies addendum 2 item 4, the unique-`variableName` gate — that needs the row list,
+     * and this function does not build rows). It lives here, beside [costFor] and [masteryFor],
+     * because every reader it needs is this engine's: [consumedAttributes] (the cost reader),
+     * [triggerTargets] (the FR-47 subset rule) and [parentId].
+     *
+     * ### R1 — who is a consumer
+     *
+     * A property with `type ∈ {action, spell}`, not removed, not inactive, with a non-blank name,
+     * with an `attributesConsumed` entry naming the variable at a quantity ≥ 1 — an unresolved
+     * quantity reads 1, as the cost line reads it (addendum 2 item 5) — and at least one buff it
+     * would apply to the character (R2). Discovery is by **shape**: nothing here reads a name.
+     * A blank name is treated as absent (addendum 2 item 8): there is nothing to put on the row.
+     *
+     * ### R2 as amended — what it would apply, conservatively
+     *
+     * (a) `buff` properties under the action, through `folder`s only ([buffsUnder]). These are
+     * library templates and carry `inactive` from their ancestor; that is expected and is **not** a
+     * filter. (b) `buff`s under every trigger that **will** fire for the action
+     * ([isFiringTrigger] plus the per-action checks here): its `actionPropertyType` equals the
+     * consumer's own type, its `targetTags` are a non-empty subset of the action's own `tags`.
+     * Everything is conservative (addendum 2 item 2): a trigger or a buff that *might* not apply is
+     * not counted, so the chooser can miss a consumer but never invent one. Only `target == "self"`
+     * buffs count.
+     *
+     * `applies` is the qualifying buff's `name` verbatim when exactly one (by `_id`) qualifies and
+     * its name is not blank; `null` otherwise.
+     */
+    internal fun chargeConsumers(sheet: CreatureSheet): Map<String, List<ChargeConsumer>> {
+        val properties = sheet.livePropertyList
+        val childrenByParent = properties.groupBy { it.parentId() }
+        // The triggers that could fire at all, read once per build rather than once per action —
+        // [ResourceIndex]'s reason: a board rebuilds on every mirror change.
+        val firingTriggers = properties.filter { it.isFiringTrigger() }
+
+        val byVariable = LinkedHashMap<String, MutableList<Pair<Int, ChargeConsumer>>>()
+        for (property in properties) {
+            val kind = when (property.string("type")) {
+                TYPE_ACTION -> ChargeConsumerKind.ACTION
+                TYPE_SPELL -> ChargeConsumerKind.SPELL
+                else -> continue
+            }
+            if (property.isTrue("inactive")) continue
+            val id = property.string("_id") ?: continue
+            val name = property.string("name")?.takeIf { it.isNotBlank() } ?: continue
+            val variables = property.consumedAttributes()
+                .filter { it.quantity >= 1 }
+                .map { it.variableName }
+                .distinct()
+            if (variables.isEmpty()) continue
+
+            // Never null here — `kind` above already matched one of the two — and compared
+            // against `actionPropertyType` below, which is what rejects a trigger missing that
+            // field: `null == "action"` is false. (That is why [isFiringTrigger] carries no blank
+            // check of its own for it; it was an equivalent duplicate of this comparison.)
+            val type = property.string("type")
+            val tags = property.strings(TAGS).toSet()
+            val buffs = buildList {
+                addAll(buffsUnder(id, childrenByParent))
+                firingTriggers
+                    .filter { it.string(ACTION_PROPERTY_TYPE) == type && triggerTargets(it.strings(TARGET_TAGS), tags) }
+                    .forEach { trigger -> trigger.string("_id")?.let { addAll(buffsUnder(it, childrenByParent)) } }
+            }
+                .filter { it.string(BUFF_TARGET) == BUFF_TARGET_SELF }
+                .distinctBy { it.string("_id") }
+            if (buffs.isEmpty()) continue
+
+            val consumer = ChargeConsumer(
+                actionId = id,
+                name = name,
+                kind = kind,
+                applies = buffs.singleOrNull()?.string("name")?.takeIf { it.isNotBlank() },
+            )
+            val order = property.number("order") ?: 0
+            variables.forEach { byVariable.getOrPut(it) { mutableListOf() } += order to consumer }
+        }
+
+        return byVariable.mapValues { (_, consumers) ->
+            consumers
+                .sortedWith(compareBy({ it.first }, { it.second.name }))
+                .map { it.second }
+        }
+    }
+
+    /**
+     * A trigger the server **will** fire on an action or spell use, as far as the trigger alone
+     * says (addendum 2 item 2). The type and tag halves are per action and asked by the caller.
+     *
+     *  - live: `removed` never reaches here ([CreatureSheet.livePropertyList]); `inactive` is
+     *    checked. An inactive trigger is one the sheet switched off, while a buff template is
+     *    inactive *because* it is a template — so the flag filters triggers and not buffs.
+     *  - `event == "doActionProperty"` and `timing` one of the running engine's own options
+     *    ([TRIGGER_TIMINGS]); a trigger missing either is never filed (BUG-27).
+     *  - no `extraTags` arm whose `operation` is `NOT`: the server lets such an arm cancel a match,
+     *    and the arm's tags are matched against a tag set this app does not reconstruct. An `OR`
+     *    arm is ignored — it can only add matches, so ignoring it can only miss a consumer.
+     *  - no `condition`, or one whose computed `value` is truthy at rest ([conditionHolds]).
+     */
+    private fun JsonObject.isFiringTrigger(): Boolean =
+        string("type") == TYPE_TRIGGER &&
+            !isTrue("inactive") &&
+            string(TRIGGER_EVENT) == EVENT_DO_ACTION_PROPERTY &&
+            string(TRIGGER_TIMING) in TRIGGER_TIMINGS &&
+            entries(EXTRA_TAGS).none { it.string(EXTRA_TAGS_OPERATION) == EXTRA_TAGS_NOT } &&
+            conditionHolds()
+
+    /**
+     * Addendum 2 item 2's condition clause. No `condition` at all (or one with neither a
+     * calculation nor a value — an empty field the editor leaves behind) holds. Otherwise the
+     * computed `value` must be truthy in the server's own (JavaScript) sense: `true`, a non-zero
+     * number, a non-empty string. An unresolved value is not truthy — conservative, like every
+     * other arm here.
+     */
+    private fun JsonObject.conditionHolds(): Boolean {
+        val condition = this[TRIGGER_CONDITION] ?: return true
+        if (condition is JsonNull) return true
+        val wrapper = condition as? JsonObject ?: return false
+        val calculation = wrapper.string("calculation")
+        val value = wrapper["value"]
+        if (calculation.isNullOrBlank() && (value == null || value is JsonNull)) return true
+        val primitive = value as? JsonPrimitive ?: return false
+        if (primitive is JsonNull) return false
+        if (primitive.isString) return primitive.content.isNotEmpty()
+        primitive.content.toBooleanStrictOrNull()?.let { return it }
+        return primitive.content.toDoubleOrNull()?.let { it != 0.0 && !it.isNaN() } ?: false
+    }
+
+    /**
+     * Every `buff` under [ownerId], walking through **`folder`s only**, to [MAX_BUFF_DEPTH]
+     * (addendum 2 item 3). A buff behind a `branch`, `savingThrow`, `roll` or `toggle` is
+     * conditional; one under a child `trigger` is applied by that trigger's own event, not by the
+     * use; one under a nested `action`/`spell` belongs to that property's use. None is promised.
+     *
+     * A buff's own children are not walked either: the walk collects the buff and stops.
+     */
+    private fun buffsUnder(
+        ownerId: String,
+        childrenByParent: Map<String?, List<JsonObject>>,
+    ): List<JsonObject> {
+        val collected = mutableListOf<JsonObject>()
+
+        fun walk(parentId: String, depth: Int) {
+            if (depth > MAX_BUFF_DEPTH) return
+            for (child in childrenByParent[parentId].orEmpty()) {
+                val childId = child.string("_id") ?: continue
+                when (child.string("type")) {
+                    TYPE_BUFF -> collected += child
+                    TYPE_FOLDER -> walk(childId, depth + 1)
+                    else -> Unit
+                }
+            }
+        }
+        walk(ownerId, 0)
+        return collected
     }
 
     // -----------------------------------------------------------------------

@@ -93,6 +93,36 @@ object ContractFixtures {
     val templateBuffId: String = fakeId("buff-template")
     val removedBuffId: String = fakeId("buff-removed")
     val buffOwnerActionId: String = fakeId("buff-owner-action")
+    // FR-59 stage 1 (22 R7): one resource row per arm of the `charge-consumers` vector, so every
+    // arm's answer is observable on its own row — see `chargeConsumerSheetBody`.
+    val consumerDirectResourceId: String = fakeId("consumer-resource-direct")
+    val consumerDirectActionId: String = fakeId("consumer-action-direct")
+    val consumerDirectBuffId: String = fakeId("consumer-buff-direct")
+    val consumerTriggerResourceId: String = fakeId("consumer-resource-trigger")
+    val consumerTriggerActionId: String = fakeId("consumer-action-trigger")
+    val consumerTriggerId: String = fakeId("consumer-trigger")
+    val consumerTriggerBuffId: String = fakeId("consumer-buff-trigger")
+    val consumerSpellTypedTriggerId: String = fakeId("consumer-trigger-spell-typed")
+    val consumerStrippedResourceId: String = fakeId("consumer-resource-stripped")
+    val consumerStrippedActionId: String = fakeId("consumer-action-stripped")
+    val consumerStrippedTriggerId: String = fakeId("consumer-trigger-stripped")
+    val consumerSubsetResourceId: String = fakeId("consumer-resource-subset")
+    val consumerSubsetActionId: String = fakeId("consumer-action-subset")
+    val consumerInactiveResourceId: String = fakeId("consumer-resource-inactive")
+    val consumerInactiveActionId: String = fakeId("consumer-action-inactive")
+    val consumerRemovedResourceId: String = fakeId("consumer-resource-removed")
+    val consumerRemovedActionId: String = fakeId("consumer-action-removed")
+    val consumerSpellResourceId: String = fakeId("consumer-resource-spell")
+    val consumerSpellId: String = fakeId("consumer-spell")
+    val consumerTwofoldResourceId: String = fakeId("consumer-resource-twofold")
+    val consumerTwofoldActionId: String = fakeId("consumer-action-twofold")
+    val consumerTargetedResourceId: String = fakeId("consumer-resource-targeted")
+    val consumerTargetedActionId: String = fakeId("consumer-action-targeted")
+    val consumerZeroResourceId: String = fakeId("consumer-resource-zero")
+    val consumerZeroActionId: String = fakeId("consumer-action-zero")
+    val consumerSharedResourceId: String = fakeId("consumer-resource-shared")
+    val consumerSharedFirstActionId: String = fakeId("consumer-action-shared-first")
+    val consumerSharedSecondActionId: String = fakeId("consumer-action-shared-second")
 
     val downedHitPointsId: String = fakeId("death-save-hit-points")
     val rageToggleId: String = fakeId("toggle-rage")
@@ -950,12 +980,14 @@ object ContractFixtures {
         silent: Boolean = false,
         descriptionSource: String? = null,
         descriptionRendered: String? = null,
+        /** FR-59 R2: only `"self"` buffs make a charge consumer; the default is every probed buff's. */
+        target: String = "self",
     ): JsonObject = buildJsonObject {
         put("_id", id)
         put("type", "buff")
         put("name", name)
         put("order", order)
-        put("target", "self")
+        put("target", target)
         put("parent", buildJsonObject { put("id", parentId); put("collection", parentCollection) })
         if (silent) put("silent", true)
         if (inactive) {
@@ -990,6 +1022,450 @@ object ContractFixtures {
                 )
             },
         )
+    }
+
+    /**
+     * FR-59 stage 1's discovery rule (22 R1/R2) — one `resource` row per arm, each consumed by
+     * the property that arm is about, so the answer for every arm is the `consumers` array on its
+     * own row and no arm can mask another.
+     *
+     * The rows that get NO consumers are the interesting half, and each is a near-miss of a row
+     * that does: the stripped trigger is the trigger arm minus one field; the subset arm is the
+     * trigger arm with one extra target tag; the inactive and removed arms are the direct arm with
+     * one flag; the targeted arm is the direct arm with `target` changed; the zero arm is the direct
+     * arm at quantity 0. A consumer that skipped any one rule would put a consumer on exactly one
+     * row that should have none.
+     *
+     * Every buff under an action or a trigger is written as the TEMPLATE the library ships —
+     * `deactivatedByAncestor` and `inactive` set — because that is what a buff a use *would* apply
+     * looks like on a sheet; R2 says the flag is expected there and is not a filter.
+     *
+     * The trigger arm also carries a second complete trigger on the same tag whose
+     * `actionPropertyType` is `spell`: it fires for spells, not for this action, so the action's
+     * `applies` stays a single name. A reader that skipped the type comparison would see two buffs
+     * and print none.
+     */
+    fun chargeConsumerSheetBody(): JsonObject = snapshotBody(
+        creature = creature(),
+        properties = listOf(
+            // (1) a buff that is a direct descendant of the action — through a folder.
+            consumerResource(consumerDirectResourceId, "Direct Charges", "directCharges", order = 1),
+            consumerAction(consumerDirectActionId, "action", "Direct Form", consumes = "directCharges", order = 10),
+            folder(id = fakeId("consumer-folder-direct"), name = "Effects", tags = emptyList(), parentId = consumerDirectActionId, order = 11),
+            buff(
+                id = consumerDirectBuffId, name = "An applied direct buff", order = 12,
+                parentId = fakeId("consumer-folder-direct"), parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (2) a buff held by a live trigger carrying all three fields, tag-matched to the action.
+            consumerResource(consumerTriggerResourceId, "Trigger Charges", "triggerCharges", order = 2),
+            consumerAction(
+                consumerTriggerActionId, "action", "Trigger Form", consumes = "triggerCharges", order = 20,
+                tags = listOf("triggerForm"),
+            ),
+            consumerTrigger(consumerTriggerId, "Form Trigger", targetTags = listOf("triggerForm"), order = 21),
+            buff(
+                id = consumerTriggerBuffId, name = "An applied form buff", order = 22,
+                parentId = consumerTriggerId, parentCollection = "creatureProperties", inactive = true,
+            ),
+            consumerTrigger(
+                consumerSpellTypedTriggerId, "Spell-Only Trigger", targetTags = listOf("triggerForm"), order = 23,
+                actionPropertyType = "spell",
+            ),
+            buff(
+                id = fakeId("consumer-buff-spell-typed"), name = "A buff for spells only", order = 24,
+                parentId = consumerSpellTypedTriggerId, parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (3) the same trigger with `actionPropertyType` stripped — the imported library's
+            // shape (BUG-27). The server never files it, so it is not a consumer on that basis.
+            consumerResource(consumerStrippedResourceId, "Stripped Charges", "strippedCharges", order = 3),
+            consumerAction(
+                consumerStrippedActionId, "action", "Stripped Form", consumes = "strippedCharges", order = 30,
+                tags = listOf("strippedForm"),
+            ),
+            consumerTrigger(
+                consumerStrippedTriggerId, "Stripped Trigger", targetTags = listOf("strippedForm"), order = 31,
+                actionPropertyType = null,
+            ),
+            buff(
+                id = fakeId("consumer-buff-stripped"), name = "A buff behind a stripped trigger", order = 32,
+                parentId = consumerStrippedTriggerId, parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (4) a complete trigger whose targetTags are NOT a subset of the action's tags.
+            consumerResource(consumerSubsetResourceId, "Subset Charges", "subsetCharges", order = 4),
+            consumerAction(
+                consumerSubsetActionId, "action", "Subset Form", consumes = "subsetCharges", order = 40,
+                tags = listOf("subsetForm"),
+            ),
+            consumerTrigger(
+                fakeId("consumer-trigger-subset"), "Wider Trigger", targetTags = listOf("subsetForm", "otherTag"),
+                order = 41,
+            ),
+            buff(
+                id = fakeId("consumer-buff-subset"), name = "A buff behind a wider trigger", order = 42,
+                parentId = fakeId("consumer-trigger-subset"), parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (5) an inactive action with a direct-child self buff.
+            consumerResource(consumerInactiveResourceId, "Inactive Charges", "inactiveCharges", order = 5),
+            consumerAction(
+                consumerInactiveActionId, "action", "Switched-Off Form", consumes = "inactiveCharges", order = 50,
+                inactive = true,
+            ),
+            buff(
+                id = fakeId("consumer-buff-inactive"), name = "A buff under a switched-off action", order = 51,
+                parentId = consumerInactiveActionId, parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (6) a removed action with a direct-child self buff (delivered: the server still sends it).
+            consumerResource(consumerRemovedResourceId, "Removed Charges", "removedCharges", order = 6),
+            consumerAction(
+                consumerRemovedActionId, "action", "Removed Form", consumes = "removedCharges", order = 60,
+                removed = true,
+            ),
+            buff(
+                id = fakeId("consumer-buff-removed"), name = "A buff under a removed action", order = 61,
+                parentId = consumerRemovedActionId, parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (7) a SPELL consumer.
+            consumerResource(consumerSpellResourceId, "Spell Charges", "spellCharges", order = 7),
+            consumerAction(consumerSpellId, "spell", "Companion Spell", consumes = "spellCharges", order = 70),
+            buff(
+                id = fakeId("consumer-buff-spell"), name = "A companion buff", order = 71,
+                parentId = consumerSpellId, parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (8) two qualifying buffs on one action — a consumer, with `applies: null`.
+            consumerResource(consumerTwofoldResourceId, "Twofold Charges", "twofoldCharges", order = 8),
+            consumerAction(consumerTwofoldActionId, "action", "Twofold Form", consumes = "twofoldCharges", order = 80),
+            buff(
+                id = fakeId("consumer-buff-twofold-a"), name = "A first buff", order = 81,
+                parentId = consumerTwofoldActionId, parentCollection = "creatureProperties", inactive = true,
+            ),
+            buff(
+                id = fakeId("consumer-buff-twofold-b"), name = "A second buff", order = 82,
+                parentId = consumerTwofoldActionId, parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (9) a consumer whose only buff targets someone else — no self buff, not a consumer.
+            consumerResource(consumerTargetedResourceId, "Targeted Charges", "targetedCharges", order = 9),
+            consumerAction(consumerTargetedActionId, "action", "Targeted Form", consumes = "targetedCharges", order = 90),
+            buff(
+                id = fakeId("consumer-buff-targeted"), name = "A buff for the target", order = 91,
+                parentId = consumerTargetedActionId, parentCollection = "creatureProperties", inactive = true,
+                target = "target",
+            ),
+
+            // (10) a cost of quantity 0 — it names the resource and spends none of it.
+            consumerResource(consumerZeroResourceId, "Zero Charges", "zeroCharges", order = 10),
+            consumerAction(
+                consumerZeroActionId, "action", "Free Form", consumes = "zeroCharges", order = 100, quantity = 0,
+            ),
+            buff(
+                id = fakeId("consumer-buff-zero"), name = "A buff that costs nothing", order = 101,
+                parentId = consumerZeroActionId, parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (11) two consumers of one resource, declared in the opposite of their `order`.
+            consumerResource(consumerSharedResourceId, "Shared Charges", "sharedCharges", order = 11),
+            consumerAction(
+                consumerSharedSecondActionId, "action", "Second Shared Form", consumes = "sharedCharges", order = 111,
+            ),
+            buff(
+                id = fakeId("consumer-buff-shared-second"), name = "A second shared buff", order = 112,
+                parentId = consumerSharedSecondActionId, parentCollection = "creatureProperties", inactive = true,
+            ),
+            consumerAction(
+                consumerSharedFirstActionId, "action", "First Shared Form", consumes = "sharedCharges", order = 110,
+            ),
+            buff(
+                id = fakeId("consumer-buff-shared-first"), name = "A first shared buff", order = 113,
+                parentId = consumerSharedFirstActionId, parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // --- Addendum 2 (design 22): one arm per rule the export states. ---
+
+            // (12-16) near-misses of the trigger arm, one field or flag each.
+            *triggerArm("noevent", "No-Event", order = 120, event = null),
+            *triggerArm("notiming", "No-Timing", order = 125, timing = null),
+            *triggerArm("oddtiming", "Odd-Timing", order = 130, timing = "whenever"),
+            *triggerArm("inactivetrigger", "Inactive-Trigger", order = 135, inactive = true),
+            *triggerArm("emptytags", "Empty-Tags", order = 140, targetTags = emptyList()),
+            // (17) an extraTags arm with operation NOT — the server may cancel the match.
+            *triggerArm("nottags", "Not-Tags", order = 145, notExtraTags = listOf("otherTag")),
+            // (18) a condition false at rest; (19) the same condition true at rest — counted.
+            *triggerArm("falsecondition", "False-Condition", order = 150, condition = false),
+            *triggerArm("truecondition", "True-Condition", order = 155, condition = true),
+            // (20) timing `afterChildren` — one of the engine's own options, counted.
+            *triggerArm("afterchildren", "After-Children", order = 160, timing = "afterChildren"),
+
+            // (21) a buff behind a branch under the action — conditional, not promised.
+            consumerResource(fakeId("consumer-resource-branch"), "Branch Charges", "branchCharges", order = 21),
+            consumerAction(fakeId("consumer-action-branch"), "action", "Branch Form", consumes = "branchCharges", order = 170),
+            consumerChild(fakeId("consumer-branch"), "branch", "On a hit", fakeId("consumer-action-branch"), order = 171),
+            buff(
+                id = fakeId("consumer-buff-branch"), name = "A buff behind a branch", order = 172,
+                parentId = fakeId("consumer-branch"), parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (22) a buff under a CHILD trigger of the action — that trigger's own event fires it.
+            consumerResource(fakeId("consumer-resource-childtrigger"), "Child-Trigger Charges", "childTriggerCharges", order = 22),
+            consumerAction(
+                fakeId("consumer-action-childtrigger"), "action", "Child-Trigger Form", consumes = "childTriggerCharges",
+                order = 175,
+            ),
+            consumerTrigger(
+                fakeId("consumer-trigger-child"), "On Rest", targetTags = emptyList(), order = 176,
+                event = "anyRest", actionPropertyType = null, parentId = fakeId("consumer-action-childtrigger"),
+            ),
+            buff(
+                id = fakeId("consumer-buff-childtrigger"), name = "A buff under a child trigger", order = 177,
+                parentId = fakeId("consumer-trigger-child"), parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (23) a buff under a NESTED action — that action's use applies it, not this one's.
+            consumerResource(fakeId("consumer-resource-nested"), "Nested Charges", "nestedCharges", order = 23),
+            consumerAction(fakeId("consumer-action-nested-outer"), "action", "Outer Form", consumes = "nestedCharges", order = 180),
+            consumerChild(fakeId("consumer-action-nested-inner"), "action", "Inner Action", fakeId("consumer-action-nested-outer"), order = 181),
+            buff(
+                id = fakeId("consumer-buff-nested"), name = "A buff under a nested action", order = 182,
+                parentId = fakeId("consumer-action-nested-inner"), parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (24) a consumer naming the resource TWICE, with its buff behind two folders — one
+            // consumer, one buff.
+            consumerResource(fakeId("consumer-resource-twice"), "Twice Charges", "twiceCharges", order = 24),
+            consumerAction(
+                fakeId("consumer-action-twice"), "action", "Twice Form", consumes = "twiceCharges", order = 185,
+                consumesTwice = true,
+            ),
+            consumerChild(fakeId("consumer-folder-twice-outer"), "folder", "Effects", fakeId("consumer-action-twice"), order = 186),
+            consumerChild(fakeId("consumer-folder-twice-inner"), "folder", "More effects", fakeId("consumer-folder-twice-outer"), order = 187),
+            buff(
+                id = fakeId("consumer-buff-twice"), name = "A buff named once", order = 188,
+                parentId = fakeId("consumer-folder-twice-inner"), parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (25) two resource rows sharing one variableName — neither gets consumers.
+            consumerResource(fakeId("consumer-resource-shared-name-a"), "Shared-Name Charges A", "sharedNameCharges", order = 25),
+            consumerResource(fakeId("consumer-resource-shared-name-b"), "Shared-Name Charges B", "sharedNameCharges", order = 26),
+            consumerAction(fakeId("consumer-action-shared-name"), "action", "Shared-Name Form", consumes = "sharedNameCharges", order = 190),
+            buff(
+                id = fakeId("consumer-buff-shared-name"), name = "A buff for an ambiguous charge", order = 191,
+                parentId = fakeId("consumer-action-shared-name"), parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (26) a spell cast without a spell slot — a SPELL consumer like any other here; the
+            // flag is what its Use reads (no picker, no slotId).
+            consumerResource(fakeId("consumer-resource-slotless"), "Slotless Charges", "slotlessCharges", order = 27),
+            consumerAction(
+                fakeId("consumer-spell-slotless"), "spell", "Slotless Companion", consumes = "slotlessCharges", order = 195,
+                castWithoutSpellSlots = true,
+            ),
+            buff(
+                id = fakeId("consumer-buff-slotless"), name = "A slotless companion buff", order = 196,
+                parentId = fakeId("consumer-spell-slotless"), parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (27) an unresolved quantity — no computed value — reads 1: a consumer.
+            consumerResource(fakeId("consumer-resource-unresolved"), "Unresolved Charges", "unresolvedCharges", order = 28),
+            consumerAction(
+                fakeId("consumer-action-unresolved"), "action", "Unresolved Form", consumes = "unresolvedCharges", order = 200,
+                quantityUnresolved = true,
+            ),
+            buff(
+                id = fakeId("consumer-buff-unresolved"), name = "A buff at an unresolved cost", order = 201,
+                parentId = fakeId("consumer-action-unresolved"), parentCollection = "creatureProperties", inactive = true,
+            ),
+
+            // (28) rows that are NOT resources never carry consumers, even when a buff-applying
+            // action spends them: a spell slot and a hit die by `variableName`, and a limited-use
+            // action (the row is the action itself, which spends a resource and applies a buff).
+            attribute(
+                id = fakeId("consumer-slot"), name = "Level 1 Spell Slots", attributeType = "spellSlot",
+                total = 2, damage = 0, reset = "longRest", spellSlotLevel = 1, order = 29, variableName = "slotLevel1",
+            ),
+            attribute(
+                id = fakeId("consumer-hit-die"), name = "d8 Hit Dice", attributeType = "hitDice",
+                total = 2, damage = 0, order = 30, variableName = "d8HitDice", hitDiceSize = "d8",
+            ),
+            consumerAction(fakeId("consumer-action-on-slot"), "action", "Slot Form", consumes = "slotLevel1", order = 205),
+            buff(
+                id = fakeId("consumer-buff-on-slot"), name = "A buff on a slot", order = 206,
+                parentId = fakeId("consumer-action-on-slot"), parentCollection = "creatureProperties", inactive = true,
+            ),
+            consumerAction(fakeId("consumer-action-on-hit-die"), "action", "Hit-Die Form", consumes = "d8HitDice", order = 207),
+            buff(
+                id = fakeId("consumer-buff-on-hit-die"), name = "A buff on a hit die", order = 208,
+                parentId = fakeId("consumer-action-on-hit-die"), parentCollection = "creatureProperties", inactive = true,
+            ),
+            limitedUse(
+                id = fakeId("consumer-limited-use"), type = "action", name = "Limited Form", uses = 2, usesUsed = 0,
+                reset = "longRest", order = 210,
+            ),
+        ),
+    )
+
+    /**
+     * One trigger arm: its own resource, an action tagged `<key>Form` that spends it, a trigger on
+     * that tag shaped by the overrides, and a buff under the trigger. The complete shape
+     * (`consumerTriggerResourceId`'s arm) is the default, so each call is one field away from it.
+     */
+    @Suppress("LongParameterList")
+    fun triggerArm(
+        key: String,
+        label: String,
+        order: Int,
+        event: String? = "doActionProperty",
+        timing: String? = "after",
+        inactive: Boolean = false,
+        targetTags: List<String> = listOf("${key}Form"),
+        notExtraTags: List<String>? = null,
+        condition: Boolean? = null,
+    ): Array<JsonObject> = arrayOf(
+        consumerResource(fakeId("consumer-resource-$key"), "$label Charges", "${key}Charges", order = order / 5 - 12),
+        consumerAction(
+            fakeId("consumer-action-$key"), "action", "$label Form", consumes = "${key}Charges", order = order,
+            tags = listOf("${key}Form"),
+        ),
+        consumerTrigger(
+            fakeId("consumer-trigger-$key"), "$label Trigger", targetTags = targetTags, order = order + 1,
+            event = event, timing = timing, inactive = inactive, notExtraTags = notExtraTags, condition = condition,
+        ),
+        buff(
+            id = fakeId("consumer-buff-$key"), name = "A buff behind the $label trigger", order = order + 2,
+            parentId = fakeId("consumer-trigger-$key"), parentCollection = "creatureProperties", inactive = true,
+        ),
+    )
+
+    /** A 2-charge class resource carrying the `variableName` a cost names it by. */
+    fun consumerResource(id: String, name: String, variableName: String, order: Int): JsonObject = attribute(
+        id = id, name = name, attributeType = "resource", total = 2, damage = 0, order = order,
+        reset = "longRest", variableName = variableName,
+    )
+
+    /**
+     * An `action` or `spell` whose `resources.attributesConsumed` names [consumes], in the wire
+     * shape: `quantity` is a `_calculation` wrapper, and the entry carries the server's `statName`.
+     */
+    @Suppress("LongParameterList")
+    fun consumerAction(
+        id: String,
+        type: String,
+        name: String,
+        consumes: String,
+        order: Int,
+        quantity: Int = 1,
+        tags: List<String> = emptyList(),
+        inactive: Boolean = false,
+        removed: Boolean = false,
+        /** Write the `quantity` as an unresolved calculation — no computed `value` (addendum 2 item 5). */
+        quantityUnresolved: Boolean = false,
+        /** Name the resource in TWO `attributesConsumed` entries. */
+        consumesTwice: Boolean = false,
+        /** `castWithoutSpellSlots: true` on a spell (addendum 2 item 1). */
+        castWithoutSpellSlots: Boolean = false,
+        /** `null` → the creature root. */
+        parentId: String? = null,
+    ): JsonObject = buildJsonObject {
+        put("_id", id)
+        put("type", type)
+        put("name", name)
+        put("actionType", "action")
+        if (type == "spell") put("level", 1)
+        if (castWithoutSpellSlots) put("castWithoutSpellSlots", true)
+        put("order", order)
+        put("tags", JsonArray(tags.map { JsonPrimitive(it) }))
+        val entry = buildJsonObject {
+            put("variableName", consumes)
+            put(
+                "quantity",
+                buildJsonObject {
+                    put("calculation", if (quantityUnresolved) "chargeCost" else quantity.toString())
+                    if (!quantityUnresolved) put("value", quantity)
+                },
+            )
+        }
+        put(
+            "resources",
+            buildJsonObject {
+                put("attributesConsumed", JsonArray(if (consumesTwice) listOf(entry, entry) else listOf(entry)))
+                put("itemsConsumed", JsonArray(emptyList()))
+            },
+        )
+        put("parent", if (parentId == null) parentRef(creatureId, "creatures") else parentRef(parentId))
+        if (inactive) put("inactive", true)
+        if (removed) put("removed", true)
+    }
+
+    /** Any other property type in a consumer's subtree — a `branch`, a `folder`, … */
+    fun consumerChild(id: String, type: String, name: String, parentId: String, order: Int): JsonObject =
+        buildJsonObject {
+            put("_id", id)
+            put("type", type)
+            put("name", name)
+            put("order", order)
+            put("parent", parentRef(parentId))
+        }
+
+    /**
+     * A `trigger` in the shape DiceCloud's own editor stores — `event`, `actionPropertyType` and
+     * `timing` all present. Passing `null` for any of the three writes the imported library's
+     * stripped shape (BUG-27) for that field.
+     *
+     * @param notExtraTags writes one `extraTags` arm with `operation: "NOT"` over these tags.
+     * @param condition writes `condition` as a calculation whose computed `value` is this.
+     */
+    @Suppress("LongParameterList")
+    fun consumerTrigger(
+        id: String,
+        name: String,
+        targetTags: List<String>,
+        order: Int,
+        actionPropertyType: String? = "action",
+        event: String? = "doActionProperty",
+        timing: String? = "after",
+        inactive: Boolean = false,
+        notExtraTags: List<String>? = null,
+        condition: Boolean? = null,
+        parentId: String? = null,
+    ): JsonObject = buildJsonObject {
+        put("_id", id)
+        put("type", "trigger")
+        put("name", name)
+        put("order", order)
+        if (event != null) put("event", event)
+        if (actionPropertyType != null) put("actionPropertyType", actionPropertyType)
+        if (timing != null) put("timing", timing)
+        put("targetTags", JsonArray(targetTags.map { JsonPrimitive(it) }))
+        if (notExtraTags != null) {
+            put(
+                "extraTags",
+                JsonArray(
+                    listOf(
+                        buildJsonObject {
+                            put("_id", fakeId("$id-extra"))
+                            put("operation", "NOT")
+                            put("tags", JsonArray(notExtraTags.map { JsonPrimitive(it) }))
+                        },
+                    ),
+                ),
+            )
+        }
+        if (condition != null) {
+            put(
+                "condition",
+                buildJsonObject {
+                    put("calculation", if (condition) "level >= 1" else "level >= 99")
+                    put("value", condition)
+                },
+            )
+        }
+        if (inactive) put("inactive", true)
+        put("parent", if (parentId == null) parentRef(creatureId, "creatures") else parentRef(parentId))
     }
 
     fun snapshotBody(creature: JsonObject, properties: List<JsonObject>): JsonObject = buildJsonObject {

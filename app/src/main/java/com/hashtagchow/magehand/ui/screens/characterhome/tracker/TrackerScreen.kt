@@ -82,6 +82,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.hashtagchow.magehand.R
 import com.hashtagchow.magehand.core.model.DeathSaves
+import com.hashtagchow.magehand.core.model.UseTarget
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.ActionsUiState
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.UseConfirmDialog
+import com.hashtagchow.magehand.ui.screens.characterhome.actions.detailFor
 import com.hashtagchow.magehand.ui.components.DirectEntryDialog
 import com.hashtagchow.magehand.ui.components.DirectEntryKeys
 import com.hashtagchow.magehand.ui.components.DirectEntryKind
@@ -192,6 +196,18 @@ data class TrackerActions(
      * ViewModel is.
      */
     val onConnectionDetails: () -> Unit = {},
+
+    /**
+     * FR-59 stage 1 (22 R5): a consumer row of the charge chooser, confirmed in the Actions tab's
+     * own dialog. Bound to **the same** `CharacterHomeViewModel.use` the Actions tab's button is
+     * bound to, so a use from the tracker is that path and not a copy of it — one `doAction` /
+     * `doCastSpell`, and no pip spend beside it (the action consumes its own cost; a second write
+     * would take two charges).
+     *
+     * Takes a [UseTarget], not an id, for `ActionsScreen`'s reason: a `UseTarget` only exists for
+     * a row the Actions tab's gate passed.
+     */
+    val onUse: (target: UseTarget, slotId: String?, ritual: Boolean) -> Unit = { _, _, _ -> },
 )
 
 /**
@@ -299,6 +315,16 @@ fun TrackerTab(
     modifier: Modifier = Modifier,
     actions: TrackerActions = TrackerActions(),
     shake: ShakeSignal? = null,
+    /**
+     * FR-59 stage 1: the Actions tab's state. The chooser's **consumers come from the board**
+     * ([PipRowState.consumers], discovered in `:core:data`); this supplies only what the board
+     * cannot say — each consumer's
+     * [com.hashtagchow.magehand.ui.screens.characterhome.actions.UseAffordance] and reasons, so the
+     * chooser offers exactly what that tab's Use button would (22 R4/R5), and `usesInFlight`, which
+     * holds the row's own spend while a consumer's use is on the wire (addendum 2 item 7). A screen
+     * whose rows carry no consumers (a local character) passes nothing and the chooser never opens.
+     */
+    useState: ActionsUiState = ActionsUiState(),
 ) {
     // FR-22 (15 decision 5). The dialog is hoisted to the tab rather than owned by each row so
     // that only one can be open, and it is keyed by **id** rather than by a captured row for
@@ -368,6 +394,57 @@ fun TrackerTab(
         )
     }
 
+    // FR-59 stage 1's chooser (22 R3/R4), hoisted and keyed for the buff sheet's reasons: one at
+    // a time, live against a sync, and derived from the LOOKUP so a row that stops existing — or
+    // stops having consumers — closes the sheet rather than offering choices about nothing.
+    var chooserRowId by rememberSaveable { mutableStateOf<String?>(null) }
+    val chooser = chooserRowId
+        ?.takeIf { state.canWrite }
+        ?.let { id -> state.resources.firstOrNull { it.propertyId == id } }
+        ?.let { chargeChooserFor(it, useState) }
+
+    // R5's confirm. The id of the consumer being confirmed, re-resolved through the Actions
+    // tab's own `detailFor` on every frame — so the dialog is the Actions tab's dialog on the
+    // Actions tab's live affordance, and closes (as that tab's does) the moment the use stops
+    // being available.
+    var confirmUseId by rememberSaveable { mutableStateOf<String?>(null) }
+    val confirmUse = confirmUseId?.takeIf { state.canWrite }?.let { useState.detailFor(it)?.use }
+
+    // Addendum 2 item 6: CLEAR, not hide. When the subject goes away — the row, its consumers,
+    // the chosen action's Use, or write access — the remembered id is dropped, so nothing can
+    // reopen by itself when the subject comes back (the review's case: a confirm hidden when
+    // another client spent the last charge reappeared, unprompted, after a rest). Cleared in an
+    // effect rather than during composition, the buff sheet's reason; the lookups above already
+    // keep the stale id from drawing anything in the frame between.
+    val chooserOrphaned = chooserRowId != null && chooser == null
+    LaunchedEffect(chooserOrphaned) { if (chooserOrphaned) chooserRowId = null }
+    val confirmOrphaned = confirmUseId != null && confirmUse == null
+    LaunchedEffect(confirmOrphaned) { if (confirmOrphaned) confirmUseId = null }
+
+    chooser?.let { chooserState ->
+        ChargeChooserSheet(
+            state = chooserState,
+            onUse = { use ->
+                chooserRowId = null
+                confirmUseId = use.target.propertyId
+            },
+            onJustSpend = {
+                // Today's spend write, unchanged — the same `onSpend` the pip would have sent.
+                actions.onSpend(chooserState.rowId)
+                chooserRowId = null
+            },
+            onDismiss = { chooserRowId = null },
+        )
+    }
+
+    confirmUse?.let { use ->
+        UseConfirmDialog(
+            use = use,
+            onConfirm = { slotId, ritual -> actions.onUse(use.target, slotId, ritual) },
+            onDismiss = { confirmUseId = null },
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -379,6 +456,8 @@ fun TrackerTab(
             shake = shake,
             onDirectEntry = { key -> entryKey = key },
             onOpenBuff = { id -> openBuffId = id },
+            onOpenChooser = { id -> chooserRowId = id },
+            usesInFlight = useState.usesInFlight,
         )
 
         // Quiet when healthy, and quiet over the spinner while a redial is in flight —
@@ -406,6 +485,8 @@ private fun TrackerContent(
     shake: ShakeSignal?,
     onDirectEntry: (String) -> Unit,
     onOpenBuff: (String) -> Unit,
+    onOpenChooser: (String) -> Unit,
+    usesInFlight: Set<String> = emptySet(),
 ) {
     Column(Modifier.fillMaxSize()) {
         state.concentratingOn?.let { name ->
@@ -558,7 +639,12 @@ private fun TrackerContent(
                         row = row,
                         testTag = "tracker:resource:${row.propertyId}",
                         canWrite = state.canWrite,
-                        onSpend = actions.onSpend,
+                        // FR-59 R3: a charge with an action behind it asks first. Only the SPEND
+                        // half is rerouted — restore and direct entry keep today's writes — and a
+                        // row with no consumers takes exactly the old path.
+                        onSpend = if (row.spendOpensChooser) onOpenChooser else actions.onSpend,
+                        // Addendum 2 item 7: held while one of this row's consumers is in flight.
+                        spendEnabled = !row.spendBlockedBy(usesInFlight),
                         onRestore = actions.onRestore,
                         onDirectEntry = { onDirectEntry(DirectEntryKeys.resource(row.propertyId)) },
                         modifier = Modifier.shakeOn(shake, row.propertyId),
@@ -1154,6 +1240,11 @@ private fun PipRow(
     onRestore: (String) -> Unit,
     onDirectEntry: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * FR-59 addendum 2 item 7: `false` holds the SPEND half only (filled pips, the − stepper)
+     * while a consumer's use is in flight. Restore and direct entry are untouched.
+     */
+    spendEnabled: Boolean = true,
 ) {
     // FR-30 decision 17's label, composed here because "Hit Dice" is copy and this is the layer
     // that has an `R` class — see [PipRowState.dieSize] for the split, which is the one
@@ -1288,7 +1379,7 @@ private fun PipRow(
                     val filled = index < row.value
                     Pip(
                         filled = filled,
-                        enabled = canWrite,
+                        enabled = canWrite && (!filled || spendEnabled),
                         // 04 §3: "tap pip = spend, tap empty pip = restore". Which pip was
                         // tapped is irrelevant — only whether it was a full one — so the
                         // whole row behaves like one control with two halves.
@@ -1311,7 +1402,7 @@ private fun PipRow(
                     // that draws a bar instead of pips, and a hit-dice row with more than
                     // `MAX_PIPS` dice is reachable (a 9th-level multiclass character).
                     contentDescription = stringResource(R.string.tracker_spend_one, spokenName),
-                    enabled = canWrite && row.value > 0,
+                    enabled = canWrite && row.value > 0 && spendEnabled,
                     onStep = { onSpend(row.propertyId) },
                     testTag = "$testTag:minus",
                 )

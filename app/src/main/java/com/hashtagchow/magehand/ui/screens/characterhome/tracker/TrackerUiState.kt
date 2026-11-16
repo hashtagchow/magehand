@@ -8,6 +8,7 @@ import com.hashtagchow.magehand.ui.components.DirectEntryTarget
 import com.hashtagchow.magehand.core.data.settings.AppSettingsStore
 import com.hashtagchow.magehand.core.model.AppliedBuff
 import com.hashtagchow.magehand.core.model.ConditionToggle
+import com.hashtagchow.magehand.core.model.ChargeConsumer
 import com.hashtagchow.magehand.core.model.ConnectionState
 import com.hashtagchow.magehand.core.model.DamageDefense
 import com.hashtagchow.magehand.core.model.DeathSaves
@@ -241,8 +242,35 @@ data class PipRowState(
      * reach this.
      */
     val dieModifier: Int? = null,
+    /**
+     * FR-59 stage 1 (22 R1): the actions and spells behind this charge that would apply a buff to
+     * the character, carried through from `TrackedResource.consumers` unchanged. Empty on every
+     * row that is not a resource and on most resource rows — which is what keeps those rows
+     * exactly as they were.
+     */
+    val consumers: List<ChargeConsumer> = emptyList(),
 ) {
     val spent: Int get() = (total - value).coerceAtLeast(0)
+
+    /**
+     * Whether this row's **spend** gesture opens the charge chooser instead of writing (22 R3).
+     *
+     * The rule is the list being non-empty and nothing else: the chooser is reachable only through
+     * the spend affordance, which is already inert while [TrackerUiState.canWrite] is false, so a
+     * read-only or snapshot board reaches no chooser exactly as it reaches no spend. Restore is not
+     * gated here at all — a spent pip restores, chooser or not.
+     */
+    val spendOpensChooser: Boolean get() = consumers.isNotEmpty()
+
+    /**
+     * Whether this row's own spend (pip, stepper, and the chooser's *Just spend a charge*) is held
+     * while one of its consumers' uses is on the wire (design 22 addendum 2 item 7). That use takes
+     * a charge itself; a spend beside it would take a second. Restore is never held.
+     *
+     * @param usesInFlight `ActionsUiState.usesInFlight` — the action ids whose use is in flight.
+     */
+    fun spendBlockedBy(usesInFlight: Set<String>): Boolean =
+        consumers.any { it.actionId in usesInFlight }
 
     /**
      * The reset **badge** the row renders on its secondary line — "Long rest" / "Short rest",
@@ -996,6 +1024,7 @@ private fun TrackedResource.toPipRow() = PipRowState(
     kind = kind,
     dieSize = dieSize,
     dieModifier = dieModifier,
+    consumers = consumers,
 )
 
 private fun TrackedResource.toConsumable() = ConsumableState(

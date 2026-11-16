@@ -6,6 +6,7 @@ import com.hashtagchow.magehand.core.data.server.normalizeServerUrl
 import com.hashtagchow.magehand.core.data.server.originOrNull
 import com.hashtagchow.magehand.core.data.tracker.CreatureSheet
 import com.hashtagchow.magehand.core.data.tracker.InventoryEngine
+import com.hashtagchow.magehand.core.data.tracker.ActionEngine
 import com.hashtagchow.magehand.core.data.tracker.TrackerEngine
 import com.hashtagchow.magehand.core.data.write.RestType
 import com.hashtagchow.magehand.core.data.write.WriteOp
@@ -18,6 +19,7 @@ import com.hashtagchow.magehand.core.ddp.MeteorId
 import com.hashtagchow.magehand.core.ddp.ejsonParams
 import com.hashtagchow.magehand.core.model.AppliedBuff
 import com.hashtagchow.magehand.core.model.CatalogCategory
+import com.hashtagchow.magehand.core.model.ChargeConsumer
 import com.hashtagchow.magehand.core.model.CoinKind
 import com.hashtagchow.magehand.core.model.ConditionToggle
 import com.hashtagchow.magehand.core.model.DamageDefense
@@ -212,8 +214,21 @@ object ContractExport {
      * modifier is a label on a row whose only write is the `damage` increment schema 7 already
      * exported — so `ddp/method-vectors.json` is untouched by this bump, which is itself worth
      * stating: a consumer diffing 8 → 9 needs to know there is no new call to implement.
+     *
+     * **10** — FR-53's applied buffs (`#discovery.buffs`, `buffs` on every board, the
+     * `softRemove.turnOffBuff` vectors), FR-55's `#discovery.actions` and BUG-25's
+     * `#text.description`. See each rule's own KDoc below.
+     *
+     * **11** — FR-59 stage 1's charge consumers (`domain/rules.json#discovery.chargeConsumers`,
+     * the `charge-consumers` discovery vector, and `consumers` on every exported row). A bump for
+     * 4–10's reason: the link between a resource and the action that spends it is a field a
+     * client cannot see without being told it is there, and the rule that decides it has two
+     * clauses a literal reading gets wrong — a trigger the server files by three fields before it
+     * compares a tag (BUG-27), and a buff template's `inactive` that is expected rather than a
+     * filter. No new method vector: the writes behind the chooser are `doAction`/`doCastSpell`
+     * (schema 6) and the resource `damage` increment (schema 1), unchanged.
      */
-    const val SCHEMA_VERSION: Int = 10
+    const val SCHEMA_VERSION: Int = 11
 
     /** Where the export lives, relative to the repository root. */
     const val DIRECTORY: String = "contract-export"
@@ -1143,6 +1158,11 @@ object ContractExport {
     /** FR-53's own fixture. See [ContractFixtures.buffSheetBody]. */
     private val buffSheet: CreatureSheet by lazy {
         CreatureSheet.fromSnapshotJson(ContractFixtures.buffSheetBody(), ContractFixtures.creatureId)
+    }
+
+    /** FR-59's own fixture. See [ContractFixtures.chargeConsumerSheetBody]. */
+    private val chargeConsumerSheet: CreatureSheet by lazy {
+        CreatureSheet.fromSnapshotJson(ContractFixtures.chargeConsumerSheetBody(), ContractFixtures.creatureId)
     }
 
     // -----------------------------------------------------------------------
@@ -2347,6 +2367,7 @@ object ContractExport {
             },
         )
         put("buffs", buffsRule())
+        put("chargeConsumers", chargeConsumersRule())
         put("actions", actionsRule())
         put(
             "concentration",
@@ -2427,6 +2448,118 @@ object ContractExport {
             "A client with its own non-DiceCloud characters has no buffs for them: a buff is a " +
                 "`creatureProperty` a spell created. The array is empty, the section is absent, " +
                 "and the turn-off write is unreachable.",
+        )
+    }
+
+    /**
+     * `#discovery.chargeConsumers` — FR-59 stage 1, schema 11 (docs/design/22-charge-consumers.md
+     * R1/R2/R7).
+     *
+     * Stated from the constants `ActionEngine` matches on, so the exported field names and the
+     * ones the engine reads cannot drift. The vector proves each clause; this states the two
+     * that a literal port gets wrong — the three trigger fields, and the template's `inactive`.
+     */
+    private fun chargeConsumersRule(): JsonObject = buildJsonObject {
+        put(
+            "field",
+            "`consumers` is an array on EVERY exported row. It is empty on every row that is not " +
+                "`kind == 'RESOURCE'`, and on every resource row with no consumer — which is most of " +
+                "them. Each entry is `{ actionId, name, kind, applies }`: `actionId` is the " +
+                "`action`/`spell` property's `_id`, the id the client's existing Use takes; `kind` " +
+                "is `ACTION` (Use is `doAction`) or `SPELL` (Use is `doCastSpell`); `name` is the " +
+                "property's own name; `applies` is the one buff's name VERBATIM, or `null` when " +
+                "more than one qualifies. Ordered by the consumer's `order`, then name.",
+        )
+        put(
+            "match",
+            "A property with `type` in {`action`, `spell`}, not `removed`, not `inactive`, with a " +
+                "non-blank `name`, with a `resources.attributesConsumed` entry whose `variableName` " +
+                "equals the resource row's own `variableName` at a quantity >= 1 — AND that would " +
+                "apply at least one buff whose `${ActionEngine.BUFF_TARGET}` is " +
+                "`\"${ActionEngine.BUFF_TARGET_SELF}\"`. Never by name. Every clause is " +
+                "CONSERVATIVE: a buff that might not be applied is not counted, so a client can " +
+                "miss a consumer but must never invent one.",
+        )
+        put(
+            "quantity",
+            "The entry's `quantity` is a calculation. UNRESOLVED (no computed `value`) counts as 1, " +
+                "which is how the cost line already reads it. RESOLVED below 1 (0, or a fraction " +
+                "that truncates to 0) is not a consumer. An action naming the same resource in " +
+                "two entries is still one consumer.",
+        )
+        put(
+            "uniqueVariableName",
+            "Consumers attach only to a resource row whose `variableName` is UNIQUE among the live " +
+                "(not `removed`, not `inactive`) `attributeType: 'resource'` attributes. The server " +
+                "spends whichever attribute the name resolves to, which may not be the row that " +
+                "was tapped — so two rows sharing a name both get an empty array.",
+        )
+        put(
+            "wouldApply",
+            JsonArray(
+                listOf(
+                    "(a) a `buff` under the action reached through `folder` properties ONLY, to " +
+                        "depth 6. Not through `branch`, `savingThrow`, `roll`, `toggle`, a child " +
+                        "`trigger` (its own event fires it, not the use) or a nested " +
+                        "`action`/`spell` (its own use applies it). These buffs are library " +
+                        "TEMPLATES and carry `inactive: true` from `deactivatedByAncestor` — that is " +
+                        "expected and is NOT a filter.",
+                    "(b) a `buff` reached the same way (folders only, depth 6) from a `trigger` " +
+                        "that WILL fire for this action: not `inactive`; " +
+                        "`${ActionEngine.TRIGGER_EVENT} == '${ActionEngine.EVENT_DO_ACTION_PROPERTY}'`; " +
+                        "`${ActionEngine.ACTION_PROPERTY_TYPE}` equal to the consumer's OWN `type` " +
+                        "(`action` or `spell`); `${ActionEngine.TRIGGER_TIMING}` one of " +
+                        ActionEngine.TRIGGER_TIMINGS.joinToString(", ") { "`$it`" } + " (the running " +
+                        "engine's own options); non-empty `targetTags` that are a SUBSET of the " +
+                        "action's own `tags`; NO `${ActionEngine.EXTRA_TAGS}` arm whose " +
+                        "`${ActionEngine.EXTRA_TAGS_OPERATION}` is `${ActionEngine.EXTRA_TAGS_NOT}` " +
+                        "(an `OR` arm is ignored — it can only add matches); and no " +
+                        "`${ActionEngine.TRIGGER_CONDITION}`, or one whose computed `value` is truthy " +
+                        "at rest (true, a non-zero number, a non-empty string; unresolved is not).",
+                    "The server matches triggers against a SUPERSET of the action's `tags` (it " +
+                        "adds the property type, `variableName`, `actionType`, …). Matching on " +
+                        "`tags` alone can miss a consumer and never invents one — keep it that way.",
+                ).map { JsonPrimitive(it) },
+            ),
+        )
+        put(
+            "strippedTriggers",
+            "A trigger missing ANY of `${ActionEngine.TRIGGER_EVENT}`, " +
+                "`${ActionEngine.ACTION_PROPERTY_TYPE}` or `${ActionEngine.TRIGGER_TIMING}` does " +
+                "NOT count, even when its tags match. The server files triggers by those three " +
+                "fields before it compares a tag, so it never fires one — and a library imported " +
+                "without them (every trigger on one probed server) would otherwise put a chooser " +
+                "on a charge whose Use applies nothing. Do not offer what the server will not do.",
+        )
+        put(
+            "applies",
+            "Exactly one qualifying buff (by `_id`) with a non-blank name → its `name`, verbatim: " +
+                "no prefix stripped, no name parsed. Several, or a blank name → `null`, and the " +
+                "chooser row carries no subtitle.",
+        )
+        put(
+            "slotlessSpells",
+            "A spell consumer carrying `${ActionEngine.CAST_WITHOUT_SPELL_SLOTS}: true` is cast " +
+                "WITHOUT a slot: its Use shows no slot picker, sends no `slotId`, and is never " +
+                "blocked on \"no slots\" — the server skips the slot branch for such a spell. " +
+                "This is the shared Use path, so it holds on the Actions surface too.",
+        )
+        put(
+            "chooser",
+            "A resource row with a non-empty `consumers` turns its SPEND gesture into a chooser: one " +
+                "row per consumer, then \"Just spend a charge\" (today's `damage` increment). A " +
+                "consumer row runs that action's EXISTING Use path — its confirm, its slot picker — " +
+                "and sends exactly ONE call; it must NOT also spend the pip, because the action " +
+                "consumes its own cost and a second write takes two charges. While any consumer's " +
+                "use is in flight, the row's own spend and \"Just spend a charge\" are held. " +
+                "When the row, its consumers, the chosen Use or write access goes away, the " +
+                "chooser and its confirm are CLEARED, not hidden. Restore is unchanged, and a row " +
+                "with no consumers behaves exactly as before.",
+        )
+        put(
+            "localCharacters",
+            "A client's own non-DiceCloud characters carry no buffs and no consumers; the array is " +
+                "empty and the chooser never opens.",
         )
     }
 
@@ -3194,6 +3327,60 @@ object ContractExport {
                 )
                 add(
                     discoveryVector(
+                        name = "charge-consumers",
+                        purpose = "FR-59 stage 1's discovery rule " +
+                            "(domain/rules.json#discovery.chargeConsumers): which actions and " +
+                            "spells stand behind a resource's charge AND would put a buff on the " +
+                            "character. One resource row per arm, so every arm's answer is the " +
+                            "`consumers` array on its own row; each rejected arm is one field away " +
+                            "from an accepted one.",
+                        exercises = listOf(
+                            "a buff under the action through a folder — a consumer, `applies` its " +
+                                "name; the buff is an inactive TEMPLATE and that is not a filter",
+                            "a buff held by a live trigger carrying `event`, `actionPropertyType` " +
+                                "and `timing`, tag-matched to the action — a consumer; a second " +
+                                "complete trigger on the same tag typed `spell` is NOT counted for " +
+                                "an action, so `applies` stays one name",
+                            "the same trigger lacking `actionPropertyType` — NOT a consumer",
+                            "a complete trigger whose `targetTags` are not a subset of the " +
+                                "action's tags — NOT a consumer",
+                            "an inactive action — NOT a consumer",
+                            "a removed action, still delivered — NOT a consumer",
+                            "a SPELL consumer — `kind: SPELL`",
+                            "two qualifying buffs — a consumer with `applies: null`",
+                            "a consumer whose only buff targets someone else (no self buff) — absent",
+                            "a cost at quantity 0 — absent",
+                            "two consumers of one resource, declared out of order — ordered by " +
+                                "their own `order`",
+                            "a trigger missing `event` — NOT a consumer",
+                            "a trigger missing `timing` — NOT a consumer",
+                            "a trigger whose `timing` is not one of the engine's options — NOT a consumer",
+                            "an inactive trigger — NOT a consumer",
+                            "a trigger with empty `targetTags` — NOT a consumer",
+                            "a trigger with a NOT `extraTags` arm — NOT a consumer",
+                            "a trigger whose `condition` is false at rest — NOT a consumer",
+                            "a trigger whose `condition` is true at rest — a consumer",
+                            "a trigger timed `afterChildren` — a consumer",
+                            "a buff behind a `branch` under the action — NOT a consumer",
+                            "a buff under a child `trigger` of the action — NOT a consumer",
+                            "a buff under a nested `action` — NOT a consumer",
+                            "a consumer naming the resource twice, its buff behind two folders — " +
+                                "ONE consumer, ONE buff",
+                            "two resource rows sharing one `variableName` — neither gets consumers",
+                            "a `castWithoutSpellSlots` spell — a SPELL consumer (its Use asks for " +
+                                "no slot; see #discovery.chargeConsumers.slotlessSpells)",
+                            "an unresolved `quantity` (no computed value) — reads 1, a consumer",
+                            "a spell slot and a hit die spent by a buff-applying action, and a " +
+                                "limited-use row — NOT resources, so empty `consumers`",
+                        ),
+                        input = ContractFixtures.chargeConsumerSheetBody(),
+                        expected = buildJsonObject {
+                            put("trackerBoard", TrackerEngine.build(chargeConsumerSheet).toJson())
+                        },
+                    ),
+                )
+                add(
+                    discoveryVector(
                         name = "inventory-discovery",
                         purpose = "The inventory board, plus the TRACKER board over the same " +
                             "input. Both engines on one sheet is what makes the missing-quantity " +
@@ -3498,6 +3685,23 @@ object ContractExport {
         put("dieModifier", dieModifier?.let { JsonPrimitive(it) } ?: JsonNull)
         put("sortOrder", sortOrder)
         put("pinned", pinned)
+        // FR-59 R7: `consumers` on EVERY row, an empty array everywhere but a RESOURCE row with
+        // an action behind it — the same "empty is the answer, never a missing key" posture as
+        // `buffs` on the board. See `domain/rules.json#discovery.chargeConsumers`.
+        put("consumers", JsonArray(consumers.map { it.toJson() }))
+    }
+
+    /**
+     * One charge consumer — four plain fields, and this shape is WebHand's API (22 R7).
+     *
+     * `actionId` is the property the client's existing *Use* takes; `kind` (`ACTION` | `SPELL`)
+     * says which of the two Use writes it is; `applies` is the one buff's name verbatim or `null`.
+     */
+    private fun ChargeConsumer.toJson(): JsonObject = buildJsonObject {
+        put("actionId", actionId)
+        put("name", name)
+        put("kind", kind.name)
+        put("applies", applies?.let { JsonPrimitive(it) } ?: JsonNull)
     }
 
     /**
